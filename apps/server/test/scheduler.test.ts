@@ -1,0 +1,175 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Logger, NudgeAgent } from "@nudge/agent";
+import { NudgeStore } from "@nudge/store";
+import { describe, expect, it, vi } from "vitest";
+import { DeliveryService } from "../src/delivery.js";
+import { Scheduler } from "../src/scheduler.js";
+
+const OWNER = "+15551234567";
+
+const logger: Logger = {
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+};
+
+function harness(scheduleContent: string, runTaskResult: string | null = "nudge text") {
+  const dir = mkdtempSync(join(tmpdir(), "nudge-scheduler-"));
+  const schedulePath = join(dir, "SCHEDULE.md");
+  writeFileSync(schedulePath, scheduleContent);
+
+  const store = new NudgeStore(":memory:");
+  store.rememberSpace(OWNER, "space-1", "imessage");
+
+  const sent: { spaceId: string; text: string }[] = [];
+  const sender = {
+    sendToSpace: async (spaceId: string, text: string) => {
+      sent.push({ spaceId, text });
+    },
+  };
+  const runTask = vi.fn(async () => runTaskResult);
+  const agent = { runTask } as unknown as NudgeAgent;
+
+  let now = Date.UTC(2026, 7, 10, 12, 0, 0); // noon UTC
+  const scheduler = new Scheduler({
+    schedulePath,
+    ownerHandle: OWNER,
+    timeZone: "UTC",
+    store,
+    agent,
+    delivery: new DeliveryService(store, sender, logger),
+    logger,
+    now: () => now,
+  });
+
+  return {
+    schedulePath,
+    store,
+    sent,
+    runTask,
+    scheduler,
+    setNow: (at: number) => {
+      now = at;
+    },
+  };
+}
+
+describe("Scheduler", () => {
+  it("fires a due entry once and delivers through the ledger", async () => {
+    const { scheduler, sent, runTask, setNow, store } = harness(
+      "## Afternoon check\nwhen: every day at 13:00\nCheck in with the owner.",
+    );
+
+    await scheduler.tick(); // baseline set at noon; 13:00 not due yet
+    expect(runTask).not.toHaveBeenCalled();
+
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(
+      OWNER,
+      "Afternoon check",
+      "Check in with the owner.",
+    );
+    expect(sent).toEqual([{ spaceId: "space-1", text: "nudge text" }]);
+    expect(store.openOutbound()).toHaveLength(0);
+
+    await scheduler.tick(); // same occurrence must not refire
+    expect(runTask).toHaveBeenCalledOnce();
+
+    setNow(Date.UTC(2026, 7, 11, 13, 0, 30)); // next day fires again
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not back-fill occurrences from before the entry existed", async () => {
+    const { scheduler, runTask, setNow } = harness(
+      "## Early bird\nwhen: every day at 6:00\nGood morning.",
+    );
+    await scheduler.tick(); // first seen at noon — 6:00 already passed today
+    setNow(Date.UTC(2026, 7, 10, 18, 0, 0));
+    await scheduler.tick();
+    expect(runTask).not.toHaveBeenCalled();
+
+    setNow(Date.UTC(2026, 7, 11, 6, 0, 30));
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledOnce();
+  });
+
+  it("completes one-shot entries after firing, even late", async () => {
+    const { scheduler, runTask, setNow } = harness(
+      "## Passport\nwhen: 2026-08-10 09:00 once\nRenew the passport.",
+    );
+    // Noon: the 09:00 target already passed → fire late, then complete.
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledOnce();
+
+    setNow(Date.UTC(2026, 7, 10, 14, 0, 0));
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledOnce();
+  });
+
+  it("stays quiet when the task returns [SILENT]", async () => {
+    const { scheduler, sent, setNow } = harness(
+      "## Check\nwhen: every day at 13:00\nAnything?",
+      null,
+    );
+    setNow(Date.UTC(2026, 7, 10, 13, 1, 0));
+    await scheduler.tick();
+    expect(sent).toEqual([]);
+  });
+
+  it("texts the owner when a hand-edited schedule fails to parse", async () => {
+    const { scheduler, schedulePath, sent, setNow } = harness(
+      "## Fine\nwhen: every day at 13:00\nOk.",
+    );
+    await scheduler.tick();
+    writeFileSync(schedulePath, "## Broken\nwhen: whenever vibes\nDo it.");
+    setNow(Date.UTC(2026, 7, 10, 12, 5, 0));
+    await scheduler.tick();
+    expect(sent.some((message) => message.text.includes("couldn't read part of SCHEDULE.md"))).toBe(
+      true,
+    );
+    // Only notified once for the same broken content.
+    await scheduler.tick();
+    expect(sent.filter((message) => message.text.includes("SCHEDULE.md"))).toHaveLength(1);
+  });
+});
+
+describe("DeliveryService", () => {
+  it("recovers interrupted sends with an honest marker", async () => {
+    const store = new NudgeStore(":memory:");
+    store.rememberSpace(OWNER, "space-1", "imessage");
+    const sent: string[] = [];
+    const delivery = new DeliveryService(
+      store,
+      { sendToSpace: async (_space, text) => void sent.push(text) },
+      logger,
+    );
+
+    // A send the previous process died holding.
+    const interrupted = store.enqueueOutbound(OWNER, "did you make it?", "nudge");
+    store.markOutbound(interrupted, "sending");
+    // A send that never started.
+    store.enqueueOutbound(OWNER, "fresh reminder", "nudge");
+
+    await delivery.recover();
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain("♻️ Recovered reply");
+    expect(sent[0]).toContain("did you make it?");
+    expect(sent[1]).toBe("fresh reminder");
+    expect(store.openOutbound()).toHaveLength(0);
+  });
+
+  it("returns false when no space is known for the handle", async () => {
+    const store = new NudgeStore(":memory:");
+    const delivery = new DeliveryService(
+      store,
+      { sendToSpace: async () => undefined },
+      logger,
+    );
+    await expect(delivery.deliver("+19990000000", "hello", "nudge")).resolves.toBe(false);
+  });
+});
