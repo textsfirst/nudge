@@ -1,0 +1,397 @@
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+export type MessageRole = "user" | "assistant";
+export type OutboundKind = "reply" | "nudge";
+export type OutboundStatus = "pending" | "sending" | "sent" | "failed";
+
+export interface SessionRow {
+  id: number;
+  handle: string;
+  startedAt: number;
+  lastActivityAt: number;
+  endedAt: number | null;
+  endReason: string | null;
+  summary: string | null;
+  carryover: string | null;
+  compactedThrough: number;
+}
+
+export interface MessageRow {
+  id: number;
+  sessionId: number;
+  handle: string;
+  role: MessageRole;
+  content: string;
+  toolPayload: string | null;
+  createdAt: number;
+}
+
+export interface SpaceRow {
+  handle: string;
+  spaceId: string;
+  platform: string;
+  updatedAt: number;
+}
+
+export interface ScheduleStateRow {
+  entryId: string;
+  lastRunAt: number | null;
+  claimedAt: number | null;
+  completed: boolean;
+}
+
+export interface OutboundRow {
+  id: number;
+  handle: string;
+  body: string;
+  kind: OutboundKind;
+  status: OutboundStatus;
+  attempts: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  handle TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_activity_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  end_reason TEXT,
+  summary TEXT,
+  carryover TEXT,
+  compacted_through INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(handle) WHERE ended_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES sessions(id),
+  handle TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tool_payload TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+  content,
+  content='messages',
+  content_rowid='id'
+);
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+  INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.id, old.content);
+END;
+
+CREATE TABLE IF NOT EXISTS spaces (
+  handle TEXT PRIMARY KEY,
+  space_id TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedule_state (
+  entry_id TEXT PRIMARY KEY,
+  last_run_at INTEGER,
+  claimed_at INTEGER,
+  completed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS outbound_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  handle TEXT NOT NULL,
+  body TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outbound_open ON outbound_ledger(status)
+  WHERE status IN ('pending', 'sending');
+
+CREATE TABLE IF NOT EXISTS processed_webhooks (
+  message_id TEXT PRIMARY KEY,
+  processed_at INTEGER NOT NULL
+);
+`;
+
+export class NudgeStore {
+  readonly #db: DatabaseSync;
+
+  constructor(path: string) {
+    if (path !== ":memory:") {
+      mkdirSync(dirname(path), { recursive: true });
+    }
+    this.#db = new DatabaseSync(path);
+    this.#db.exec("PRAGMA journal_mode = WAL");
+    this.#db.exec("PRAGMA foreign_keys = ON");
+    this.#db.exec(SCHEMA);
+  }
+
+  close(): void {
+    this.#db.close();
+  }
+
+  // -- sessions ------------------------------------------------------------
+
+  activeSession(handle: string): SessionRow | undefined {
+    const row = this.#db
+      .prepare("SELECT * FROM sessions WHERE handle = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .get(handle);
+    return row ? toSession(row) : undefined;
+  }
+
+  startSession(handle: string, at = Date.now(), carryover?: string): SessionRow {
+    const result = this.#db
+      .prepare(
+        "INSERT INTO sessions (handle, started_at, last_activity_at, carryover) VALUES (?, ?, ?, ?)",
+      )
+      .run(handle, at, at, carryover ?? null);
+    const session = this.#db
+      .prepare("SELECT * FROM sessions WHERE id = ?")
+      .get(Number(result.lastInsertRowid));
+    if (!session) {
+      throw new Error("Failed to read back the session that was just created");
+    }
+    return toSession(session);
+  }
+
+  touchSession(id: number, at = Date.now()): void {
+    this.#db.prepare("UPDATE sessions SET last_activity_at = ? WHERE id = ?").run(at, id);
+  }
+
+  endSession(id: number, reason: string, at = Date.now()): void {
+    this.#db
+      .prepare("UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL")
+      .run(at, reason, id);
+  }
+
+  setCompaction(id: number, summary: string, throughMessageId: number): void {
+    this.#db
+      .prepare("UPDATE sessions SET summary = ?, compacted_through = ? WHERE id = ?")
+      .run(summary, throughMessageId, id);
+  }
+
+  // -- messages ------------------------------------------------------------
+
+  appendMessage(input: {
+    sessionId: number;
+    handle: string;
+    role: MessageRole;
+    content: string;
+    toolPayload?: string;
+    at?: number;
+  }): MessageRow {
+    const at = input.at ?? Date.now();
+    const result = this.#db
+      .prepare(
+        "INSERT INTO messages (session_id, handle, role, content, tool_payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(input.sessionId, input.handle, input.role, input.content, input.toolPayload ?? null, at);
+    return {
+      id: Number(result.lastInsertRowid),
+      sessionId: input.sessionId,
+      handle: input.handle,
+      role: input.role,
+      content: input.content,
+      toolPayload: input.toolPayload ?? null,
+      createdAt: at,
+    };
+  }
+
+  sessionMessages(sessionId: number, afterMessageId = 0): MessageRow[] {
+    return this.#db
+      .prepare("SELECT * FROM messages WHERE session_id = ? AND id > ? ORDER BY id")
+      .all(sessionId, afterMessageId)
+      .map(toMessage);
+  }
+
+  searchMessages(query: string, limit = 8): MessageRow[] {
+    const terms = query
+      .split(/\s+/)
+      .map((term) => term.replaceAll('"', ""))
+      .filter((term) => term.length > 0)
+      .map((term) => `"${term}"`)
+      .join(" ");
+    if (!terms) return [];
+    return this.#db
+      .prepare(
+        `SELECT messages.* FROM messages_fts
+         JOIN messages ON messages.id = messages_fts.rowid
+         WHERE messages_fts MATCH ?
+         ORDER BY rank LIMIT ?`,
+      )
+      .all(terms, limit)
+      .map(toMessage);
+  }
+
+  // -- spaces --------------------------------------------------------------
+
+  rememberSpace(handle: string, spaceId: string, platform: string, at = Date.now()): void {
+    this.#db
+      .prepare(
+        `INSERT INTO spaces (handle, space_id, platform, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(handle) DO UPDATE SET space_id = excluded.space_id,
+           platform = excluded.platform, updated_at = excluded.updated_at`,
+      )
+      .run(handle, spaceId, platform, at);
+  }
+
+  spaceFor(handle: string): SpaceRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM spaces WHERE handle = ?").get(handle);
+    return row
+      ? {
+          handle: String(row.handle),
+          spaceId: String(row.space_id),
+          platform: String(row.platform),
+          updatedAt: Number(row.updated_at),
+        }
+      : undefined;
+  }
+
+  // -- schedule state ------------------------------------------------------
+
+  scheduleState(entryId: string): ScheduleStateRow {
+    const row = this.#db.prepare("SELECT * FROM schedule_state WHERE entry_id = ?").get(entryId);
+    if (!row) {
+      return { entryId, lastRunAt: null, claimedAt: null, completed: false };
+    }
+    return {
+      entryId,
+      lastRunAt: row.last_run_at === null ? null : Number(row.last_run_at),
+      claimedAt: row.claimed_at === null ? null : Number(row.claimed_at),
+      completed: Number(row.completed) === 1,
+    };
+  }
+
+  /**
+   * Record when an entry was first seen so recurring schedules fire from that
+   * point forward rather than back-filling. No-op for known entries.
+   */
+  ensureScheduleBaseline(entryId: string, at = Date.now()): void {
+    this.#db
+      .prepare("INSERT OR IGNORE INTO schedule_state (entry_id, last_run_at) VALUES (?, ?)")
+      .run(entryId, at);
+  }
+
+  /** Claim an entry for a run. Returns false if it is already claimed or completed. */
+  claimScheduleRun(entryId: string, at = Date.now(), staleClaimMs = 10 * 60 * 1000): boolean {
+    this.#db
+      .prepare("INSERT OR IGNORE INTO schedule_state (entry_id) VALUES (?)")
+      .run(entryId);
+    const result = this.#db
+      .prepare(
+        `UPDATE schedule_state SET claimed_at = ?
+         WHERE entry_id = ? AND completed = 0
+           AND (claimed_at IS NULL OR claimed_at < ?)`,
+      )
+      .run(at, entryId, at - staleClaimMs);
+    return result.changes > 0;
+  }
+
+  finishScheduleRun(entryId: string, ranAt = Date.now(), completed = false): void {
+    this.#db
+      .prepare(
+        "UPDATE schedule_state SET last_run_at = ?, claimed_at = NULL, completed = ? WHERE entry_id = ?",
+      )
+      .run(ranAt, completed ? 1 : 0, entryId);
+  }
+
+  releaseScheduleClaim(entryId: string): void {
+    this.#db.prepare("UPDATE schedule_state SET claimed_at = NULL WHERE entry_id = ?").run(entryId);
+  }
+
+  // -- outbound ledger -----------------------------------------------------
+
+  enqueueOutbound(handle: string, body: string, kind: OutboundKind, at = Date.now()): number {
+    const result = this.#db
+      .prepare(
+        "INSERT INTO outbound_ledger (handle, body, kind, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)",
+      )
+      .run(handle, body, kind, at, at);
+    return Number(result.lastInsertRowid);
+  }
+
+  markOutbound(id: number, status: OutboundStatus, at = Date.now()): void {
+    this.#db
+      .prepare(
+        "UPDATE outbound_ledger SET status = ?, updated_at = ?, attempts = attempts + ? WHERE id = ?",
+      )
+      .run(status, at, status === "sending" ? 1 : 0, id);
+  }
+
+  openOutbound(maxAgeMs = 24 * 60 * 60 * 1000, maxAttempts = 3, now = Date.now()): OutboundRow[] {
+    return this.#db
+      .prepare(
+        `SELECT * FROM outbound_ledger
+         WHERE status IN ('pending', 'sending') AND created_at > ? AND attempts < ?
+         ORDER BY id`,
+      )
+      .all(now - maxAgeMs, maxAttempts)
+      .map(toOutbound);
+  }
+
+  // -- webhook dedupe ------------------------------------------------------
+
+  isWebhookProcessed(messageId: string): boolean {
+    return (
+      this.#db.prepare("SELECT 1 FROM processed_webhooks WHERE message_id = ?").get(messageId) !==
+      undefined
+    );
+  }
+
+  markWebhookProcessed(messageId: string, at = Date.now()): void {
+    this.#db
+      .prepare("INSERT OR IGNORE INTO processed_webhooks (message_id, processed_at) VALUES (?, ?)")
+      .run(messageId, at);
+  }
+}
+
+type Row = Record<string, unknown>;
+
+function toSession(row: Row): SessionRow {
+  return {
+    id: Number(row.id),
+    handle: String(row.handle),
+    startedAt: Number(row.started_at),
+    lastActivityAt: Number(row.last_activity_at),
+    endedAt: row.ended_at === null ? null : Number(row.ended_at),
+    endReason: row.end_reason === null ? null : String(row.end_reason),
+    summary: row.summary === null ? null : String(row.summary),
+    carryover: row.carryover === null ? null : String(row.carryover),
+    compactedThrough: Number(row.compacted_through),
+  };
+}
+
+function toMessage(row: Row): MessageRow {
+  return {
+    id: Number(row.id),
+    sessionId: Number(row.session_id),
+    handle: String(row.handle),
+    role: String(row.role) as MessageRole,
+    content: String(row.content),
+    toolPayload: row.tool_payload === null ? null : String(row.tool_payload),
+    createdAt: Number(row.created_at),
+  };
+}
+
+function toOutbound(row: Row): OutboundRow {
+  return {
+    id: Number(row.id),
+    handle: String(row.handle),
+    body: String(row.body),
+    kind: String(row.kind) as OutboundKind,
+    status: String(row.status) as OutboundStatus,
+    attempts: Number(row.attempts),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+  };
+}
