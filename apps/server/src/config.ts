@@ -159,6 +159,11 @@ export function loadConfig(
         : {}),
       ...(settings.model.fast_mode ? { serviceTier: "priority" as const } : {}),
     },
+    compactionModel: settings.agent.compaction_model,
+    compactionModelOptions: {
+      reasoningEffort: settings.agent.compaction_reasoning_effort,
+      ...(settings.agent.compaction_fast_mode ? { serviceTier: "priority" as const } : {}),
+    },
     dataDir: boot.dataDir,
     dbPath: boot.dbPath,
     systemFilePath: join(boot.dataDir, "SYSTEM.md"),

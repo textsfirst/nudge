@@ -89,6 +89,10 @@ async function main(): Promise<void> {
       compactAtFraction: config.compactAtPercent / 100,
       keepRecentTokens: config.keepRecentTokens,
     },
+    summarizer: {
+      model: config.compactionModel,
+      modelOptions: config.compactionModelOptions,
+    },
     maxToolSteps: config.maxToolSteps,
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,

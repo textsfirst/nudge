@@ -18,6 +18,9 @@ export function windDownSteps(maxToolSteps: number): number {
   return Math.max(WIND_DOWN_MIN_STEPS, Math.round(maxToolSteps / WIND_DOWN_FRACTION));
 }
 
+/** Tool steps with nothing texted to the owner before the silence nudge fires. */
+export const PROGRESS_NUDGE_STEPS = 4;
+
 /** No-progress repeats before the model is warned it looks stuck. */
 export const STALL_WARN_STEPS = 3;
 
@@ -43,15 +46,32 @@ export interface LoopGuard {
  *   something and can say so, or vary the call); only a warned model that
  *   keeps extracting nothing gets stopped.
  *
+ * When `progressTool` is set (the send_update tool is in the set), a turn that
+ * runs several steps without texting the owner anything gets one nudge to send
+ * a line — the model rarely re-considers the option mid-work on its own.
+ *
  * Stateful (the warning fires once per streak), so create one guard per
  * streamText call.
  */
-export function createLoopGuard(options: { maxToolSteps: number; logger: Logger }): LoopGuard {
+export function createLoopGuard(options: {
+  maxToolSteps: number;
+  logger: Logger;
+  progressTool?: boolean;
+}): LoopGuard {
   const windDownAt = options.maxToolSteps - windDownSteps(options.maxToolSteps);
   let warnedSignature: string | undefined;
 
   const prepareStep: PrepareStepFunction<ToolSet> = ({ stepNumber, messages, steps }) => {
     const notes: ModelMessage[] = [];
+    if (options.progressTool && stepNumber === PROGRESS_NUDGE_STEPS && !textedOwner(steps)) {
+      notes.push({
+        role: "user",
+        content:
+          "[System note: several tool steps in and the owner has heard nothing yet. If " +
+          "finishing takes more than another moment, use send_update now to text one short " +
+          "line about what you're doing.]",
+      });
+    }
     if (windDownAt >= 1 && stepNumber === windDownAt) {
       notes.push({
         role: "user",
@@ -91,6 +111,11 @@ export function createLoopGuard(options: { maxToolSteps: number; logger: Logger 
   };
 
   return { prepareStep, stopCondition };
+}
+
+/** Whether any step so far texted the owner via send_update. */
+function textedOwner(steps: Array<StepResult<ToolSet>>): boolean {
+  return steps.some((step) => step.toolCalls.some((call) => call.toolName === "send_update"));
 }
 
 /**

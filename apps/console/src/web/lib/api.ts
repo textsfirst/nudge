@@ -115,13 +115,31 @@ export interface ThreadSummary {
   preview: string | null;
 }
 
+/** One model round trip within a tool-using turn. */
+export interface MessageStepTiming {
+  step: number;
+  modelId: string;
+  finishReason: string;
+  durationMs: number;
+  modelMs: number;
+  ttftMs?: number;
+  outputTps?: number;
+  toolMs?: number;
+  toolCalls?: string[];
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+}
+
 /** Per-turn model metrics; every field is optional — old rows and sparse providers omit some. */
 export interface MessageMetrics {
   provider?: string;
   modelId?: string;
   finishReason?: string;
   steps?: number;
+  stepTimings?: MessageStepTiming[];
   durationMs?: number;
+  modelMs?: number;
   ttftMs?: number;
   outputTps?: number;
   toolMs?: number;

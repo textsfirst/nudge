@@ -16,7 +16,12 @@ export interface ModelSource {
   readonly id: string;
   /** The provider model id (e.g. "gpt-5-mini"), used to look up the context window. */
   readonly modelId: string;
-  languageModel(): Promise<LanguageModel>;
+  /**
+   * `modelOverride` swaps the model id while keeping the source's provider,
+   * endpoint, and auth — how the dedicated compaction model rides the same
+   * connection as replies.
+   */
+  languageModel(modelOverride?: string): Promise<LanguageModel>;
   isAuthError(error: unknown): boolean;
 }
 

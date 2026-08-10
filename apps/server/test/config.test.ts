@@ -100,6 +100,9 @@ describe("loadConfig", () => {
         "agent.context_window_tokens": 64_000,
         "agent.compact_at_percent": 70,
         "agent.keep_recent_tokens": 10_000,
+        "agent.compaction_model": "gpt-5.6-sol",
+        "agent.compaction_reasoning_effort": "low",
+        "agent.compaction_fast_mode": false,
       }),
       boot,
     );
@@ -114,6 +117,9 @@ describe("loadConfig", () => {
     expect(config.contextWindowTokens).toBe(64_000);
     expect(config.compactAtPercent).toBe(70);
     expect(config.keepRecentTokens).toBe(10_000);
+    expect(config.compactionModel).toBe("gpt-5.6-sol");
+    // Fast mode off leaves the priority tier out of the summarizer options.
+    expect(config.compactionModelOptions).toEqual({ reasoningEffort: "low" });
     expect(config.timeZone).toBe("America/New_York");
   });
 

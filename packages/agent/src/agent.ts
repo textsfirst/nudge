@@ -51,6 +51,16 @@ export interface NudgeAgentOptions {
     /** Recent-conversation tokens kept verbatim after a fold (default 20k). */
     keepRecentTokens?: number;
   };
+  /**
+   * Dedicated model for compaction and carryover summaries, run through the
+   * same sources (provider, endpoint, auth) as replies. Absent fields fall
+   * back to the reply model and its options.
+   */
+  summarizer?: {
+    model?: string;
+    /** Provider options for summarizer calls only (reasoningEffort, serviceTier, …). */
+    modelOptions?: OpenAIResponsesProviderOptions;
+  };
   /** Backstop against runaway tool loops (default 256), not a per-task budget — see loop.ts. */
   maxToolSteps?: number;
   /** Firecrawl credentials; when absent the web tools are omitted entirely. */
@@ -73,6 +83,18 @@ export interface NudgeAgentOptions {
 
 const SILENT_PATTERN = /^\s*(\[SILENT\]|NO_REPLY)\s*$/;
 const NEW_THREAD_TOKEN = "[NEW_THREAD]";
+const REACT_TOKEN_PATTERN = /\[REACT:([^\]]{0,16})\]/g;
+/** The emoji iMessage renders as native tapbacks; anything else is dropped. */
+const REACTION_EMOJI = new Set(["❤️", "👍", "👎", "😂", "‼️", "❓"]);
+
+/** The first valid reaction token in the reply, if any; unknown emoji are ignored. */
+function extractReaction(text: string): string | undefined {
+  for (const match of text.matchAll(REACT_TOKEN_PATTERN)) {
+    const emoji = match[1]!.trim();
+    if (REACTION_EMOJI.has(emoji)) return emoji;
+  }
+  return undefined;
+}
 
 /** Consecutive summarizer failures before a session's compaction attempts pause. */
 const MAX_COMPACTION_FAILURES = 3;
@@ -112,7 +134,11 @@ interface TurnMetrics {
   modelId?: string;
   finishReason?: string;
   steps?: number;
+  /** One entry per model round trip, in execution order. */
+  stepTimings?: ModelStepTiming[];
   durationMs?: number;
+  /** Time spent waiting for model responses across every step. */
+  modelMs?: number;
   /** First step's time to first output — the user-perceived latency start. */
   ttftMs?: number;
   /** Output-token-weighted tokens/sec across steps. */
@@ -126,6 +152,25 @@ interface TurnMetrics {
   reasoningTokens?: number;
   /** In-stream retries that preceded the reply; absent when none. */
   retries?: number;
+}
+
+/** Persisted timing and context for one model round trip within a turn. */
+interface ModelStepTiming {
+  /** One-based display index; the SDK's stepNumber is zero-based. */
+  step: number;
+  modelId: string;
+  finishReason: string;
+  /** Whole step, including any client-side tools it invoked. */
+  durationMs: number;
+  /** SDK responseTimeMs: time spent waiting for this model response. */
+  modelMs: number;
+  ttftMs?: number;
+  outputTps?: number;
+  toolMs?: number;
+  toolCalls?: string[];
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
 }
 
 export class NudgeAgent {
@@ -180,6 +225,20 @@ export class NudgeAgent {
    * `onProgress` enables the send_update tool for this turn: the model can
    * text the owner short progress lines mid-turn while it keeps working.
    * Updates live only in the tool trace, never as history rows.
+   *
+   * `onSilent` fires the moment the model's reply is known to be silent —
+   * before the turn is persisted and before any post-turn compaction — so the
+   * transport can drop its typing indicator instead of holding it through
+   * work the owner will never see. Must not throw.
+   *
+   * `onReaction` fires when the reply carries a [REACT:emoji] token — tapback
+   * the owner's latest text with that emoji. The token is stripped from the
+   * reply; alone it makes the turn silent, with text after it both happen.
+   * Fires at the same early moment as `onSilent`. Must not throw.
+   *
+   * `onReplyReady` fires after the assistant turn is persisted but before
+   * post-turn compaction. Transports use it to deliver the reply immediately
+   * while this handle stays serialized until housekeeping finishes.
    */
   reply(
     handle: string,
@@ -187,11 +246,14 @@ export class NudgeAgent {
     options: {
       abortSignal?: AbortSignal;
       onProgress?: (text: string) => Promise<void>;
+      onReaction?: (emoji: string) => void;
+      onSilent?: () => void;
+      onReplyReady?: (text: string) => Promise<void>;
     } = {},
   ): Promise<string | null> {
     return this.#serialized(handle, async () => {
       const now = this.#now();
-      const session = await this.#resolveSession(handle, now);
+      const session = await this.#resolveSession(handle, now, options.abortSignal);
       this.#options.store.appendMessage({
         sessionId: session.id,
         handle,
@@ -203,7 +265,9 @@ export class NudgeAgent {
       // Pre-flight safety net: history grows without a compaction check via
       // runTask appends and interruption notes, and thresholds can change
       // between runs — fold now rather than send an oversized prompt.
-      await this.#compactIfNeeded(session);
+      await this.#compactIfNeeded(session, {
+        ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+      });
 
       const steps: StepResult<ToolSet>[] = [];
       let raw: string;
@@ -243,7 +307,13 @@ export class NudgeAgent {
           // A real overflow despite the estimates (unusual content, an
           // off-registry window): fold hard and give the turn one more try.
           const recoverable = isContextOverflowError(error) && options.abortSignal?.aborted !== true;
-          if (!recoverable || !(await this.#compactIfNeeded(session, { aggressive: true }))) {
+          if (
+            !recoverable ||
+            !(await this.#compactIfNeeded(session, {
+              aggressive: true,
+              ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+            }))
+          ) {
             throw error;
           }
           this.#options.logger.warn(
@@ -264,6 +334,19 @@ export class NudgeAgent {
       if (!reply) {
         throw new Error("The model returned an empty response");
       }
+      options.abortSignal?.throwIfAborted();
+      const reaction = extractReaction(reply);
+      if (reaction) {
+        options.onReaction?.(reaction);
+      }
+      const cleaned = reply
+        .replaceAll(NEW_THREAD_TOKEN, "")
+        .replaceAll(REACT_TOKEN_PATTERN, "")
+        .trim();
+      const silent = !cleaned || SILENT_PATTERN.test(cleaned);
+      if (silent) {
+        options.onSilent?.();
+      }
       const metrics = serializeMetrics(usage);
       this.#options.store.appendMessage({
         sessionId: session.id,
@@ -278,15 +361,21 @@ export class NudgeAgent {
       });
       this.#options.store.touchSession(session.id, this.#now());
 
+      if (!silent && options.onReplyReady) {
+        options.abortSignal?.throwIfAborted();
+        await options.onReplyReady(cleaned);
+      }
+
       const wantsReset = reply.includes(NEW_THREAD_TOKEN);
       if (wantsReset) {
         this.#endSession(session, "requested");
       } else {
-        await this.#compactIfNeeded(session);
+        await this.#compactIfNeeded(session, {
+          ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+        });
       }
 
-      const cleaned = reply.replaceAll(NEW_THREAD_TOKEN, "").trim();
-      return !cleaned || SILENT_PATTERN.test(cleaned) ? null : cleaned;
+      return silent ? null : cleaned;
     });
   }
 
@@ -324,7 +413,12 @@ export class NudgeAgent {
         tools: this.#tools,
       });
 
-      const reply = raw.trim().replaceAll(NEW_THREAD_TOKEN, "").trim();
+      // A scheduled turn has no owner message to react to — strip stray tokens.
+      const reply = raw
+        .trim()
+        .replaceAll(NEW_THREAD_TOKEN, "")
+        .replaceAll(REACT_TOKEN_PATTERN, "")
+        .trim();
       if (!reply || SILENT_PATTERN.test(reply)) {
         return null;
       }
@@ -352,7 +446,11 @@ export class NudgeAgent {
     return this.#options.now?.() ?? Date.now();
   }
 
-  async #resolveSession(handle: string, now: number): Promise<SessionRow> {
+  async #resolveSession(
+    handle: string,
+    now: number,
+    abortSignal?: AbortSignal,
+  ): Promise<SessionRow> {
     const active = this.#options.store.activeSession(handle);
     if (active) {
       const reason = this.#rolloverReason(active, now);
@@ -361,8 +459,9 @@ export class NudgeAgent {
       }
       let carryover: string | undefined;
       try {
-        carryover = await this.#summarizeSession(active);
+        carryover = await this.#summarizeSession(active, abortSignal);
       } catch (error) {
+        abortSignal?.throwIfAborted();
         this.#options.logger.warn("Carryover summary failed; starting the thread without one", {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -476,8 +575,9 @@ export class NudgeAgent {
    */
   async #compactIfNeeded(
     session: SessionRow,
-    opts: { aggressive?: boolean } = {},
+    opts: { aggressive?: boolean; abortSignal?: AbortSignal } = {},
   ): Promise<boolean> {
+    if (opts.abortSignal?.aborted) return false;
     const store = this.#options.store;
     const current = store.activeSession(session.handle);
     if (!current || current.id !== session.id) return false;
@@ -499,6 +599,7 @@ export class NudgeAgent {
       const summary = await this.#summarizeText({
         previousSummary: current.summary,
         transcript: transcript(plan.fold),
+        ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
       });
       store.setCompaction(session.id, summary, last.id);
       this.#compactionFailures.delete(session.id);
@@ -509,6 +610,9 @@ export class NudgeAgent {
       });
       return true;
     } catch (error) {
+      // Steering is expected control flow, not a summarizer failure. Leave the
+      // fold cursor untouched and let the replacement turn try again later.
+      if (opts.abortSignal?.aborted) return false;
       this.#compactionFailures.set(session.id, failures + 1);
       const message = error instanceof Error ? error.message : String(error);
       // When the prompt would genuinely overflow, an unsummarized fold beats a
@@ -534,11 +638,12 @@ export class NudgeAgent {
     }
   }
 
-  async #summarizeSession(session: SessionRow): Promise<string> {
+  async #summarizeSession(session: SessionRow, abortSignal?: AbortSignal): Promise<string> {
     const messages = this.#options.store.sessionMessages(session.id, session.compactedThrough);
     return this.#summarizeText({
       previousSummary: session.summary,
       transcript: transcript(messages),
+      ...(abortSignal ? { abortSignal } : {}),
     });
   }
 
@@ -549,11 +654,16 @@ export class NudgeAgent {
    * the oldest are the ones already covered by the previous summary — so the
    * summarization call itself can never overflow.
    */
-  #summarizeText(input: { previousSummary: string | null; transcript: string }): Promise<string> {
+  #summarizeText(input: {
+    previousSummary: string | null;
+    transcript: string;
+    abortSignal?: AbortSignal;
+  }): Promise<string> {
     const capped = truncateTail(input.transcript, {
       maxBytes: SUMMARIZER_INPUT_MAX_BYTES,
       maxLines: Number.MAX_SAFE_INTEGER,
     });
+    const summarizer = this.#options.summarizer;
     return this.#generate({
       system: input.previousSummary ? UPDATE_SUMMARY_PROMPT : FRESH_SUMMARY_PROMPT,
       messages: [
@@ -565,6 +675,9 @@ export class NudgeAgent {
             capped.text,
         },
       ],
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      ...(summarizer?.model ? { modelOverride: summarizer.model } : {}),
+      ...(summarizer?.modelOptions ? { modelOptions: summarizer.modelOptions } : {}),
     }).then((result) => {
       const text = result.text.trim();
       if (!text) throw new Error("The summarizer returned an empty summary");
@@ -577,18 +690,23 @@ export class NudgeAgent {
     messages: ModelMessage[];
     tools?: ToolSet;
     abortSignal?: AbortSignal;
+    /** Run on this model id instead of each source's own (the summarizer path). */
+    modelOverride?: string;
+    /** Provider options replacing the agent-wide ones for this call. */
+    modelOptions?: OpenAIResponsesProviderOptions;
     /** Collects finished steps as they land, so an aborted run can report the tool calls it already made. */
     stepSink?: StepResult<ToolSet>[];
     /** Fires after each step lands in stepSink — the live-progress hook. */
     onStep?: () => void;
   }): Promise<{ text: string; toolPayload?: string; usage?: TurnMetrics }> {
     const sources = this.#options.sources;
+    const modelOptions = params.modelOptions ?? this.#options.modelOptions;
     for (let index = 0; index < sources.length; index += 1) {
       const source = sources[index]!;
       if (params.stepSink) params.stepSink.length = 0;
       try {
         let retries = 0;
-        const model = withStreamRetry(await source.languageModel(), {
+        const model = withStreamRetry(await source.languageModel(params.modelOverride), {
           ...this.#options.streamRetry,
           logger: this.#options.logger,
           onRetry: () => {
@@ -597,7 +715,11 @@ export class NudgeAgent {
         });
         // Stateful (once-per-streak warning), so one guard per attempt.
         const guard = params.tools
-          ? createLoopGuard({ maxToolSteps: this.#maxToolSteps, logger: this.#options.logger })
+          ? createLoopGuard({
+              maxToolSteps: this.#maxToolSteps,
+              logger: this.#options.logger,
+              progressTool: "send_update" in params.tools,
+            })
           : undefined;
         // streamText never rejects: API and mid-stream failures surface only
         // through onError, and the result reads as an empty (or truncated)
@@ -628,7 +750,7 @@ export class NudgeAgent {
           onError: ({ error }) => {
             streamErrors.push(error);
           },
-          providerOptions: { openai: { ...this.#options.modelOptions, store: false } },
+          providerOptions: { openai: { ...modelOptions, store: false } },
         });
         // Resolving .text consumes the complete SSE response (all tool steps included).
         let text = await result.text;
@@ -780,6 +902,7 @@ function turnMetrics(
   }
 
   const durationMs = sumDefined(steps.map((step) => step.performance.stepTimeMs));
+  const modelMs = sumDefined(steps.map((step) => step.performance.responseTimeMs));
   const ttftMs = steps[0]?.performance.timeToFirstOutputMs;
   const toolMs = sumDefined(
     steps.map((step) => sumDefined(Object.values(step.performance.toolExecutionMs))),
@@ -807,6 +930,31 @@ function turnMetrics(
   const reasoningTokens = sumDefined(
     steps.map((step) => step.usage.outputTokenDetails.reasoningTokens),
   );
+  const stepTimings = steps.map((step): ModelStepTiming => {
+    const stepToolMs = sumDefined(Object.values(step.performance.toolExecutionMs));
+    const toolCalls = step.toolCalls.map((call) => call.toolName);
+    const reasoning = step.usage.outputTokenDetails.reasoningTokens;
+    return {
+      step: step.stepNumber + 1,
+      modelId: step.model.modelId,
+      finishReason: step.finishReason,
+      durationMs: Math.round(step.performance.stepTimeMs),
+      modelMs: Math.round(step.performance.responseTimeMs),
+      ...(step.performance.timeToFirstOutputMs !== undefined
+        ? { ttftMs: Math.round(step.performance.timeToFirstOutputMs) }
+        : {}),
+      ...(step.performance.outputTokensPerSecond !== undefined
+        ? { outputTps: Math.round(step.performance.outputTokensPerSecond * 10) / 10 }
+        : {}),
+      ...(stepToolMs !== undefined && stepToolMs > 0
+        ? { toolMs: Math.round(stepToolMs) }
+        : {}),
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(step.usage.inputTokens !== undefined ? { inputTokens: step.usage.inputTokens } : {}),
+      ...(step.usage.outputTokens !== undefined ? { outputTokens: step.usage.outputTokens } : {}),
+      ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
+    };
+  });
 
   return {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
@@ -815,7 +963,9 @@ function turnMetrics(
     modelId: last.model.modelId,
     finishReason: last.finishReason,
     steps: steps.length,
+    stepTimings,
     ...(durationMs !== undefined ? { durationMs: Math.round(durationMs) } : {}),
+    ...(modelMs !== undefined ? { modelMs: Math.round(modelMs) } : {}),
     ...(ttftMs !== undefined ? { ttftMs: Math.round(ttftMs) } : {}),
     ...(outputTps !== undefined ? { outputTps: Math.round(outputTps * 10) / 10 } : {}),
     ...(toolMs !== undefined && toolMs > 0 ? { toolMs: Math.round(toolMs) } : {}),

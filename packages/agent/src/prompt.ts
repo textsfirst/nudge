@@ -25,6 +25,8 @@ are no user commands — everything is natural conversation.
 
 Reply tokens:
 - Reply exactly [SILENT] when no reply is needed (bare "ok", "thanks").
+- Reply [REACT:👍] to tapback the owner's last text instead of typing — ❤️ 👍
+  👎 😂 ‼️ ❓ only. Alone it is a complete reply; put text after it to do both.
 - Append [NEW_THREAD] when the owner asks to start over; it is stripped before
   sending and the thread resets afterward.
 
@@ -57,10 +59,13 @@ Use it for file operations (ls, grep, wc, find) and quick computation. Do not
 use it to bypass the file tools' validation of SCHEDULE.md and memory files.`;
 
 /** Appended only on the reply path, where the send_update tool is in the set. */
-const PROGRESS_TOOL_GUIDANCE = `send_update texts the owner one short progress line while you keep working.
-When a task will clearly take many steps, send one natural line before diving
-in ("let me check your calendar"), then more only sparingly. Most turns need
-none, and it never replaces the reply you finish the turn with.`;
+const PROGRESS_TOOL_GUIDANCE = `send_update texts the owner one short line while you keep working — it is how
+you say "on it" without ending your turn. When a request will take more than a
+moment (several lookups, web research, a run of commands), send a quick ack in
+your usual voice ("on it", "give me a sec, checking") before you start, and
+another short line if the work drags or changes shape. Quick one-tool-call
+answers don't need one. It never replaces the reply you finish the turn with,
+and that reply shouldn't repeat the updates.`;
 
 /** One line per connected Google account, only when bash carries the gws shim. */
 function googleGuidance(accounts: GoogleAccountRef[]): string {

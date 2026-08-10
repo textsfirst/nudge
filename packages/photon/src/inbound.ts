@@ -61,8 +61,8 @@ interface RunningBatch {
 
 /**
  * Filters inbound messages (owner-only, iMessage-only, deduplicated) and
- * debounces bursts of consecutive texts into a single batch per handle, so a
- * flurry of short messages gets one considered reply instead of several.
+ * briefly coalesces consecutive deliveries into a single batch per handle,
+ * then relies on steering for any follow-up that arrives after work begins.
  *
  * A message arriving while a reply is already being generated steers it: the
  * in-flight run's signal aborts immediately, and the new text keeps buffering
@@ -78,7 +78,7 @@ export class InboundProcessor<Context> {
 
   constructor(options: InboundProcessorOptions<Context>) {
     this.#options = options;
-    this.#debounceMs = options.debounceMs ?? 2_500;
+    this.#debounceMs = options.debounceMs ?? 250;
   }
 
   process(message: InboundTextMessage, context: Context): void {

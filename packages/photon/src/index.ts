@@ -8,6 +8,7 @@ export {
 } from "./inbound.js";
 export {
   createPhotonTransport,
+  type BatchControls,
   type PhotonTransport,
   type PhotonTransportConfig,
   type RawWebhookRequest,
