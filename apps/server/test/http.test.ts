@@ -40,7 +40,10 @@ describe("HTTP app", () => {
     const port = (server.address() as AddressInfo).port;
 
     const health = await fetch(`http://127.0.0.1:${port}/healthz`);
-    expect(await health.json()).toEqual({ ok: true });
+    expect(await health.json()).toEqual({
+      ok: true,
+      provider: { ok: true, degraded: false, error: null },
+    });
 
     const payload = '{"event":"messages"}\n';
     const response = await fetch(`http://127.0.0.1:${port}/webhooks/photon`, {
@@ -51,5 +54,29 @@ describe("HTTP app", () => {
     expect(response.status).toBe(202);
     expect(await response.text()).toBe("accepted");
     expect(webhook.mock.calls[0]?.[0].body.equals(Buffer.from(payload))).toBe(true);
+  });
+
+  it("reports provider startup failures through health", async () => {
+    const transport: PhotonTransport = {
+      webhook: async () => ({ status: 200, headers: {}, body: new Uint8Array() }),
+      sendToSpace: async () => undefined,
+      flushInbound: async () => undefined,
+      stop: async () => undefined,
+    };
+    const server = createHttpApp(transport, logger, {
+      ok: false,
+      degraded: false,
+      error: "ChatGPT auth is invalid. Reconnect it in the console (Connections page).",
+    }).listen(0);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const port = (server.address() as AddressInfo).port;
+
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    expect(health.status).toBe(503);
+    expect(await health.json()).toMatchObject({
+      ok: false,
+      provider: { error: expect.stringContaining("Connections page") },
+    });
   });
 });

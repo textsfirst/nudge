@@ -18,10 +18,14 @@ export function OverviewPage() {
   const rows: { label: string; ok: boolean; detail: string; to: string; hint?: string }[] = [
     {
       label: "Nudge server",
-      ok: data.serverUp,
-      detail: data.serverUp
-        ? `Listening on port ${data.serverPort}`
-        : `Not responding on port ${data.serverPort} — start it with \`pnpm dev\``,
+      ok: data.serverUp && data.serverHealthy,
+      detail: !data.serverUp
+        ? data.serverError ?? `Not responding on port ${data.serverPort} — start it with \`pnpm dev\``
+        : !data.serverHealthy
+          ? `Running on port ${data.serverPort}, but unhealthy: ${data.serverError ?? "check server logs"}`
+          : data.serverError
+            ? `Listening on port ${data.serverPort}; degraded: ${data.serverError}`
+            : `Listening on port ${data.serverPort}`,
       to: "/config",
     },
     {

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { SECRET_SPECS } from "@nudge/server/config";
 
 /**
  * Line-preserving .env editing: comments, ordering, and unrelated entries
@@ -15,36 +16,7 @@ export interface SecretInfo {
 
 /** The secrets Nudge understands, in display order. */
 export const KNOWN_SECRETS: ReadonlyArray<Omit<SecretInfo, "set">> = [
-  {
-    key: "SPECTRUM_PROJECT_ID",
-    known: true,
-    required: true,
-    description: "Photon Cloud project id (app.photon.codes)",
-  },
-  {
-    key: "SPECTRUM_PROJECT_SECRET",
-    known: true,
-    required: true,
-    description: "Photon Cloud project secret",
-  },
-  {
-    key: "SPECTRUM_WEBHOOK_SECRET",
-    known: true,
-    required: true,
-    description: "Photon webhook signing secret",
-  },
-  {
-    key: "OPENAI_API_KEY",
-    known: true,
-    required: false,
-    description: "OpenAI API key — API provider, or fallback for subscription auth",
-  },
-  {
-    key: "FIRECRAWL_API_KEY",
-    known: true,
-    required: false,
-    description: "Enables the web_search / web_extract tools",
-  },
+  ...SECRET_SPECS.map((secret) => ({ ...secret, known: true as const })),
 ];
 
 const LINE_PATTERN = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;

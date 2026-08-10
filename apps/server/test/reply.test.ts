@@ -1,3 +1,4 @@
+import { SubscriptionAuthError } from "@nudge/agent";
 import { NudgeStore } from "@nudge/store";
 import { describe, expect, it, vi } from "vitest";
 import { createReplyHandler } from "../src/reply.js";
@@ -71,5 +72,26 @@ describe("createReplyHandler", () => {
     expect(sent[0]).toContain("something went wrong");
     expect(logger.error).toHaveBeenCalled();
     expect(store.isWebhookProcessed("m1")).toBe(true);
+  });
+
+  it("gives the owner an actionable message for subscription auth failures", async () => {
+    const store = new NudgeStore(":memory:");
+    const sent: string[] = [];
+    const handler = createReplyHandler({
+      agent: {
+        reply: async () => {
+          throw new SubscriptionAuthError(
+            "Auth expired. Reconnect it in the console (Connections page).",
+          );
+        },
+      },
+      store,
+      logger: makeLogger(),
+    });
+
+    await handler(batch, async (text) => void sent.push(text), new AbortController().signal);
+
+    expect(sent[0]).toContain("ChatGPT sign-in needs attention");
+    expect(sent[0]).toContain("Connections page");
   });
 });

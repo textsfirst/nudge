@@ -7,7 +7,7 @@
     "dev": "concurrently -k -n api,web \"tsx watch --conditions=development src/server/index.ts\" \"vite\"",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "start": "node dist/server/index.js",
+    "start": "pnpm --filter @nudge/console... build && node dist/server/index.js",
     "test": "vitest run"
   },
   "dependencies": {

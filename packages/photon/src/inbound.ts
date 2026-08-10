@@ -84,7 +84,7 @@ export class InboundProcessor<Context> {
   process(message: InboundTextMessage, context: Context): void {
     const { logger, ownerHandle } = this.#options;
     if (message.platform.toLowerCase() !== "imessage") {
-      logger.debug("Ignoring a non-iMessage delivery", {
+      logger.warn("Ignoring a delivery from an unsupported platform", {
         platform: message.platform,
         messageId: message.id,
       });

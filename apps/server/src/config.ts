@@ -18,12 +18,47 @@ const optionalSecret = z.preprocess(
   z.string().min(1).optional(),
 );
 
+/** Single source of truth for secret validation, console display, and docs tests. */
+export const SECRET_SPECS = [
+  {
+    key: "SPECTRUM_PROJECT_ID",
+    required: true,
+    description: "Photon Cloud project id (app.photon.codes)",
+  },
+  {
+    key: "SPECTRUM_PROJECT_SECRET",
+    required: true,
+    description: "Photon Cloud project secret",
+  },
+  {
+    key: "SPECTRUM_WEBHOOK_SECRET",
+    required: true,
+    description: "Photon webhook signing secret",
+  },
+  {
+    key: "OPENAI_API_KEY",
+    required: false,
+    description: "OpenAI API key — API provider, or fallback for subscription auth",
+  },
+  {
+    key: "FIRECRAWL_API_KEY",
+    required: false,
+    description: "Enables the web_search / web_extract tools",
+  },
+] as const;
+
+type SecretValues = {
+  [Spec in (typeof SECRET_SPECS)[number] as Spec["key"]]: Spec["required"] extends true
+    ? string
+    : string | undefined;
+} & { PORT?: number };
+
+const secretShape = Object.fromEntries(
+  SECRET_SPECS.map((spec) => [spec.key, spec.required ? z.string().min(1) : optionalSecret]),
+);
+
 const secretsSchema = z.object({
-  SPECTRUM_PROJECT_ID: z.string().min(1),
-  SPECTRUM_PROJECT_SECRET: z.string().min(1),
-  SPECTRUM_WEBHOOK_SECRET: z.string().min(1),
-  OPENAI_API_KEY: optionalSecret,
-  FIRECRAWL_API_KEY: optionalSecret,
+  ...secretShape,
   // Not a secret: per-process override of server.port so multiple checkouts
   // (e.g. Conductor's PORT=$CONDUCTOR_PORT run script) can share one config.
   PORT: z.preprocess(
@@ -42,7 +77,7 @@ export function loadConfig(
   if (!parsed.success) {
     throw new Error(`Invalid .env: ${formatIssues(parsed.error)}`);
   }
-  const secrets = parsed.data;
+  const secrets = parsed.data as SecretValues;
   const dataDir = resolveFromWorkspace(settings.data_dir);
   return {
     ownerHandle: settings.owner_handle,

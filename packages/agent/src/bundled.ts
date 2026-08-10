@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -87,7 +88,9 @@ export function syncBundledContent(options: SyncBundledOptions): SyncBundledResu
     if (!bundledKeys.has(key)) delete manifest[key];
   }
 
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const temporaryManifestPath = `${manifestPath}.${process.pid}.tmp`;
+  writeFileSync(temporaryManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  renameSync(temporaryManifestPath, manifestPath);
   options.logger?.info("Bundled content synced", {
     seeded: result.seeded,
     updated: result.updated,
@@ -150,14 +153,24 @@ function readManifest(path: string): Manifest {
   if (!existsSync(path)) return {};
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed).filter(([, value]) => typeof value === "string"),
-    ) as Manifest;
-  } catch {
-    // A corrupt manifest degrades safely: every existing file reads as
-    // unmanaged (kept), and only genuinely missing files get seeded.
-    return {};
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.values(parsed).some((value) => typeof value !== "string")
+    ) {
+      throw new Error("expected an object whose values are hashes");
+    }
+    return parsed as Manifest;
+  } catch (error) {
+    // Continuing with an empty manifest would silently make every existing
+    // bundled file unmanaged forever. Fail loudly and leave both the corrupt
+    // manifest and local content untouched for a deliberate recovery.
+    throw new Error(
+      `Bundled content manifest is invalid at ${path}. Restore it from backup, or move/delete ` +
+        `it to preserve existing files as unmanaged and resume seeding only new content.`,
+      { cause: error },
+    );
   }
 }
 

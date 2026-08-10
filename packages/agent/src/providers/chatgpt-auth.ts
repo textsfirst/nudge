@@ -80,6 +80,11 @@ export class ChatGptAuthManager {
     this.#refreshLeewaySeconds = options.refreshLeewaySeconds ?? 60;
   }
 
+  /** Validate the stored file without refreshing tokens or making a request. */
+  async validateStored(): Promise<void> {
+    await this.#load();
+  }
+
   async credentials(): Promise<ChatGptCredentials> {
     const stored = await this.#load();
     let expiration: number | undefined;

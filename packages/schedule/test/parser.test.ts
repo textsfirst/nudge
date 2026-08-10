@@ -38,12 +38,21 @@ Say happy Wednesday.
     expect(entries[0]?.prompt).toBe("Summarize anything I asked you to track.");
   });
 
-  it("gives entries stable ids that change when timing or prompt change", () => {
+  it("keeps entry ids stable when timing or prompt change", () => {
     const one = parseSchedule("## A\nwhen: every day at 9:00\nHello").entries[0];
     const same = parseSchedule("## A\nwhen: every day at 9:00\nHello").entries[0];
     const different = parseSchedule("## A\nwhen: every day at 9:05\nHello").entries[0];
     expect(one?.id).toBe(same?.id);
-    expect(one?.id).not.toBe(different?.id);
+    expect(one?.id).toBe(different?.id);
+    expect(one?.legacyId).not.toBe(different?.legacyId);
+  });
+
+  it("rejects duplicate entry names because names are persistent identities", () => {
+    const { entries, errors } = parseSchedule(
+      "## Morning\nwhen: every day at 9:00\nHello\n\n## morning\nwhen: every day at 10:00\nAgain",
+    );
+    expect(entries).toHaveLength(1);
+    expect(errors).toEqual(['"morning": duplicate entry name']);
   });
 
   it("reports helpful errors without dropping valid entries", () => {

@@ -12,6 +12,7 @@ import {
 import { FileWorkspace } from "./files.js";
 import { createLoopGuard } from "./loop.js";
 import { MemoryFiles } from "./memory.js";
+import { SubscriptionAuthError } from "./providers/errors.js";
 import { buildSystemPrompt, type GoogleAccountRef } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
 import { startOfDayInZone } from "./time.js";
@@ -402,13 +403,21 @@ export class NudgeAgent {
         return { text, ...(payload ? { toolPayload: payload } : {}) };
       } catch (error) {
         const next = sources[index + 1];
-        if (next && source.isAuthError(error)) {
+        const authFailure = source.isAuthError(error);
+        if (next && authFailure) {
           this.#options.logger.error(error instanceof Error ? error.message : String(error), {
             provider: source.id,
             fallback: next.id,
           });
           this.#options.logger.warn("Falling back to the next model source for this turn");
           continue;
+        }
+        if (authFailure && !(error instanceof SubscriptionAuthError)) {
+          throw new SubscriptionAuthError(
+            `Authentication failed for ${source.id}. Reconnect it in the console ` +
+              `(Connections page) and try again.`,
+            { cause: error },
+          );
         }
         throw error;
       }

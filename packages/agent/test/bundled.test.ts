@@ -120,4 +120,17 @@ describe("syncBundledContent", () => {
     const manifest = JSON.parse(readFileSync(join(dataDir, ".bundled-manifest.json"), "utf8"));
     expect(Object.keys(manifest)).toEqual(["SYSTEM.md"]);
   });
+
+  it("fails loudly without changing content when the manifest is corrupt", () => {
+    const { bundledDir, dataDir } = makeDirs();
+    syncBundledContent({ dataDir, bundledDir });
+    writeFileSync(join(dataDir, "SYSTEM.md"), "My local prompt.\n");
+    writeFileSync(join(dataDir, ".bundled-manifest.json"), "{not json");
+
+    expect(() => syncBundledContent({ dataDir, bundledDir })).toThrow(
+      /Bundled content manifest is invalid/,
+    );
+    expect(readFileSync(join(dataDir, "SYSTEM.md"), "utf8")).toBe("My local prompt.\n");
+    expect(readFileSync(join(dataDir, ".bundled-manifest.json"), "utf8")).toBe("{not json");
+  });
 });

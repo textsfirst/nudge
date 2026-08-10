@@ -24,7 +24,7 @@ export const settingsSchema = z.object({
       openai: z
         .object({
           model: z.string().min(1).default("gpt-5-mini"),
-          fallback_enabled: z.boolean().default(true),
+          fallback_enabled: z.boolean().default(false),
         })
         .prefault({}),
     })
@@ -160,7 +160,8 @@ const SPEC: KeySpec[] = [
           {
             key: "fallback_enabled",
             comment: lines(
-              "Automatic fallback for subscription auth failures (needs OPENAI_API_KEY in .env).",
+              "Automatic API-credit fallback for subscription auth failures (off by default).",
+              "Enabling it requires OPENAI_API_KEY in .env.",
             ),
           },
         ],

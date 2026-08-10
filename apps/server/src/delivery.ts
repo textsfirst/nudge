@@ -2,6 +2,7 @@ import type { Logger } from "@nudge/agent";
 import type { NudgeStore, OutboundKind } from "@nudge/store";
 
 const RECOVERED_PREFIX = "♻️ Recovered reply (may repeat):\n\n";
+const MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface OutboundSender {
   sendToSpace(spaceId: string, text: string): Promise<void>;
@@ -14,6 +15,8 @@ export interface OutboundSender {
  * "recovered" marker — bounded by the ledger's attempt and age limits.
  */
 export class DeliveryService {
+  #lastMaintenanceAt = 0;
+
   constructor(
     private readonly store: NudgeStore,
     private readonly sender: OutboundSender,
@@ -36,6 +39,19 @@ export class DeliveryService {
 
   /** Retry open ledger entries. Called at boot and periodically. */
   async recover(): Promise<void> {
+    const now = Date.now();
+    if (now - this.#lastMaintenanceAt >= MAINTENANCE_INTERVAL_MS) {
+      this.#lastMaintenanceAt = now;
+      const result = this.store.maintain({ now });
+      if (result.expiredOutbound > 0) {
+        this.logger.error("Outbound messages exhausted the retry window", {
+          count: result.expiredOutbound,
+        });
+      }
+      if (result.prunedOutbound > 0 || result.prunedWebhooks > 0) {
+        this.logger.info("Pruned expired delivery bookkeeping", { ...result });
+      }
+    }
     for (const entry of this.store.openOutbound()) {
       const space = this.store.spaceFor(entry.handle);
       if (!space) continue;
@@ -46,16 +62,24 @@ export class DeliveryService {
   }
 
   async #send(id: number, spaceId: string, body: string): Promise<boolean> {
-    this.store.markOutbound(id, "sending");
+    const attempt = this.store.markOutbound(id, "sending");
     try {
       await this.sender.sendToSpace(spaceId, body);
       this.store.markOutbound(id, "sent");
       return true;
     } catch (error) {
-      this.logger.error("Outbound send failed; the ledger will retry", {
-        ledgerId: id,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const exhausted = attempt >= 3;
+      if (exhausted) this.store.markOutbound(id, "failed");
+      this.logger.error(
+        exhausted
+          ? "Outbound send failed and exhausted its retry limit"
+          : "Outbound send failed; the ledger will retry",
+        {
+          ledgerId: id,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
       return false;
     }
   }

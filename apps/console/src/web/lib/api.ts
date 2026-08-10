@@ -34,6 +34,8 @@ export interface Status {
   ownerHandle: string | null;
   serverPort: number;
   serverUp: boolean;
+  serverHealthy: boolean;
+  serverError: string | null;
   dbExists: boolean;
 }
 

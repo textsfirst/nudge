@@ -2,11 +2,24 @@ import express, { type Express } from "express";
 import type { Logger } from "@nudge/agent";
 import type { PhotonTransport } from "@nudge/photon";
 
-export function createHttpApp(transport: PhotonTransport, logger: Logger): Express {
+export interface ProviderHealth {
+  ok: boolean;
+  degraded: boolean;
+  error: string | null;
+}
+
+export function createHttpApp(
+  transport: PhotonTransport,
+  logger: Logger,
+  providerHealth: ProviderHealth = { ok: true, degraded: false, error: null },
+): Express {
   const app = express();
 
   app.get("/healthz", (_request, response) => {
-    response.status(200).json({ ok: true });
+    response.status(providerHealth.ok ? 200 : 503).json({
+      ok: providerHealth.ok,
+      provider: providerHealth,
+    });
   });
 
   app.post(

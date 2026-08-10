@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { Cron } from "croner";
 
 export interface ScheduleEntry {
-  /** Stable id derived from the name plus timing/prompt content. */
+  /** Stable id derived from the entry name, so edits do not re-arm one-shots. */
   id: string;
+  /** Previous content-derived id, used once to carry existing state forward. */
+  legacyId: string;
   name: string;
   when: WhenSpec;
   prompt: string;
@@ -47,8 +49,15 @@ export function parseSchedule(markdown: string): ParseResult {
   const entries: ScheduleEntry[] = [];
   const errors: string[] = [];
   const sections = splitSections(markdown);
+  const seenNames = new Set<string>();
 
   for (const section of sections) {
+    const normalizedName = section.name.trim().toLowerCase();
+    if (seenNames.has(normalizedName)) {
+      errors.push(`"${section.name}": duplicate entry name`);
+      continue;
+    }
+    seenNames.add(normalizedName);
     const whenLine = section.lines.find((line) => /^when\s*:/i.test(line.trim()));
     if (!whenLine) {
       errors.push(`"${section.name}": missing a "when:" line`);
@@ -75,7 +84,8 @@ export function parseSchedule(markdown: string): ParseResult {
     }
 
     entries.push({
-      id: entryId(section.name, whenText, prompt),
+      id: entryId(section.name),
+      legacyId: legacyEntryId(section.name, whenText, prompt),
       name: section.name,
       when,
       prompt,
@@ -201,7 +211,20 @@ function validatedOnce(pattern: string): void {
   }
 }
 
-function entryId(name: string, when: string, prompt: string): string {
+function entryId(name: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  const hash = createHash("sha256")
+    .update(name.trim().toLowerCase())
+    .digest("hex")
+    .slice(0, 8);
+  return `${slug || "entry"}-${hash}`;
+}
+
+function legacyEntryId(name: string, when: string, prompt: string): string {
   const slug = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")

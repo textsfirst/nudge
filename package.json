@@ -4,7 +4,7 @@
   "private": true,
   "packageManager": "pnpm@10.30.3",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.5"
   },
   "scripts": {
     "dev": "pnpm --filter @nudge/server dev",
