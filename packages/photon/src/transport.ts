@@ -22,9 +22,15 @@ export interface PhotonTransportConfig {
   rememberSpace: (handle: string, spaceId: string, platform: string) => void;
   /**
    * Handle one debounced inbound batch. `send` chunks and delivers text to
-   * the batch's space; a typing indicator shows while the handler runs.
+   * the batch's space; a typing indicator shows while the handler runs. The
+   * signal aborts when a newer text arrives mid-run (steering) — abandon the
+   * reply instead of sending it.
    */
-  onBatch: (batch: InboundBatch, send: (text: string) => Promise<void>) => Promise<void>;
+  onBatch: (
+    batch: InboundBatch,
+    send: (text: string) => Promise<void>,
+    signal: AbortSignal,
+  ) => Promise<void>;
   debounceMs?: number;
   logLevel?: "debug" | "info" | "warn" | "error";
   logger: InboundLogger;
@@ -80,9 +86,9 @@ export async function createPhotonTransport(
     logger: config.logger,
     isDuplicate: config.isDuplicate,
     ...(config.debounceMs !== undefined ? { debounceMs: config.debounceMs } : {}),
-    onBatch: (batch, context) =>
+    onBatch: (batch, context, signal) =>
       spectrum.responding(context.space as never, () =>
-        config.onBatch(batch, (text) => sendAll(context.space, text)),
+        config.onBatch(batch, (text) => sendAll(context.space, text), signal),
       ),
   });
 

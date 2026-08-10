@@ -43,27 +43,38 @@ export function toolCallChunks(toolName: string, input: object): LanguageModelV3
   ];
 }
 
+export type ScriptEntry =
+  | string
+  | LanguageModelV3StreamPart[]
+  | (() => string | LanguageModelV3StreamPart[]);
+
 /**
  * A model source scripted with an ordered list of responses. Each response is
- * either plain reply text or a pre-built chunk array (e.g. a tool call).
+ * plain reply text, a pre-built chunk array (e.g. a tool call), or a thunk —
+ * which may throw, to script mid-conversation failures. Like a real provider,
+ * a call with an already-aborted signal rejects instead of streaming.
  */
 export class ScriptedSource implements ModelSource {
   readonly id: string;
   readonly mock: MockLanguageModelV3;
-  #script: (string | LanguageModelV3StreamPart[])[];
+  #script: ScriptEntry[];
 
-  constructor(id: string, script: (string | LanguageModelV3StreamPart[])[]) {
+  constructor(id: string, script: ScriptEntry[]) {
     this.id = id;
     this.#script = [...script];
     this.mock = new MockLanguageModelV3({
-      doStream: async () => {
+      doStream: async (options) => {
+        if (options.abortSignal?.aborted) {
+          throw new DOMException("The model call was aborted", "AbortError");
+        }
         const next = this.#script.shift();
         if (next === undefined) {
           throw new Error(`ScriptedSource "${id}" ran out of scripted responses`);
         }
+        const resolved = typeof next === "function" ? next() : next;
         return {
           stream: simulateReadableStream({
-            chunks: typeof next === "string" ? textChunks(next) : next,
+            chunks: typeof resolved === "string" ? textChunks(resolved) : resolved,
           }),
         };
       },
@@ -91,10 +102,7 @@ export interface Harness {
   setNow(at: number): void;
 }
 
-export function makeAgent(
-  script: (string | LanguageModelV3StreamPart[])[],
-  overrides: Partial<NudgeAgentOptions> = {},
-): Harness {
+export function makeAgent(script: ScriptEntry[], overrides: Partial<NudgeAgentOptions> = {}): Harness {
   const dataDir = mkdtempSync(join(tmpdir(), "nudge-test-"));
   const store = new NudgeStore(":memory:");
   const source = new ScriptedSource("scripted", script);

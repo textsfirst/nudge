@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
 import type { MessageRow, NudgeStore, SessionRow } from "@nudge/store";
 import { stepCountIs, streamText, type ModelMessage, type StepResult, type ToolSet } from "ai";
 import { FileWorkspace } from "./files.js";
@@ -26,6 +27,8 @@ export interface NudgeAgentOptions {
   web?: FirecrawlOptions;
   /** Defaults to true; false removes the bash tool from the set. */
   bashEnabled?: boolean;
+  /** OpenAI provider options applied to every model call (reasoningEffort, serviceTier, …). */
+  modelOptions?: OpenAIResponsesProviderOptions;
   now?: () => number;
 }
 
@@ -65,8 +68,17 @@ export class NudgeAgent {
    * Handle an inbound message. Returns the reply text, or null when the model
    * chose [SILENT] — the turn is persisted either way. A [NEW_THREAD] token is
    * stripped from the reply and closes the thread after this turn.
+   *
+   * `abortSignal` steers: when it aborts mid-generation the turn is abandoned
+   * and this rejects — the owner's message is already in history, so the next
+   * turn folds it in. Tool calls the abandoned run completed are recorded as
+   * an in-history interruption note so the model knows what already happened.
    */
-  reply(handle: string, text: string): Promise<string | null> {
+  reply(
+    handle: string,
+    text: string,
+    options: { abortSignal?: AbortSignal } = {},
+  ): Promise<string | null> {
     return this.#serialized(handle, async () => {
       const now = this.#now();
       const session = await this.#resolveSession(handle, now);
@@ -79,11 +91,23 @@ export class NudgeAgent {
       });
 
       const history = this.#options.store.sessionMessages(session.id, session.compactedThrough);
-      const { text: raw, toolPayload } = await this.#generate({
-        system: this.#systemPromptFor(session, now),
-        messages: history.map(toModelMessage),
-        tools: this.#tools,
-      });
+      const steps: StepResult<ToolSet>[] = [];
+      let raw: string;
+      let toolPayload: string | undefined;
+      try {
+        ({ text: raw, toolPayload } = await this.#generate({
+          system: this.#systemPromptFor(session, now),
+          messages: history.map(toModelMessage),
+          tools: this.#tools,
+          ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+          stepSink: steps,
+        }));
+      } catch (error) {
+        if (options.abortSignal?.aborted) {
+          this.#recordInterruption(session, handle, steps);
+        }
+        throw error;
+      }
 
       const reply = raw.trim();
       if (!reply) {
@@ -226,6 +250,30 @@ export class NudgeAgent {
     });
   }
 
+  /**
+   * A steered turn that already ran tools leaves side effects (files written,
+   * commands run) the next turn cannot see otherwise — history replays only
+   * message text. Record them as an assistant-turn note; pure-text turns that
+   * were steered leave nothing behind.
+   */
+  #recordInterruption(session: SessionRow, handle: string, steps: StepResult<ToolSet>[]): void {
+    const toolPayload = serializeSteps(steps);
+    if (!toolPayload) return;
+    const summary =
+      toolPayload.length > 1_500 ? `${toolPayload.slice(0, 1_500)}…` : toolPayload;
+    this.#options.store.appendMessage({
+      sessionId: session.id,
+      handle,
+      role: "assistant",
+      content:
+        "[The owner's next message interrupted this turn before any reply was sent. " +
+        `Tool calls that already ran: ${summary}]`,
+      toolPayload,
+      at: this.#now(),
+    });
+    this.#options.store.touchSession(session.id, this.#now());
+  }
+
   async #compactIfNeeded(session: SessionRow): Promise<void> {
     const store = this.#options.store;
     const current = store.activeSession(session.handle);
@@ -269,10 +317,14 @@ export class NudgeAgent {
     system: string;
     messages: ModelMessage[];
     tools?: ToolSet;
+    abortSignal?: AbortSignal;
+    /** Collects finished steps as they land, so an aborted run can report the tool calls it already made. */
+    stepSink?: StepResult<ToolSet>[];
   }): Promise<{ text: string; toolPayload?: string }> {
     const sources = this.#options.sources;
     for (let index = 0; index < sources.length; index += 1) {
       const source = sources[index]!;
+      if (params.stepSink) params.stepSink.length = 0;
       try {
         const model = await source.languageModel();
         const result = streamText({
@@ -282,10 +334,24 @@ export class NudgeAgent {
           ...(params.tools
             ? { tools: params.tools, stopWhen: stepCountIs(this.#maxToolSteps) }
             : {}),
-          providerOptions: { openai: { store: false } },
+          ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+          ...(params.stepSink
+            ? {
+                onStepFinish: (step: StepResult<ToolSet>) => {
+                  params.stepSink!.push(step);
+                },
+              }
+            : {}),
+          providerOptions: { openai: { ...this.#options.modelOptions, store: false } },
         });
         // Resolving .text consumes the complete SSE response (all tool steps included).
         const text = await result.text;
+        // streamText swallows stream errors into an empty result rather than
+        // rejecting; surface an abort explicitly so callers can tell a steered
+        // turn from a model failure.
+        if (params.abortSignal?.aborted) {
+          throw new DOMException("The turn was aborted mid-generation", "AbortError");
+        }
         const payload = params.tools ? serializeSteps(await result.steps) : undefined;
         return { text, ...(payload ? { toolPayload: payload } : {}) };
       } catch (error) {

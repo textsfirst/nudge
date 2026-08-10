@@ -23,6 +23,14 @@ const environmentSchema = z.object({
   ),
   OPENAI_MODEL: z.string().min(1).default("gpt-5-mini"),
   OPENAI_FALLBACK_ENABLED: booleanString,
+  REASONING_EFFORT: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
+  ),
+  FAST_MODE: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   BASH_TOOL_ENABLED: booleanString,
   FIRECRAWL_API_KEY: z.preprocess(
     (value) => (value === "" ? undefined : value),
@@ -91,6 +99,10 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
         }
       : {}),
     bashEnabled: env.BASH_TOOL_ENABLED,
+    modelOptions: {
+      ...(env.REASONING_EFFORT ? { reasoningEffort: env.REASONING_EFFORT } : {}),
+      ...(env.FAST_MODE ? { serviceTier: "priority" as const } : {}),
+    },
     dataDir,
     dbPath: join(dataDir, "nudge.db"),
     systemFilePath: join(dataDir, "SYSTEM.md"),

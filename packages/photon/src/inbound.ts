@@ -26,9 +26,11 @@ export interface InboundProcessorOptions<Context> {
   isDuplicate: (messageId: string) => boolean;
   /**
    * Handle one debounced batch. Receives the context of the batch's most
-   * recent message (e.g. its rehydrated space).
+   * recent message (e.g. its rehydrated space). The signal aborts when a
+   * newer message from the same handle arrives mid-run (steering): abandon
+   * the reply — the newer batch runs next against full history.
    */
-  onBatch: (batch: InboundBatch, context: Context) => Promise<void>;
+  onBatch: (batch: InboundBatch, context: Context, signal: AbortSignal) => Promise<void>;
   /** How long to wait for follow-up texts before replying. */
   debounceMs?: number;
 }
@@ -40,19 +42,31 @@ interface PendingBatch<Context> {
   messageIds: string[];
   context: Context;
   timer: NodeJS.Timeout;
+  /** True when the debounce expired while a run was in flight: flush on settle. */
+  ripe: boolean;
+}
+
+interface RunningBatch {
+  controller: AbortController;
+  done: Promise<void>;
 }
 
 /**
  * Filters inbound messages (owner-only, iMessage-only, deduplicated) and
  * debounces bursts of consecutive texts into a single batch per handle, so a
  * flurry of short messages gets one considered reply instead of several.
+ *
+ * A message arriving while a reply is already being generated steers it: the
+ * in-flight run's signal aborts immediately, and the new text keeps buffering
+ * until the handle is free, so everything sent while busy folds into one
+ * follow-up turn instead of queueing stale replies.
  */
 export class InboundProcessor<Context> {
   readonly #options: InboundProcessorOptions<Context>;
   readonly #debounceMs: number;
   readonly #pending = new Map<string, PendingBatch<Context>>();
   readonly #buffered = new Set<string>();
-  readonly #queues = new Map<string, Promise<void>>();
+  readonly #running = new Map<string, RunningBatch>();
 
   constructor(options: InboundProcessorOptions<Context>) {
     this.#options = options;
@@ -81,6 +95,9 @@ export class InboundProcessor<Context> {
     }
 
     this.#buffered.add(message.id);
+    // Steer: a newer message supersedes whatever reply is being generated.
+    this.#running.get(message.handle)?.controller.abort();
+
     const existing = this.#pending.get(message.handle);
     if (existing) {
       clearTimeout(existing.timer);
@@ -88,6 +105,7 @@ export class InboundProcessor<Context> {
       existing.messageIds.push(message.id);
       existing.context = context;
       existing.spaceId = message.spaceId;
+      existing.ripe = false;
       existing.timer = setTimeout(() => this.#flush(message.handle), this.#debounceMs);
       return;
     }
@@ -98,20 +116,32 @@ export class InboundProcessor<Context> {
       messageIds: [message.id],
       context,
       timer: setTimeout(() => this.#flush(message.handle), this.#debounceMs),
+      ripe: false,
     });
   }
 
   /** Deliver any buffered batches immediately (used on shutdown and in tests). */
   async flushNow(): Promise<void> {
-    for (const handle of [...this.#pending.keys()]) {
-      this.#flush(handle);
+    while (this.#pending.size > 0 || this.#running.size > 0) {
+      await Promise.all([...this.#running.values()].map((run) => run.done));
+      for (const [handle, pending] of [...this.#pending.entries()]) {
+        if (!this.#running.has(handle)) {
+          pending.ripe = true;
+          this.#flush(handle);
+        }
+      }
     }
-    await Promise.all([...this.#queues.values()]);
   }
 
   #flush(handle: string): void {
     const pending = this.#pending.get(handle);
     if (!pending) return;
+    if (this.#running.has(handle)) {
+      // The handle is busy (its run is already signalled to abort); hold the
+      // batch so anything else arriving folds in, and flush when it settles.
+      pending.ripe = true;
+      return;
+    }
     this.#pending.delete(handle);
     clearTimeout(pending.timer);
 
@@ -121,10 +151,16 @@ export class InboundProcessor<Context> {
       texts: pending.texts,
       messageIds: pending.messageIds,
     };
-    const previous = this.#queues.get(handle) ?? Promise.resolve();
-    const run = previous
-      .then(() => this.#options.onBatch(batch, pending.context))
+    const controller = new AbortController();
+    const done = Promise.resolve()
+      .then(() => this.#options.onBatch(batch, pending.context, controller.signal))
       .catch((error: unknown) => {
+        if (controller.signal.aborted) {
+          this.#options.logger.debug("A reply was steered by a newer message", {
+            messageIds: batch.messageIds,
+          });
+          return;
+        }
         this.#options.logger.error("Failed to process an inbound batch", {
           messageIds: batch.messageIds,
           error: error instanceof Error ? error.message : String(error),
@@ -134,12 +170,13 @@ export class InboundProcessor<Context> {
         for (const id of batch.messageIds) {
           this.#buffered.delete(id);
         }
+        if (this.#running.get(handle)?.controller === controller) {
+          this.#running.delete(handle);
+        }
+        if (this.#pending.get(handle)?.ripe) {
+          this.#flush(handle);
+        }
       });
-    this.#queues.set(handle, run);
-    void run.finally(() => {
-      if (this.#queues.get(handle) === run) {
-        this.#queues.delete(handle);
-      }
-    });
+    this.#running.set(handle, { controller, done });
   }
 }

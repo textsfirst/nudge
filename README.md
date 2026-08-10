@@ -47,6 +47,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 ### Reliability
 
 - Photon webhooks are deduplicated durably and delivered at-least-once; bursts of texts are debounced (~2.5 s) into one considered reply.
+- A text arriving while a reply is still being generated steers it: the in-flight model call aborts, everything sent while busy folds into one follow-up turn (full history included), and no stale reply goes out. If the aborted turn had already run tools, a note recording those calls lands in history so the next turn doesn't redo them.
 - Every outbound message is journaled in a ledger before sending. On restart, sends that never started go out as-is; ones interrupted mid-send are retried with a visible "♻️ Recovered reply" marker, bounded to 3 attempts within 24 hours.
 - Scheduled entries claim crash-safely and never back-fill occurrences from before they existed; a one-shot that came due while the server was down fires late, once.
 

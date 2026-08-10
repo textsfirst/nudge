@@ -9,10 +9,9 @@ import { DeliveryService } from "./delivery.js";
 import { loadWorkspaceEnvironment } from "./env.js";
 import { createHttpApp } from "./http.js";
 import { createLogger } from "./logger.js";
+import { createReplyHandler } from "./reply.js";
 import { Scheduler } from "./scheduler.js";
 import { createSystemFileReader } from "./system-file.js";
-
-const APOLOGY = "Sorry — something went wrong on my end. Mind sending that again?";
 
 function ensureDataReadme(dataDir: string): void {
   mkdirSync(dataDir, { recursive: true });
@@ -42,6 +41,7 @@ async function main(): Promise<void> {
     maxToolSteps: config.maxToolSteps,
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,
+    modelOptions: config.modelOptions,
   });
 
   const transport = await createPhotonTransport({
@@ -52,31 +52,7 @@ async function main(): Promise<void> {
     logger,
     isDuplicate: (messageId) => store.isWebhookProcessed(messageId),
     rememberSpace: (handle, spaceId, platform) => store.rememberSpace(handle, spaceId, platform),
-    onBatch: async (batch, send) => {
-      try {
-        const reply = await agent.reply(batch.handle, batch.texts.join("\n"));
-        if (reply) {
-          const ledgerId = store.enqueueOutbound(batch.handle, reply, "reply");
-          store.markOutbound(ledgerId, "sending");
-          await send(reply);
-          store.markOutbound(ledgerId, "sent");
-        }
-      } catch (error) {
-        logger.error("Reply generation failed", {
-          messageIds: batch.messageIds,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        try {
-          await send(APOLOGY);
-        } catch {
-          logger.error("Even the apology failed to send", { messageIds: batch.messageIds });
-        }
-      } finally {
-        for (const messageId of batch.messageIds) {
-          store.markWebhookProcessed(messageId);
-        }
-      }
-    },
+    onBatch: createReplyHandler({ agent, store, logger }),
   });
 
   const delivery = new DeliveryService(store, transport, logger);
