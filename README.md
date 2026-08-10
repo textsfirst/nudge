@@ -16,7 +16,7 @@ The pnpm workspace keeps the replaceable boundaries small:
 
 ### Files are the API
 
-The core tools are file operations scoped to `DATA_DIR`: `list_files`, `read_file` (paged — long files return a `Use offset=N to continue` footer), `edit_file` (exact-match in-place edits), and `write_file` (whole-file replace) — the latter two share per-file validation. Genuine computation comes from `search_history` (FTS5), `bash` (runs with `DATA_DIR` as its working directory — a default, not a sandbox; disable with `BASH_TOOL_ENABLED=false`), and optional `web_search`/`web_extract` (Firecrawl). Everything else — schedule, memory, skills — is a markdown file convention documented in a system-written `DATA_DIR/README.md` that the agent reads on demand. New capabilities cost a convention, not a tool schema in every prompt. Control signals are in-band tokens: `[SILENT]` (don't reply) and `[NEW_THREAD]` (reset the thread).
+The core tools are file operations scoped to `data_dir`: `list_files`, `read_file` (paged — long files return a `Use offset=N to continue` footer), `edit_file` (exact-match in-place edits), and `write_file` (whole-file replace) — the latter two share per-file validation. Genuine computation comes from `search_history` (FTS5), `bash` (runs with `data_dir` as its working directory — a default, not a sandbox; disable with `tools.bash_enabled: false`), and optional `web_search`/`web_extract` (Firecrawl). Everything else — schedule, memory, skills — is a markdown file convention documented in a system-written `data_dir/README.md` that the agent reads on demand. New capabilities cost a convention, not a tool schema in every prompt. Control signals are in-band tokens: `[SILENT]` (don't reply) and `[NEW_THREAD]` (reset the thread).
 
 Writes are validated per path and rejected with diagnostics the model can act on: SCHEDULE.md must parse, MEMORY.md/USER.md have hard character budgets, `skills/*/SKILL.md` needs frontmatter, and SYSTEM.md plus the README are read-only to the agent. Secrets (`chatgpt-auth.json`) and runtime state (`nudge.db`) are invisible to it.
 
@@ -24,7 +24,7 @@ Writes are validated per path and rejected with diagnostics the model can act on
 
 Every turn's system prompt is assembled from five slots, stable content first so prompt-prefix caching survives: **SYSTEM.md** (yours) → generated tool guidance → memory snapshot → skills list → current local time. It is frozen per thread and re-read only at rollover.
 
-### Files you own (in `DATA_DIR`, default `.data/`)
+### Files you own (in `data_dir`, default `.data/`)
 
 - **SYSTEM.md** — the entire base system prompt: who Nudge is, voice, rules. The agent reads it and never writes it. Missing file → a built-in default.
 - **SCHEDULE.md** — every proactive message, one `##` section per entry:
@@ -39,7 +39,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
   Remind me to renew my passport.
   ```
 
-  The `when:` grammar is parsed by code, never interpreted by the model at runtime: `every day at 7:30`, `weekdays at 7:30`, `weekends at 9:00`, `every monday at 18:00`, `every 2 hours`, `every 30 minutes`, `YYYY-MM-DD HH:MM once`, or `cron: 30 7 * * 1-5`. Times are `OWNER_TIMEZONE` local. The agent edits this file itself when you ask for reminders; you can also hand-edit it — parse problems get texted to you rather than silently ignored.
+  The `when:` grammar is parsed by code, never interpreted by the model at runtime: `every day at 7:30`, `weekdays at 7:30`, `weekends at 9:00`, `every monday at 18:00`, `every 2 hours`, `every 30 minutes`, `YYYY-MM-DD HH:MM once`, or `cron: 30 7 * * 1-5`. Times are `timezone` local. The agent edits this file itself when you ask for reminders; you can also hand-edit it — parse problems get texted to you rather than silently ignored.
 - **MEMORY.md and USER.md** — the agent's bounded curated memory (2,200 / 1,375 character budgets): notes to self and facts about you. Injected into every prompt; over-budget writes are rejected so the agent consolidates instead of hoarding.
 - **skills/** — the agent's procedural memory: `skills/<name>/SKILL.md` with agentskills.io-style frontmatter plus optional support files. The agent creates and improves these autonomously after solving hard problems; everything is plain markdown you can audit, edit, or delete.
 - **README.md** — system-written manual documenting all of the above formats for the agent (and for you).
@@ -66,18 +66,26 @@ Every turn's system prompt is assembled from five slots, stable content first so
    ```bash
    pnpm install
    cp .env.example .env
+   cp nudge.config.example.yaml nudge.config.yaml
    ```
 
-2. Fill in the values from the [Photon dashboard](https://app.photon.codes):
+   Settings live in `nudge.config.yaml`; `.env` holds only secrets.
+
+2. Put the credentials from the [Photon dashboard](https://app.photon.codes) in `.env`:
 
    ```dotenv
-   OWNER_IMESSAGE_HANDLE=+15551234567
    SPECTRUM_PROJECT_ID=...
    SPECTRUM_PROJECT_SECRET=...
    SPECTRUM_WEBHOOK_SECRET=...
    ```
 
-   `OWNER_IMESSAGE_HANDLE` must exactly match Photon's `message.sender.id`.
+   and your handle in `nudge.config.yaml`:
+
+   ```yaml
+   owner_handle: "+15551234567"
+   ```
+
+   `owner_handle` must exactly match Photon's `message.sender.id`.
 
 3. For the default ChatGPT subscription provider, authorize once:
 
@@ -85,7 +93,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
    pnpm auth:chatgpt
    ```
 
-   To use only an API key instead: `MODEL_PROVIDER=openai-api` plus `OPENAI_API_KEY`. With the subscription provider, a configured `OPENAI_API_KEY` + `OPENAI_FALLBACK_ENABLED=true` is used only when subscription auth fails — ordinary model or network errors never silently spend API credits.
+   To use only an API key instead: `provider.selected: openai-api` in `nudge.config.yaml` plus `OPENAI_API_KEY` in `.env`. With the subscription provider, a configured `OPENAI_API_KEY` + `provider.openai.fallback_enabled: true` is used only when subscription auth fails — ordinary model or network errors never silently spend API credits.
 
 4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
 
@@ -105,25 +113,40 @@ Photon's inbound delivery is a signed HTTP webhook; the supported cloud send pat
 
 ## Configuration
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `MODEL_PROVIDER` | `chatgpt-subscription` | `chatgpt-subscription` or `openai-api` |
-| `CHATGPT_MODEL` | `gpt-5.4-mini` | Model slug for the subscription endpoint |
-| `CHATGPT_AUTH_FILE` | `.data/chatgpt-auth.json` | OAuth credential file |
-| `OPENAI_MODEL` | `gpt-5-mini` | Standard API model |
-| `OPENAI_FALLBACK_ENABLED` | `true` | API-key fallback for subscription auth failures |
-| `FIRECRAWL_API_KEY` | unset | Enables `web_search` / `web_extract`; tools are hidden when unset |
-| `FIRECRAWL_API_URL` | Firecrawl cloud | Self-hosted Firecrawl endpoint (enables the tools without a key) |
-| `DATA_DIR` | `.data` | SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ |
-| `OWNER_TIMEZONE` | machine timezone | IANA zone for schedules and midnight rollover |
-| `IDLE_THREAD_HOURS` | `6` | Idle gap before a thread rolls over |
-| `DEBOUNCE_MS` | `2500` | Burst window before replying |
-| `MAX_TOOL_STEPS` | `8` | Agent loop step cap per turn |
-| `MAX_HISTORY_MESSAGES` | `40` | Thread length before compaction |
-| `PORT` | `3000` | HTTP port |
-| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+Settings live in `nudge.config.yaml` (copy `nudge.config.example.yaml`); secrets live in `.env`. Both are gitignored.
 
-Photon credentials and `OWNER_IMESSAGE_HANDLE` are required. Unknown senders, non-iMessage deliveries, non-text content, and duplicate webhook deliveries are ignored.
+`nudge.config.yaml`:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `owner_handle` | required | The one handle allowed to talk to Nudge |
+| `timezone` | machine timezone | IANA zone for schedules and midnight rollover |
+| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription` or `openai-api` |
+| `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the subscription endpoint |
+| `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | OAuth credential file |
+| `provider.openai.model` | `gpt-5-mini` | Standard API model |
+| `provider.openai.fallback_enabled` | `true` | API-key fallback for subscription auth failures |
+| `model.reasoning_effort` | model default | `none` … `max` reasoning level |
+| `model.fast_mode` | `false` | Priority service tier for faster output |
+| `tools.bash_enabled` | `true` | Set `false` to remove the bash tool |
+| `tools.firecrawl_url` | Firecrawl cloud | Self-hosted Firecrawl endpoint (enables the web tools without a key) |
+| `data_dir` | `.data` | SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ |
+| `threads.idle_hours` | `6` | Idle gap before a thread rolls over |
+| `threads.debounce_ms` | `2500` | Burst window before replying |
+| `agent.max_tool_steps` | `8` | Agent loop step cap per turn |
+| `agent.max_history_messages` | `40` | Thread length before compaction |
+| `server.port` | `3000` | HTTP port (a `PORT` env var overrides it, e.g. Conductor's per-workspace ports) |
+| `server.log_level` | `info` | `debug`, `info`, `warn`, or `error` |
+
+`.env`:
+
+| Variable | Purpose |
+| --- | --- |
+| `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` / `SPECTRUM_WEBHOOK_SECRET` | Photon credentials (required) |
+| `OPENAI_API_KEY` | Optional API provider / subscription fallback |
+| `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
+
+Unknown senders, non-iMessage deliveries, non-text content, and duplicate webhook deliveries are ignored.
 
 ## Run a production build
 
@@ -138,8 +161,8 @@ Use a single server process: the scheduler's claims, webhook dedupe, and debounc
 
 - Photon HMAC verification runs on the exact raw request bytes, including the replay-window check.
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
-- The agent's file access is confined to `DATA_DIR` with path-traversal guards; OAuth tokens and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
-- OAuth tokens, API keys, and Photon secrets are never logged. `.env` and `.data` are gitignored.
+- The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
+- OAuth tokens, API keys, and Photon secrets are never logged. `.env`, `nudge.config.yaml`, and `.data` are gitignored.
 
 The ChatGPT subscription endpoint and its OAuth contract are not part of the standard public OpenAI API. The implementation follows the current first-party OAuth and account-header behavior in [openai/codex](https://github.com/openai/codex) and is isolated so upstream changes are contained.
 

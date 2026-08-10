@@ -1,0 +1,53 @@
+# Nudge settings. Copy to nudge.config.yaml and edit; secrets stay in .env.
+
+# The one handle allowed to talk to Nudge. Use the exact sender.id Photon sends.
+owner_handle: "+15551234567"
+
+# IANA timezone for schedules and midnight thread rollover. Defaults to the
+# machine's timezone when unset.
+# timezone: America/Los_Angeles
+
+provider:
+  # chatgpt-subscription (default) or openai-api
+  selected: chatgpt-subscription
+  chatgpt:
+    model: gpt-5.4-mini
+    auth_file: .data/chatgpt-auth.json
+  openai:
+    model: gpt-5-mini
+    # Automatic fallback for subscription auth failures (needs OPENAI_API_KEY in .env).
+    fallback_enabled: true
+
+model:
+  # Reasoning level for model calls: none, minimal, low, medium, high, xhigh, max.
+  # Unset uses the model's default.
+  # reasoning_effort: medium
+  # true routes model calls through the priority service tier (faster output).
+  fast_mode: false
+
+tools:
+  # The bash tool runs shell commands with data_dir as the working directory
+  # (a default, not a sandbox). Set to false to remove the tool entirely.
+  bash_enabled: true
+  # Self-hosted Firecrawl instance for web_search and web_extract (no key needed).
+  # Firecrawl cloud instead needs FIRECRAWL_API_KEY in .env. The tools are hidden
+  # from the model when neither is set.
+  # firecrawl_url: http://localhost:3002
+
+# Where Nudge keeps its SQLite database, SYSTEM.md, SCHEDULE.md, and skills/.
+data_dir: .data
+
+threads:
+  # Threads roll over silently after this many idle hours (and at local midnight).
+  idle_hours: 6
+  # How long to wait for follow-up texts before replying to a burst as one message.
+  debounce_ms: 2500
+
+# Agent loop limits.
+agent:
+  max_tool_steps: 8
+  max_history_messages: 40
+
+server:
+  port: 3000
+  log_level: info

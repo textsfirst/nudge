@@ -1,57 +1,87 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parse as parseYamlDocument } from "yaml";
 import { z } from "zod";
 import { resolveFromWorkspace } from "./paths.js";
 
-const booleanString = z
-  .enum(["true", "false"])
-  .default("true")
-  .transform((value) => value === "true");
+export const CONFIG_FILE = "nudge.config.yaml";
 
-const environmentSchema = z.object({
-  OWNER_IMESSAGE_HANDLE: z.string().min(1),
-  SPECTRUM_PROJECT_ID: z.string().min(1),
-  SPECTRUM_PROJECT_SECRET: z.string().min(1),
-  SPECTRUM_WEBHOOK_SECRET: z.string().min(1),
-  MODEL_PROVIDER: z
-    .enum(["chatgpt-subscription", "openai-api"])
-    .default("chatgpt-subscription"),
-  CHATGPT_MODEL: z.string().min(1).default("gpt-5.4-mini"),
-  CHATGPT_AUTH_FILE: z.string().min(1).default(".data/chatgpt-auth.json"),
-  OPENAI_API_KEY: z.preprocess(
-    (value) => (value === "" ? undefined : value),
-    z.string().min(1).optional(),
-  ),
-  OPENAI_MODEL: z.string().min(1).default("gpt-5-mini"),
-  OPENAI_FALLBACK_ENABLED: booleanString,
-  REASONING_EFFORT: z.preprocess(
-    (value) => (value === "" ? undefined : value),
-    z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
-  ),
-  FAST_MODE: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
-  BASH_TOOL_ENABLED: booleanString,
-  FIRECRAWL_API_KEY: z.preprocess(
-    (value) => (value === "" ? undefined : value),
-    z.string().min(1).optional(),
-  ),
-  FIRECRAWL_API_URL: z.preprocess(
-    (value) => (value === "" ? undefined : value),
-    z.url().optional(),
-  ),
-  DATA_DIR: z.string().min(1).default(".data"),
-  OWNER_TIMEZONE: z
+const settingsSchema = z.object({
+  owner_handle: z.string().min(1),
+  timezone: z
     .string()
     .min(1)
     .default(() => Intl.DateTimeFormat().resolvedOptions().timeZone)
     .refine(isValidTimeZone, { message: "must be an IANA timezone like America/Los_Angeles" }),
-  IDLE_THREAD_HOURS: z.coerce.number().min(0.1).max(168).default(6),
-  DEBOUNCE_MS: z.coerce.number().int().min(0).max(30_000).default(2_500),
-  MAX_TOOL_STEPS: z.coerce.number().int().min(1).max(32).default(8),
-  MAX_HISTORY_MESSAGES: z.coerce.number().int().min(4).max(400).default(40),
-  PORT: z.coerce.number().int().min(1).max(65_535).default(3_000),
-  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  provider: z
+    .object({
+      selected: z.enum(["chatgpt-subscription", "openai-api"]).default("chatgpt-subscription"),
+      chatgpt: z
+        .object({
+          model: z.string().min(1).default("gpt-5.4-mini"),
+          auth_file: z.string().min(1).default(".data/chatgpt-auth.json"),
+        })
+        .prefault({}),
+      openai: z
+        .object({
+          model: z.string().min(1).default("gpt-5-mini"),
+          fallback_enabled: z.boolean().default(true),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
+  model: z
+    .object({
+      reasoning_effort: z
+        .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+        .optional(),
+      fast_mode: z.boolean().default(false),
+    })
+    .prefault({}),
+  tools: z
+    .object({
+      bash_enabled: z.boolean().default(true),
+      firecrawl_url: z.url().optional(),
+    })
+    .prefault({}),
+  data_dir: z.string().min(1).default(".data"),
+  threads: z
+    .object({
+      idle_hours: z.number().min(0.1).max(168).default(6),
+      debounce_ms: z.number().int().min(0).max(30_000).default(2_500),
+    })
+    .prefault({}),
+  agent: z
+    .object({
+      max_tool_steps: z.number().int().min(1).max(32).default(8),
+      max_history_messages: z.number().int().min(4).max(400).default(40),
+    })
+    .prefault({}),
+  server: z
+    .object({
+      port: z.number().int().min(1).max(65_535).default(3_000),
+      log_level: z.enum(["debug", "info", "warn", "error"]).default("info"),
+    })
+    .prefault({}),
+});
+
+const optionalSecret = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().min(1).optional(),
+);
+
+const secretsSchema = z.object({
+  SPECTRUM_PROJECT_ID: z.string().min(1),
+  SPECTRUM_PROJECT_SECRET: z.string().min(1),
+  SPECTRUM_WEBHOOK_SECRET: z.string().min(1),
+  OPENAI_API_KEY: optionalSecret,
+  FIRECRAWL_API_KEY: optionalSecret,
+  // Not a secret: per-process override of server.port so multiple checkouts
+  // (e.g. Conductor's PORT=$CONDUCTOR_PORT run script) can share one config.
+  PORT: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.coerce.number().int().min(1).max(65_535).optional(),
+  ),
 });
 
 function isValidTimeZone(timeZone: string): boolean {
@@ -63,56 +93,94 @@ function isValidTimeZone(timeZone: string): boolean {
   }
 }
 
+function formatIssues(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+    .join("; ");
+}
+
+export type Settings = z.infer<typeof settingsSchema>;
+
+export function parseSettings(yamlText: string): Settings {
+  let document: unknown;
+  try {
+    document = parseYamlDocument(yamlText);
+  } catch (error) {
+    throw new Error(
+      `Invalid YAML in ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const parsed = settingsSchema.safeParse(document ?? {});
+  if (!parsed.success) {
+    throw new Error(`Invalid ${CONFIG_FILE}: ${formatIssues(parsed.error)}`);
+  }
+  return parsed.data;
+}
+
+export function loadSettings(path = resolveFromWorkspace(CONFIG_FILE)): Settings {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    throw new Error(
+      `Missing ${CONFIG_FILE} — copy nudge.config.example.yaml to ${CONFIG_FILE} and edit it.`,
+    );
+  }
+  return parseSettings(raw);
+}
+
 export type AppConfig = ReturnType<typeof loadConfig>;
 
-export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
-  const parsed = environmentSchema.safeParse(environment);
+export function loadConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  settings: Settings = loadSettings(),
+) {
+  const parsed = secretsSchema.safeParse(environment);
   if (!parsed.success) {
-    const details = parsed.error.issues
-      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-      .join("; ");
-    throw new Error(`Invalid configuration: ${details}`);
+    throw new Error(`Invalid .env: ${formatIssues(parsed.error)}`);
   }
-  const env = parsed.data;
-  const dataDir = resolveFromWorkspace(env.DATA_DIR);
+  const secrets = parsed.data;
+  const dataDir = resolveFromWorkspace(settings.data_dir);
   return {
-    ownerHandle: env.OWNER_IMESSAGE_HANDLE,
+    ownerHandle: settings.owner_handle,
     spectrum: {
-      projectId: env.SPECTRUM_PROJECT_ID,
-      projectSecret: env.SPECTRUM_PROJECT_SECRET,
-      webhookSecret: env.SPECTRUM_WEBHOOK_SECRET,
+      projectId: secrets.SPECTRUM_PROJECT_ID,
+      projectSecret: secrets.SPECTRUM_PROJECT_SECRET,
+      webhookSecret: secrets.SPECTRUM_WEBHOOK_SECRET,
     },
     provider: {
-      selected: env.MODEL_PROVIDER,
-      chatGptModel: env.CHATGPT_MODEL,
-      chatGptAuthFile: resolveFromWorkspace(env.CHATGPT_AUTH_FILE),
-      ...(env.OPENAI_API_KEY ? { openAiApiKey: env.OPENAI_API_KEY } : {}),
-      openAiModel: env.OPENAI_MODEL,
-      openAiFallbackEnabled: env.OPENAI_FALLBACK_ENABLED,
+      selected: settings.provider.selected,
+      chatGptModel: settings.provider.chatgpt.model,
+      chatGptAuthFile: resolveFromWorkspace(settings.provider.chatgpt.auth_file),
+      ...(secrets.OPENAI_API_KEY ? { openAiApiKey: secrets.OPENAI_API_KEY } : {}),
+      openAiModel: settings.provider.openai.model,
+      openAiFallbackEnabled: settings.provider.openai.fallback_enabled,
     },
-    ...(env.FIRECRAWL_API_KEY || env.FIRECRAWL_API_URL
+    ...(secrets.FIRECRAWL_API_KEY || settings.tools.firecrawl_url
       ? {
           firecrawl: {
-            ...(env.FIRECRAWL_API_KEY ? { apiKey: env.FIRECRAWL_API_KEY } : {}),
-            ...(env.FIRECRAWL_API_URL ? { apiUrl: env.FIRECRAWL_API_URL } : {}),
+            ...(secrets.FIRECRAWL_API_KEY ? { apiKey: secrets.FIRECRAWL_API_KEY } : {}),
+            ...(settings.tools.firecrawl_url ? { apiUrl: settings.tools.firecrawl_url } : {}),
           },
         }
       : {}),
-    bashEnabled: env.BASH_TOOL_ENABLED,
+    bashEnabled: settings.tools.bash_enabled,
     modelOptions: {
-      ...(env.REASONING_EFFORT ? { reasoningEffort: env.REASONING_EFFORT } : {}),
-      ...(env.FAST_MODE ? { serviceTier: "priority" as const } : {}),
+      ...(settings.model.reasoning_effort
+        ? { reasoningEffort: settings.model.reasoning_effort }
+        : {}),
+      ...(settings.model.fast_mode ? { serviceTier: "priority" as const } : {}),
     },
     dataDir,
     dbPath: join(dataDir, "nudge.db"),
     systemFilePath: join(dataDir, "SYSTEM.md"),
     schedulePath: join(dataDir, "SCHEDULE.md"),
-    timeZone: env.OWNER_TIMEZONE,
-    idleRolloverMs: Math.round(env.IDLE_THREAD_HOURS * 60 * 60 * 1000),
-    debounceMs: env.DEBOUNCE_MS,
-    maxToolSteps: env.MAX_TOOL_STEPS,
-    maxHistoryMessages: env.MAX_HISTORY_MESSAGES,
-    port: env.PORT,
-    logLevel: env.LOG_LEVEL,
+    timeZone: settings.timezone,
+    idleRolloverMs: Math.round(settings.threads.idle_hours * 60 * 60 * 1000),
+    debounceMs: settings.threads.debounce_ms,
+    maxToolSteps: settings.agent.max_tool_steps,
+    maxHistoryMessages: settings.agent.max_history_messages,
+    port: secrets.PORT ?? settings.server.port,
+    logLevel: settings.server.log_level,
   };
 }

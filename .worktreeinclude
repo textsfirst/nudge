@@ -1,2 +1,3 @@
 .env
+nudge.config.yaml
 .data/chatgpt-auth.json

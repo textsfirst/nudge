@@ -1,14 +1,10 @@
 import { runChatGptDeviceLogin } from "@nudge/agent";
-import { loadWorkspaceEnvironment } from "./env.js";
+import { loadSettings } from "./config.js";
 import { resolveFromWorkspace } from "./paths.js";
 
-loadWorkspaceEnvironment();
-
-const authFile = resolveFromWorkspace(
-  process.env.CHATGPT_AUTH_FILE ?? ".data/chatgpt-auth.json",
-);
-
 try {
+  const settings = loadSettings();
+  const authFile = resolveFromWorkspace(settings.provider.chatgpt.auth_file);
   const tokens = await runChatGptDeviceLogin({
     authFile,
     onPrompt: ({ verificationUrl, userCode }) => {
