@@ -22,7 +22,8 @@ export interface PhotonTransportConfig {
   rememberSpace: (handle: string, spaceId: string, platform: string) => void;
   /**
    * Handle one debounced inbound batch. `send` chunks and delivers text to
-   * the batch's space; a typing indicator shows while the handler runs. The
+   * the batch's space; a typing indicator shows from the first buffered text
+   * until the reply lands, so the debounce never reads as silence. The
    * signal aborts when a newer text arrives mid-run (steering) — abandon the
    * reply instead of sending it.
    */
@@ -57,6 +58,7 @@ export interface PhotonTransport {
 
 interface SendableSpace {
   send(text: string): Promise<unknown>;
+  startTyping(): Promise<unknown>;
 }
 
 export async function createPhotonTransport(
@@ -86,6 +88,15 @@ export async function createPhotonTransport(
     logger: config.logger,
     isDuplicate: config.isDuplicate,
     ...(config.debounceMs !== undefined ? { debounceMs: config.debounceMs } : {}),
+    // Typing shows as soon as a text starts buffering; `responding` below
+    // keeps it on through generation, so the indicator never gaps.
+    onWaiting: ({ space }) => {
+      void space.startTyping().catch((error: unknown) => {
+        config.logger.debug("Failed to show a typing indicator", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    },
     onBatch: (batch, context, signal) =>
       spectrum.responding(context.space as never, () =>
         config.onBatch(batch, (text) => sendAll(context.space, text), signal),
