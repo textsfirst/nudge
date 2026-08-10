@@ -43,6 +43,12 @@ export const settingsSchema = z.object({
       firecrawl_url: z.url().optional(),
     })
     .prefault({}),
+  google: z
+    .object({
+      default_account: z.string().min(1).optional(),
+      gws_path: z.string().min(1).optional(),
+    })
+    .prefault({}),
   data_dir: z.string().min(1).default(".data"),
   threads: z
     .object({
@@ -191,6 +197,19 @@ const SPEC: KeySpec[] = [
           "(a default, not a sandbox). Set to false to remove the tool entirely.",
         ),
       },
+    ],
+  },
+  {
+    key: "google",
+    comment: lines(
+      "Google accounts for the gws CLI are connected on the console's Connections page.",
+      "Credentials live under data_dir/google/, never in this file.",
+      "Optional: replace {} below with { default_account: personal } to choose the account",
+      "used by bare gws, and add gws_path: /opt/homebrew/bin/gws for a custom binary.",
+    ),
+    children: [
+      { key: "default_account" },
+      { key: "gws_path" },
     ],
   },
   {

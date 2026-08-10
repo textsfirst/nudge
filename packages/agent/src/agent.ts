@@ -12,7 +12,7 @@ import {
 import { FileWorkspace } from "./files.js";
 import { createLoopGuard } from "./loop.js";
 import { MemoryFiles } from "./memory.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildSystemPrompt, type GoogleAccountRef } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
 import { startOfDayInZone } from "./time.js";
 import { buildTools } from "./tools.js";
@@ -36,6 +36,13 @@ export interface NudgeAgentOptions {
   web?: FirecrawlOptions;
   /** Defaults to true; false removes the bash tool from the set. */
   bashEnabled?: boolean;
+  /** Extra environment for bash commands (PATH prepends, gws shim pointers). */
+  bashEnv?: Record<string, string>;
+  /**
+   * Live reader for connected Google accounts (label + email). Read at every
+   * prompt build so accounts connected mid-thread appear without a restart.
+   */
+  googleAccounts?: () => GoogleAccountRef[];
   /** OpenAI provider options applied to every model call (reasoningEffort, serviceTier, …). */
   modelOptions?: OpenAIResponsesProviderOptions;
   now?: () => number;
@@ -66,7 +73,9 @@ export class NudgeAgent {
       workspace: new FileWorkspace(options.dataDir),
       store: options.store,
       ...(options.web ? { web: new FirecrawlClient(options.web) } : {}),
-      ...(options.bashEnabled !== false ? { bash: { cwd: options.dataDir } } : {}),
+      ...(options.bashEnabled !== false
+        ? { bash: { cwd: options.dataDir, env: options.bashEnv } }
+        : {}),
     });
     this.#idleRolloverMs = options.idleRolloverMs ?? 6 * 60 * 60 * 1000;
     this.#compactAfterMessages = options.compactAfterMessages ?? 40;
@@ -163,6 +172,7 @@ export class NudgeAgent {
         timeZone: this.#options.timeZone,
         webEnabled: Boolean(this.#options.web),
         bashEnabled: this.#options.bashEnabled !== false,
+        googleAccounts: this.#googleAccounts(),
       });
       const { text: raw, toolPayload } = await this.#generate({
         system: systemPrompt,
@@ -256,7 +266,17 @@ export class NudgeAgent {
       timeZone: this.#options.timeZone,
       webEnabled: Boolean(this.#options.web),
       bashEnabled: this.#options.bashEnabled !== false,
+      googleAccounts: this.#googleAccounts(),
     });
+  }
+
+  /** Accounts appear/disappear as the owner connects them — never let a bad registry read break a turn. */
+  #googleAccounts(): GoogleAccountRef[] {
+    try {
+      return this.#options.googleAccounts?.() ?? [];
+    } catch {
+      return [];
+    }
   }
 
   /**

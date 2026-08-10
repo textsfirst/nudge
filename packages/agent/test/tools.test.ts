@@ -223,6 +223,14 @@ describe("executeBash", () => {
     expect(result.trim()).toBe(realpathSync(dir));
   });
 
+  it("merges the provided env over the inherited one", async () => {
+    const result = await executeBash('echo "$NUDGE_GOOGLE_DIR"', {
+      cwd,
+      env: { NUDGE_GOOGLE_DIR: "/tmp/google" },
+    });
+    expect(result.trim()).toBe("/tmp/google");
+  });
+
   it("kills the process tree on timeout", async () => {
     const started = Date.now();
     const result = await executeBash("sleep 5; echo late", { cwd, timeoutSeconds: 1 });

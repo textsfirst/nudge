@@ -68,6 +68,12 @@ export function loadConfig(
         }
       : {}),
     bashEnabled: settings.tools.bash_enabled,
+    google: {
+      ...(settings.google.default_account
+        ? { defaultAccount: settings.google.default_account }
+        : {}),
+      ...(settings.google.gws_path ? { gwsPath: settings.google.gws_path } : {}),
+    },
     modelOptions: {
       ...(settings.model.reasoning_effort
         ? { reasoningEffort: settings.model.reasoning_effort }

@@ -19,6 +19,7 @@ export {
   buildSystemPrompt,
   DEFAULT_SYSTEM_FILE,
   TOOL_GUIDANCE,
+  type GoogleAccountRef,
   type PromptStackInput,
 } from "./prompt.js";
 export {

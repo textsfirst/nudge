@@ -101,7 +101,7 @@ export class ChatGptAuthManager {
       contents = await readFile(this.#authFile, "utf8");
     } catch (error) {
       throw new SubscriptionAuthError(
-        `ChatGPT subscription auth is missing at ${this.#authFile}. Run \"pnpm auth:chatgpt\".`,
+        `ChatGPT subscription auth is missing at ${this.#authFile}. Connect it in the console (Connections page).`,
         { cause: error },
       );
     }
@@ -110,7 +110,7 @@ export class ChatGptAuthManager {
       return parseStoredTokens(JSON.parse(contents) as unknown);
     } catch (error) {
       throw new SubscriptionAuthError(
-        `ChatGPT subscription auth at ${this.#authFile} is invalid. Run \"pnpm auth:chatgpt\" again.`,
+        `ChatGPT subscription auth at ${this.#authFile} is invalid. Reconnect it in the console (Connections page).`,
         { cause: error },
       );
     }
@@ -130,7 +130,7 @@ export class ChatGptAuthManager {
     if (!response.ok) {
       const detail = await safeResponseText(response);
       throw new SubscriptionAuthError(
-        `ChatGPT subscription token refresh failed (${response.status}). Run \"pnpm auth:chatgpt\" again.${detail ? ` ${detail}` : ""}`,
+        `ChatGPT subscription token refresh failed (${response.status}). Reconnect it in the console (Connections page).${detail ? ` ${detail}` : ""}`,
       );
     }
 

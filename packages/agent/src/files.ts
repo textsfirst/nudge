@@ -16,6 +16,8 @@ export const MAX_LIST_ENTRIES = 500;
 /** Files the agent may never read or write (secrets and runtime state). */
 const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json"]);
 const HIDDEN_PREFIXES = ["nudge.db"];
+/** Directories that hold secrets (Google OAuth credentials + token caches). */
+const HIDDEN_DIRS = new Set(["google"]);
 
 /** Files the agent may read but never write. */
 const READ_ONLY = new Set(["SYSTEM.md", "README.md"]);
@@ -135,8 +137,10 @@ function page(content: string, path: string, offset: number, limit?: number): st
 }
 
 function isHidden(rel: string): boolean {
-  const base = rel.split(sep).at(-1) ?? rel;
-  if (rel.split(sep).some((part) => part.startsWith("."))) return true;
+  const parts = rel.split(sep);
+  const base = parts.at(-1) ?? rel;
+  if (parts.some((part) => part.startsWith("."))) return true;
+  if (parts[0] !== undefined && HIDDEN_DIRS.has(parts[0])) return true;
   if (HIDDEN_BASENAMES.has(base)) return true;
   return HIDDEN_PREFIXES.some((prefix) => base.startsWith(prefix));
 }

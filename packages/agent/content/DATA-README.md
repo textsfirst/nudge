@@ -59,6 +59,14 @@ Some skills ship with Nudge and receive updates on upgrade. Once you (or the
 owner) edit a shipped skill, that copy is yours — it stops receiving updates.
 Deleting one is respected; it will not come back.
 
+## Google accounts (gws)
+
+When the owner has connected Google accounts (your prompt lists them), the
+`gws` CLI is available in bash: `gws -a <account> gmail +triage`, and so on.
+`gws accounts` shows what each account was granted. The google-workspace skill
+has the details. Auth is owner-managed — `gws auth` is blocked for you; if an
+account expires, tell the owner instead of retrying.
+
 ## Read-only files
 
 SYSTEM.md (the owner's prompt) and this README are not writable by you.

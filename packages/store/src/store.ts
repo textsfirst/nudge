@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
   message_id TEXT PRIMARY KEY,
   processed_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS connection_health (
+  id TEXT PRIMARY KEY,
+  healthy INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 export class NudgeStore {
@@ -391,6 +397,23 @@ export class NudgeStore {
       )
       .all(now - maxAgeMs, maxAttempts)
       .map(toOutbound);
+  }
+
+  // -- connection health ---------------------------------------------------
+
+  /** Last recorded state for a connection id, or undefined if never recorded. */
+  connectionHealthy(id: string): boolean | undefined {
+    const row = this.#db.prepare("SELECT healthy FROM connection_health WHERE id = ?").get(id);
+    return row ? Number(row.healthy) === 1 : undefined;
+  }
+
+  setConnectionHealthy(id: string, healthy: boolean, at = Date.now()): void {
+    this.#db
+      .prepare(
+        `INSERT INTO connection_health (id, healthy, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET healthy = excluded.healthy, updated_at = excluded.updated_at`,
+      )
+      .run(id, healthy ? 1 : 0, at);
   }
 
   // -- webhook dedupe ------------------------------------------------------

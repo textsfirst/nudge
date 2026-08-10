@@ -24,6 +24,8 @@ describe("seedText", () => {
     expect(text).toContain("# timezone: America/Los_Angeles");
     expect(text).toContain("# reasoning_effort: medium");
     expect(text).toContain("# firecrawl_url: http://localhost:3002");
+    expect(text).toContain("# Optional: replace {} below with { default_account: personal }");
+    expect(text).toContain("google: {}");
     expect(text).toContain('owner_handle: ""');
   });
 });
@@ -44,6 +46,7 @@ describe("ensureSettingsFile", () => {
     const result = ensureSettingsFile(path);
     expect(result.created).toBe(false);
     expect(result.added).toContain("provider");
+    expect(result.added).toContain("google");
     expect(result.added).toContain("agent");
     expect(result.added).toContain("server.log_level");
     expect(result.added).not.toContain("owner_handle");

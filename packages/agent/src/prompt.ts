@@ -56,6 +56,23 @@ const BASH_TOOL_GUIDANCE = `bash runs shell commands with your data directory as
 Use it for file operations (ls, grep, wc, find) and quick computation. Do not
 use it to bypass the file tools' validation of SCHEDULE.md and memory files.`;
 
+/** One line per connected Google account, only when bash carries the gws shim. */
+function googleGuidance(accounts: GoogleAccountRef[]): string {
+  const list = accounts
+    .map((account) => `${account.label} (${account.email})`)
+    .join(", ");
+  return `The owner's Google accounts are connected: ${list}. Use the gws CLI in bash —
+\`gws -a <account> ...\` — for Gmail, Calendar, Drive, and the rest; the
+google-workspace skill has commands and pitfalls. \`gws accounts\` shows each
+account's granted services. Google auth is owner-managed: never run \`gws auth\`;
+if an account's auth has expired, say so instead of retrying.`;
+}
+
+export interface GoogleAccountRef {
+  label: string;
+  email: string;
+}
+
 export interface PromptStackInput {
   systemFile: string | undefined;
   memory: string;
@@ -66,6 +83,8 @@ export interface PromptStackInput {
   timeZone: string;
   webEnabled?: boolean;
   bashEnabled?: boolean;
+  /** Connected Google accounts; non-empty adds gws guidance (needs bash). */
+  googleAccounts?: GoogleAccountRef[];
 }
 
 /**
@@ -76,6 +95,9 @@ export function buildSystemPrompt(input: PromptStackInput): string {
   let guidance = TOOL_GUIDANCE;
   if (input.webEnabled) guidance += `\n\n${WEB_TOOL_GUIDANCE}`;
   if (input.bashEnabled) guidance += `\n\n${BASH_TOOL_GUIDANCE}`;
+  if (input.bashEnabled && input.googleAccounts && input.googleAccounts.length > 0) {
+    guidance += `\n\n${googleGuidance(input.googleAccounts)}`;
+  }
   const sections = [input.systemFile?.trim() || DEFAULT_SYSTEM_FILE, guidance];
 
   if (input.memory) {
