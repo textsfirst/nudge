@@ -5,9 +5,9 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --conditions=development src/index.ts",
     "start": "node dist/index.js",
-    "auth:chatgpt": "tsx src/auth-cli.ts",
+    "auth:chatgpt": "tsx --conditions=development src/auth-cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

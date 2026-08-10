@@ -164,6 +164,73 @@ describe("NudgeAgent.reply", () => {
   });
 });
 
+describe("NudgeAgent.reply steering", () => {
+  it("keeps the owner's message when the reply is aborted, and folds it into the next turn", async () => {
+    const { agent, store, source } = makeAgent(["combined answer"]);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      agent.reply(HANDLE, "book friday", { abortSignal: controller.signal }),
+    ).rejects.toThrow();
+
+    const session = store.activeSession(HANDLE)!;
+    expect(
+      store.sessionMessages(session.id).map((message) => [message.role, message.content]),
+    ).toEqual([["user", "book friday"]]);
+
+    await expect(agent.reply(HANDLE, "actually saturday")).resolves.toBe("combined answer");
+    // The last model call is the successful one; the aborted attempt precedes it.
+    const call = promptMessages(source.calls.at(-1)!);
+    expect(call.filter((message) => message.role === "user").map((message) => message.text)).toEqual(
+      ["book friday", "actually saturday"],
+    );
+  });
+
+  it("records completed tool calls in history when steered mid-run", async () => {
+    const controller = new AbortController();
+    const { agent, store, dataDir } = makeAgent([
+      toolCallChunks("write_file", { path: "USER.md", content: "- Likes espresso" }),
+      () => {
+        // The owner's next text lands between tool steps: abort like a real fetch would.
+        controller.abort();
+        throw new DOMException("aborted", "AbortError");
+      },
+      "decaf it is",
+    ]);
+
+    await expect(
+      agent.reply(HANDLE, "remember I like espresso", { abortSignal: controller.signal }),
+    ).rejects.toThrow();
+
+    // The tool's side effect happened and the note tells the next turn about it.
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(`${dataDir}/USER.md`, "utf8")).toBe("- Likes espresso");
+    const session = store.activeSession(HANDLE)!;
+    const messages = store.sessionMessages(session.id);
+    expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(messages[1]?.content).toContain("interrupted this turn");
+    expect(messages[1]?.content).toContain("write_file");
+    expect(messages[1]?.toolPayload).toContain("write_file");
+
+    await expect(agent.reply(HANDLE, "make it decaf")).resolves.toBe("decaf it is");
+  });
+
+  it("does not send an aborted turn's partial text on the next turn", async () => {
+    const { agent, store } = makeAgent(["fresh reply"]);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      agent.reply(HANDLE, "hello?", { abortSignal: controller.signal }),
+    ).rejects.toThrow();
+
+    // No assistant message was persisted for the aborted pure-text turn.
+    const session = store.activeSession(HANDLE)!;
+    expect(store.sessionMessages(session.id).map((message) => message.role)).toEqual(["user"]);
+    await expect(agent.reply(HANDLE, "you there?")).resolves.toBe("fresh reply");
+  });
+});
+
 describe("NudgeAgent.runTask", () => {
   it("runs without thread history and appends the result to the thread", async () => {
     const { agent, store, source } = makeAgent(["morning briefing text"]);
