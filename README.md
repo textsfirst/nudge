@@ -68,10 +68,9 @@ Every turn's system prompt is assembled from five slots, stable content first so
    ```bash
    pnpm install
    cp .env.example .env
-   cp nudge.config.example.yaml nudge.config.yaml
    ```
 
-   Settings live in `nudge.config.yaml`; `.env` holds only secrets.
+   Settings live in `nudge.config.yaml`; `.env` holds only secrets. There is no example file to copy — the first start of the server (or console) writes `nudge.config.yaml` with defaults and doc comments, and later versions append any new settings to it in place.
 
 2. Put the credentials from the [Photon dashboard](https://app.photon.codes) in `.env`:
 
@@ -81,7 +80,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
    SPECTRUM_WEBHOOK_SECRET=...
    ```
 
-   and your handle in `nudge.config.yaml`:
+   and your handle in `nudge.config.yaml` (run `pnpm dev` once to create the file):
 
    ```yaml
    owner_handle: "+15551234567"
@@ -144,7 +143,7 @@ Photon's inbound delivery is a signed HTTP webhook; the supported cloud send pat
 
 ## Configuration
 
-Settings live in `nudge.config.yaml` (copy `nudge.config.example.yaml`); secrets live in `.env`. Both are gitignored.
+Settings live in `nudge.config.yaml`; secrets live in `.env`. Both are gitignored. The settings file is seeded from the schema defaults on first start, and starting a newer version appends any settings the file is missing — your values and comments are never rewritten.
 
 `nudge.config.yaml`:
 

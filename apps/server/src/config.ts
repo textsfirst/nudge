@@ -1,75 +1,17 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYamlDocument } from "yaml";
 import { z } from "zod";
+import { formatIssues, loadSettings, type Settings } from "./config-file.js";
 import { resolveFromWorkspace } from "./paths.js";
 
-export const CONFIG_FILE = "nudge.config.yaml";
-
-const settingsSchema = z.object({
-  owner_handle: z.string().min(1),
-  timezone: z
-    .string()
-    .min(1)
-    .default(() => Intl.DateTimeFormat().resolvedOptions().timeZone)
-    .refine(isValidTimeZone, { message: "must be an IANA timezone like America/Los_Angeles" }),
-  provider: z
-    .object({
-      selected: z.enum(["chatgpt-subscription", "openai-api"]).default("chatgpt-subscription"),
-      chatgpt: z
-        .object({
-          model: z.string().min(1).default("gpt-5.4-mini"),
-          auth_file: z.string().min(1).default(".data/chatgpt-auth.json"),
-        })
-        .prefault({}),
-      openai: z
-        .object({
-          model: z.string().min(1).default("gpt-5-mini"),
-          fallback_enabled: z.boolean().default(true),
-        })
-        .prefault({}),
-    })
-    .prefault({}),
-  model: z
-    .object({
-      reasoning_effort: z
-        .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-        .optional(),
-      fast_mode: z.boolean().default(false),
-    })
-    .prefault({}),
-  tools: z
-    .object({
-      bash_enabled: z.boolean().default(true),
-      firecrawl_url: z.url().optional(),
-    })
-    .prefault({}),
-  google: z
-    .object({
-      default_account: z.string().min(1).optional(),
-      gws_path: z.string().min(1).optional(),
-    })
-    .prefault({}),
-  data_dir: z.string().min(1).default(".data"),
-  threads: z
-    .object({
-      idle_hours: z.number().min(0.1).max(168).default(6),
-      debounce_ms: z.number().int().min(0).max(30_000).default(2_500),
-    })
-    .prefault({}),
-  agent: z
-    .object({
-      max_tool_steps: z.number().int().min(1).max(500).default(64),
-      max_history_messages: z.number().int().min(4).max(400).default(40),
-    })
-    .prefault({}),
-  server: z
-    .object({
-      port: z.number().int().min(1).max(65_535).default(3_000),
-      log_level: z.enum(["debug", "info", "warn", "error"]).default("info"),
-    })
-    .prefault({}),
-});
+export {
+  CONFIG_FILE,
+  ensureSettingsFile,
+  loadSettings,
+  parseSettings,
+  seedText,
+  type EnsureResult,
+  type Settings,
+} from "./config-file.js";
 
 const optionalSecret = z.preprocess(
   (value) => (value === "" ? undefined : value),
@@ -89,51 +31,6 @@ const secretsSchema = z.object({
     z.coerce.number().int().min(1).max(65_535).optional(),
   ),
 });
-
-function isValidTimeZone(timeZone: string): boolean {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function formatIssues(error: z.ZodError): string {
-  return error.issues
-    .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-    .join("; ");
-}
-
-export type Settings = z.infer<typeof settingsSchema>;
-
-export function parseSettings(yamlText: string): Settings {
-  let document: unknown;
-  try {
-    document = parseYamlDocument(yamlText);
-  } catch (error) {
-    throw new Error(
-      `Invalid YAML in ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const parsed = settingsSchema.safeParse(document ?? {});
-  if (!parsed.success) {
-    throw new Error(`Invalid ${CONFIG_FILE}: ${formatIssues(parsed.error)}`);
-  }
-  return parsed.data;
-}
-
-export function loadSettings(path = resolveFromWorkspace(CONFIG_FILE)): Settings {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    throw new Error(
-      `Missing ${CONFIG_FILE} — copy nudge.config.example.yaml to ${CONFIG_FILE} and edit it.`,
-    );
-  }
-  return parseSettings(raw);
-}
 
 export type AppConfig = ReturnType<typeof loadConfig>;
 
