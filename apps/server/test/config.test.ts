@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { loadConfig, parseSettings, SECRET_SPECS } from "../src/config.js";
+import { loadBootstrap, loadConfig, SECRET_SPECS, settingsFromOverrides } from "../src/config.js";
 
 const SECRETS = {
   SPECTRUM_PROJECT_ID: "project-id",
@@ -8,117 +8,98 @@ const SECRETS = {
   SPECTRUM_WEBHOOK_SECRET: "webhook-secret",
 };
 
-describe("parseSettings", () => {
-  it("applies defaults to a minimal file", () => {
-    const settings = parseSettings('owner_handle: "+15551234567"');
-    expect(settings.provider.selected).toBe("chatgpt-subscription");
-    expect(settings.provider.chatgpt.auth_file).toBe(".data/chatgpt-auth.json");
-    expect(settings.provider.openai.fallback_enabled).toBe(false);
-    expect(settings.tools.bash_enabled).toBe(true);
-    expect(settings.threads.debounce_ms).toBe(2_500);
-    expect(settings.agent.max_tool_steps).toBe(64);
-    expect(settings.server.port).toBe(3_000);
+const ROOT = "/workspace";
+
+describe("loadBootstrap", () => {
+  it("applies defaults when the environment is empty", () => {
+    const boot = loadBootstrap({}, ROOT);
+    expect(boot.dataDir).toBe("/workspace/.data");
+    expect(boot.dbPath).toBe("/workspace/.data/nudge.db");
+    expect(boot.port).toBe(3_000);
+    expect(boot.logLevel).toBe("info");
   });
 
-  it("rejects a file without owner_handle", () => {
-    expect(() => parseSettings("server:\n  port: 3000")).toThrow(/owner_handle/);
-  });
-
-  it("rejects malformed YAML with a file-specific message", () => {
-    expect(() => parseSettings("owner_handle: [unclosed")).toThrow(/Invalid YAML/);
-  });
-
-  it("rejects an invalid timezone", () => {
-    expect(() =>
-      parseSettings('owner_handle: "+15551234567"\ntimezone: Mars/Olympus'),
-    ).toThrow(/timezone/);
-  });
-
-  it("parses the optional google block", () => {
-    expect(parseSettings('owner_handle: "+1"').google).toEqual({});
-    const settings = parseSettings(
-      'owner_handle: "+1"\ngoogle:\n  default_account: work\n  gws_path: /opt/gws',
+  it("reads NUDGE_DATA_DIR, PORT, and LOG_LEVEL from the environment", () => {
+    const boot = loadBootstrap(
+      { NUDGE_DATA_DIR: "var/nudge", PORT: "4123", LOG_LEVEL: "debug" },
+      ROOT,
     );
-    expect(settings.google).toEqual({ default_account: "work", gws_path: "/opt/gws" });
+    expect(boot.dataDir).toBe("/workspace/var/nudge");
+    expect(boot.dbPath).toBe("/workspace/var/nudge/nudge.db");
+    expect(boot.port).toBe(4_123);
+    expect(boot.logLevel).toBe("debug");
+  });
+
+  it("treats empty values as unset", () => {
+    expect(loadBootstrap({ PORT: "", LOG_LEVEL: "" }, ROOT).port).toBe(3_000);
+  });
+
+  it("rejects an invalid port", () => {
+    expect(() => loadBootstrap({ PORT: "99999" }, ROOT)).toThrow(/PORT/);
   });
 });
 
 describe("loadConfig", () => {
-  const settings = (yaml: string) => parseSettings(yaml);
+  const boot = loadBootstrap({}, ROOT);
+  const settings = (overrides: Record<string, unknown> = {}) =>
+    settingsFromOverrides({ owner_handle: "+15551234567", ...overrides });
 
-  it("combines settings with env secrets", () => {
-    const config = loadConfig(SECRETS, settings('owner_handle: "+15551234567"'));
+  it("combines settings with env secrets and bootstrap values", () => {
+    const config = loadConfig(SECRETS, settings(), boot);
     expect(config.ownerHandle).toBe("+15551234567");
     expect(config.spectrum.projectId).toBe("project-id");
     expect(config.provider.openAiApiKey).toBeUndefined();
     expect(config.firecrawl).toBeUndefined();
     expect(config.idleRolloverMs).toBe(6 * 60 * 60 * 1000);
+    expect(config.dataDir).toBe("/workspace/.data");
+    expect(config.dbPath).toBe("/workspace/.data/nudge.db");
+    expect(config.systemFilePath).toBe("/workspace/.data/SYSTEM.md");
+    expect(config.port).toBe(3_000);
+    expect(config.logLevel).toBe("info");
   });
 
   it("fails without spectrum secrets", () => {
-    expect(() => loadConfig({}, settings('owner_handle: "+15551234567"'))).toThrow(
-      /SPECTRUM_PROJECT_ID/,
-    );
-  });
-
-  it("lets the PORT env var override the yaml port", () => {
-    const config = loadConfig(
-      { ...SECRETS, PORT: "4123" },
-      settings('owner_handle: "+15551234567"\nserver:\n  port: 3000'),
-    );
-    expect(config.port).toBe(4123);
+    expect(() => loadConfig({}, settings(), boot)).toThrow(/SPECTRUM_PROJECT_ID/);
   });
 
   it("treats empty optional secrets as absent", () => {
     const config = loadConfig(
       { ...SECRETS, OPENAI_API_KEY: "", FIRECRAWL_API_KEY: "" },
-      settings('owner_handle: "+15551234567"'),
+      settings(),
+      boot,
     );
     expect(config.provider.openAiApiKey).toBeUndefined();
     expect(config.firecrawl).toBeUndefined();
   });
 
-  it("enables firecrawl from either the env key or the yaml url", () => {
-    const fromKey = loadConfig(
-      { ...SECRETS, FIRECRAWL_API_KEY: "fc-key" },
-      settings('owner_handle: "+15551234567"'),
-    );
+  it("enables firecrawl from either the env key or the settings url", () => {
+    const fromKey = loadConfig({ ...SECRETS, FIRECRAWL_API_KEY: "fc-key" }, settings(), boot);
     expect(fromKey.firecrawl).toEqual({ apiKey: "fc-key" });
 
     const fromUrl = loadConfig(
       SECRETS,
-      settings('owner_handle: "+15551234567"\ntools:\n  firecrawl_url: http://localhost:3002'),
+      settings({ "tools.firecrawl_url": "http://localhost:3002" }),
+      boot,
     );
     expect(fromUrl.firecrawl).toEqual({ apiUrl: "http://localhost:3002" });
   });
 
-  it("maps nested yaml values onto the flat config", () => {
+  it("maps nested settings onto the flat config", () => {
     const config = loadConfig(
       { ...SECRETS, OPENAI_API_KEY: "sk-test" },
-      settings(
-        [
-          'owner_handle: "+15551234567"',
-          "timezone: America/New_York",
-          "provider:",
-          "  selected: openai-api",
-          "  chatgpt:",
-          "    model: gpt-5.6-sol",
-          "model:",
-          "  reasoning_effort: high",
-          "  fast_mode: true",
-          "tools:",
-          "  bash_enabled: false",
-          "threads:",
-          "  idle_hours: 2",
-          "  debounce_ms: 100",
-          "agent:",
-          "  max_tool_steps: 20",
-          "  max_history_messages: 60",
-          "server:",
-          "  port: 8080",
-          "  log_level: debug",
-        ].join("\n"),
-      ),
+      settings({
+        timezone: "America/New_York",
+        "provider.selected": "openai-api",
+        "provider.chatgpt.model": "gpt-5.6-sol",
+        "model.reasoning_effort": "high",
+        "model.fast_mode": true,
+        "tools.bash_enabled": false,
+        "threads.idle_hours": 2,
+        "threads.debounce_ms": 100,
+        "agent.max_tool_steps": 20,
+        "agent.max_history_messages": 60,
+      }),
+      boot,
     );
     expect(config.provider.selected).toBe("openai-api");
     expect(config.provider.chatGptModel).toBe("gpt-5.6-sol");
@@ -129,8 +110,6 @@ describe("loadConfig", () => {
     expect(config.debounceMs).toBe(100);
     expect(config.maxToolSteps).toBe(20);
     expect(config.maxHistoryMessages).toBe(60);
-    expect(config.port).toBe(8080);
-    expect(config.logLevel).toBe("debug");
     expect(config.timeZone).toBe("America/New_York");
   });
 });

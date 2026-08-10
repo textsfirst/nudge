@@ -73,7 +73,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
    cp .env.example .env
    ```
 
-   Settings live in `nudge.config.yaml`; `.env` holds only secrets. There is no settings example file to copy. The first start of the server (or console) writes `nudge.config.yaml` with defaults and doc comments, and later versions append any new settings to it in place.
+   Settings live in the SQLite database and are edited on the console's **Settings** page; `.env` holds only secrets plus the bootstrap values needed before the database can be opened (`NUDGE_DATA_DIR`, `PORT`, `LOG_LEVEL` — all optional, defaults shown in `.env.example`).
 
 2. Put the credentials from the [Photon dashboard](https://app.photon.codes) in `.env`:
 
@@ -83,25 +83,21 @@ Every turn's system prompt is assembled from five slots, stable content first so
    SPECTRUM_WEBHOOK_SECRET=...
    ```
 
-   and your handle in `nudge.config.yaml` (run `pnpm dev` once to create the file):
-
-   ```yaml
-   owner_handle: "+15551234567"
-   ```
-
-   `owner_handle` must exactly match Photon's `message.sender.id`.
+   and set your handle on the console's **Settings** page (`pnpm console`, then Settings → Owner handle). It must exactly match Photon's `message.sender.id`; the server refuses to start until it is set.
 
 3. For the default ChatGPT subscription provider, authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser.
 
-   To use only an API key instead: `provider.selected: openai-api` in `nudge.config.yaml` plus `OPENAI_API_KEY` in `.env`. API fallback is off by default. With the subscription provider, a configured `OPENAI_API_KEY` + `provider.openai.fallback_enabled: true` is used only when subscription auth fails; startup and logs call out when it can spend API credits.
+   To use only an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`. API fallback is off by default. With the subscription provider, a configured `OPENAI_API_KEY` + the API-credit fallback toggle is used only when subscription auth fails; startup and logs call out when it can spend API credits.
 
 4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
 
-5. Start the server and expose port 3000 via your HTTPS host or tunnel:
+5. Start everything and expose port 3000 via your HTTPS host or tunnel:
 
    ```bash
    pnpm dev
    ```
+
+   This runs the agent server (`:3000`) and the web console (API `:3100`, UI `:5174`) together, each with a labeled, color-coded output prefix; Ctrl+C stops all of them. Use `pnpm dev:agent` or `pnpm console` to run just one side.
 
    Register `POST https://your-host.example/webhooks/photon` in Photon. Health check: `GET /healthz`.
 
@@ -114,7 +110,7 @@ A local web app for everything you'd otherwise SSH in for:
 - **Threads** — browse every conversation, read messages (tool calls included), search all history, end the active thread, delete threads or single messages
 - **Files** — edit SYSTEM.md, SCHEDULE.md (with a live parse preview and next-run times), memory files (with budget meters), and skills, all validated by the same rules the agent's writes go through
 - **Connections** — all sign-in flows: ChatGPT subscription (device code) and Google accounts for the gws CLI (see below); live token status per account
-- **Config** — edit `nudge.config.yaml` with live schema validation
+- **Settings** — typed forms for every setting, validated by the same schema the server boots with
 - **Secrets** — manage `.env` write-only; values are never sent to the browser
 
 ```bash
@@ -136,7 +132,7 @@ Setup lives entirely on the console's **Connections** page:
 1. **One-time Google Cloud app** — the wizard walks through creating a (free, private) Cloud project, publishing the OAuth consent screen to production (testing mode expires sign-ins after 7 days), enabling the APIs for the services you pick, and creating a **Web application** OAuth client with the redirect URI the wizard displays. Paste the client JSON and you never see this step again.
 2. **Per account** — pick services and access (read-only or full per service), name the account, and sign in with Google. Consent runs in your browser wherever it is — the redirect returns to the console's own origin, so it works over Tailscale or `ssh -L` against a fully headless server (no browser or OS keyring needed there; this is also why Nudge drives the OAuth flow itself instead of `gws auth login`).
 
-The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; `google.gws_path` for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
+The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; the gws binary setting for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
 
 A daily health check probes every connection (Google accounts and ChatGPT auth) and texts you once when one breaks — so an expired token doesn't surface as a silently failing morning briefing.
 
@@ -146,9 +142,9 @@ Photon's inbound delivery is a signed HTTP webhook; the supported cloud send pat
 
 ## Configuration
 
-Settings live in `nudge.config.yaml`; secrets live in `.env`. Both are gitignored. The settings file is seeded from the schema defaults on first start, and starting a newer version appends any settings the file is missing — your values and comments are never rewritten.
+Settings live in the SQLite database (`settings` table) and are edited on the console's **Settings** page; secrets live in `.env` (gitignored). Only values you change are stored — everything else follows the schema defaults, so new settings appear automatically after an upgrade. Settings are read at boot; restart the server to apply changes.
 
-`nudge.config.yaml`:
+Settings (console → Settings):
 
 | Key | Default | Purpose |
 | --- | --- | --- |
@@ -165,13 +161,10 @@ Settings live in `nudge.config.yaml`; secrets live in `.env`. Both are gitignore
 | `tools.firecrawl_url` | Firecrawl cloud | Self-hosted Firecrawl endpoint (enables the web tools without a key) |
 | `google.default_account` | sole account | Account label `gws` uses when the agent omits `-a` |
 | `google.gws_path` | PATH lookup | Explicit path to the `gws` binary |
-| `data_dir` | `.data` | SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ |
 | `threads.idle_hours` | `6` | Idle gap before a thread rolls over |
 | `threads.debounce_ms` | `2500` | Burst window before replying |
-| `agent.max_tool_steps` | `64` | Runaway-loop backstop per turn (the agent winds down gracefully near it) |
+| `agent.max_tool_steps` | `256` | Runaway-loop backstop per turn (the agent winds down gracefully near it) |
 | `agent.max_history_messages` | `40` | Thread length before compaction |
-| `server.port` | `3000` | HTTP port (a `PORT` env var overrides it, e.g. Conductor's per-workspace ports) |
-| `server.log_level` | `info` | `debug`, `info`, `warn`, or `error` |
 
 `.env`:
 
@@ -180,6 +173,9 @@ Settings live in `nudge.config.yaml`; secrets live in `.env`. Both are gitignore
 | `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` / `SPECTRUM_WEBHOOK_SECRET` | Photon credentials (required) |
 | `OPENAI_API_KEY` | Optional API provider / subscription fallback |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
+| `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ (default `.data`) |
+| `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Conductor's per-workspace ports) |
+| `LOG_LEVEL` | Bootstrap: `debug`, `info`, `warn`, or `error` (default `info`) |
 
 Unknown senders, non-iMessage deliveries, non-text content, and duplicate webhook deliveries are ignored.
 
@@ -198,7 +194,7 @@ Use a single server process: the scheduler's claims, webhook dedupe, and debounc
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.
-- OAuth tokens, API keys, and Photon secrets are never logged. `.env`, `nudge.config.yaml`, and `.data` are gitignored.
+- OAuth tokens, API keys, and Photon secrets are never logged. `.env` and `.data` are gitignored.
 - The console binds to localhost only, returns secret names but never values, and applies the same per-file validation and traversal guards as the agent's file tools.
 
 The ChatGPT subscription endpoint and its OAuth contract are not part of the standard public OpenAI API. The implementation follows the current first-party OAuth and account-header behavior in [openai/codex](https://github.com/openai/codex) and is isolated so upstream changes are contained.
@@ -206,9 +202,10 @@ The ChatGPT subscription endpoint and its OAuth contract are not part of the sta
 ## Commands
 
 ```bash
-pnpm dev              # watch the server
+pnpm dev              # watch the agent server and the web console together
+pnpm dev:agent        # watch only the agent server
 pnpm start            # rebuild the server and dependencies, then run it
-pnpm console          # watch the web console (API :3100, UI :5174)
+pnpm console          # watch only the web console (API :3100, UI :5174)
 pnpm console:start    # rebuild the console and dependencies, then serve it on :3100
 pnpm build            # compile all packages
 pnpm typecheck        # build, then type-check all packages

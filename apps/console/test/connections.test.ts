@@ -4,14 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
 
-const CONFIG = 'owner_handle: "+15551234567"\ntimezone: UTC\n';
-
 let root: string | undefined;
 
 function makeWorkspace(): string {
   root = mkdtempSync(join(tmpdir(), "console-connections-"));
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, "nudge.config.yaml"), CONFIG);
   writeFileSync(join(root, ".env"), "");
   mkdirSync(join(root, ".data"), { recursive: true });
   return root;

@@ -67,22 +67,22 @@ export class ConnectionsService {
   /** Everything the Connections page renders, statuses probed live. */
   async overview() {
     const settings = this.#context.settings().settings;
-    const dataDir = this.#context.dataDir(settings);
+    const dataDir = this.#context.dataDir();
     const client = readGoogleClient(dataDir);
     const accounts = readGoogleAccounts(dataDir);
     const statuses = await Promise.all(
       accounts.map((account) => probeGoogleAccount(dataDir, account.label, this.#fetch)),
     );
-    const gws = await findGwsBinary(settings?.google.gws_path);
+    const gws = await findGwsBinary(settings.google.gws_path);
     return {
       chatgpt: {
-        selected: settings?.provider.selected ?? "chatgpt-subscription",
+        selected: settings.provider.selected,
         ...this.#chatGptStatus(),
       },
       google: {
         clientConfigured: client !== undefined,
         clientId: client?.clientId ?? null,
-        defaultAccount: settings?.google.default_account ?? null,
+        defaultAccount: settings.google.default_account ?? null,
         gws: gws ? { installed: true, version: gws.version, path: gws.path } : { installed: false },
         services: GOOGLE_SERVICES.map((service) => ({
           id: service.id,
@@ -237,10 +237,7 @@ export class ConnectionsService {
 
   #chatGptAuthFile(): string {
     const settings = this.#context.settings().settings;
-    return resolve(
-      this.#context.root,
-      settings?.provider.chatgpt.auth_file ?? ".data/chatgpt-auth.json",
-    );
+    return resolve(this.#context.root, settings.provider.chatgpt.auth_file);
   }
 
   #chatGptStatus(): { connected: boolean; accountId: string | null; updatedAt: string | null } {

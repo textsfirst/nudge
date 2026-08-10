@@ -7,8 +7,16 @@ import type {
 } from "ai";
 import type { Logger } from "./types.js";
 
-/** Model calls still available when the wind-down note is injected. */
-export const WIND_DOWN_STEPS = 3;
+/** Fraction of the cap reserved as wind-down runway (1/16th, at least 3 calls). */
+export const WIND_DOWN_FRACTION = 16;
+
+/** Minimum model calls of runway the wind-down note guarantees. */
+export const WIND_DOWN_MIN_STEPS = 3;
+
+/** Runway grows with the cap: a bigger budget earns a longer wrap-up window. */
+export function windDownSteps(maxToolSteps: number): number {
+  return Math.max(WIND_DOWN_MIN_STEPS, Math.round(maxToolSteps / WIND_DOWN_FRACTION));
+}
 
 /** No-progress repeats before the model is warned it looks stuck. */
 export const STALL_WARN_STEPS = 3;
@@ -39,7 +47,7 @@ export interface LoopGuard {
  * streamText call.
  */
 export function createLoopGuard(options: { maxToolSteps: number; logger: Logger }): LoopGuard {
-  const windDownAt = options.maxToolSteps - WIND_DOWN_STEPS;
+  const windDownAt = options.maxToolSteps - windDownSteps(options.maxToolSteps);
   let warnedSignature: string | undefined;
 
   const prepareStep: PrepareStepFunction<ToolSet> = ({ stepNumber, messages, steps }) => {
@@ -49,10 +57,10 @@ export function createLoopGuard(options: { maxToolSteps: number; logger: Logger 
         role: "user",
         content:
           `[System note: this turn has used ${stepNumber} of its ${options.maxToolSteps} tool ` +
-          `steps; only ${WIND_DOWN_STEPS} model calls remain before the loop is stopped. Wrap ` +
-          "up: finish the task if it is within reach, otherwise save your progress (files, " +
-          "memory, or a scheduled follow-up) and reply with where things stand and what " +
-          "remains.]",
+          `steps; only ${options.maxToolSteps - stepNumber} model calls remain before the loop ` +
+          "is stopped. Wrap up: finish the task if it is within reach, otherwise save your " +
+          "progress (files, memory, or a scheduled follow-up) and reply with where things " +
+          "stand and what remains.]",
       });
     }
     const stall = stalledStreak(steps);

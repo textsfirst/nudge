@@ -2,7 +2,7 @@ import { SubscriptionAuthError, type Logger } from "@nudge/agent";
 import type { InboundBatch } from "@nudge/photon";
 import type { NudgeStore } from "@nudge/store";
 
-const APOLOGY = "Sorry — something went wrong on my end. Mind sending that again?";
+const APOLOGY = "Sorry, I hit a snag on my end. Mind sending that again?";
 
 export interface ReplyAgent {
   reply(
@@ -43,10 +43,19 @@ export function createReplyHandler(deps: {
         });
         return;
       }
-      logger.error("Reply generation failed", {
-        messageIds: batch.messageIds,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("Reply generation failed", { messageIds: batch.messageIds, error: message });
+      // Journal the failure into the thread so the console shows what went
+      // wrong. The agent keeps error rows out of the model's context.
+      const session = store.activeSession(batch.handle);
+      if (session) {
+        store.appendMessage({
+          sessionId: session.id,
+          handle: batch.handle,
+          role: "error",
+          content: message,
+        });
+      }
       try {
         await send(
           error instanceof SubscriptionAuthError

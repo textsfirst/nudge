@@ -10,4 +10,5 @@ export {
   type SessionRow,
   type SessionSummaryRow,
   type SpaceRow,
+  type TurnProgressRow,
 } from "./store.js";

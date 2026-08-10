@@ -1,9 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+export interface FieldIssue {
+  path: string;
+  message: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly issues: FieldIssue[] = [],
   ) {
     super(message);
   }
@@ -19,6 +25,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       typeof body.error === "string" ? body.error : `Request failed (${response.status})`,
       response.status,
+      Array.isArray(body.issues) ? (body.issues as FieldIssue[]) : [],
     );
   }
   return body as T;
@@ -29,8 +36,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export interface Status {
   workspaceRoot: string;
   dataDir: string;
-  configValid: boolean;
-  configError: string | null;
+  settingsValid: boolean;
+  settingsError: string | null;
   ownerHandle: string | null;
   serverPort: number;
   serverUp: boolean;
@@ -39,10 +46,26 @@ export interface Status {
   dbExists: boolean;
 }
 
-export interface ConfigFile {
-  content: string;
-  exists: boolean;
-  valid: boolean;
+export interface SettingsField {
+  path: string;
+  label: string;
+  help?: string;
+  control: "text" | "number" | "boolean" | "select";
+  options?: string[];
+  optional?: boolean;
+  placeholder?: string;
+}
+
+export interface SettingsSection {
+  title: string;
+  description?: string;
+  fields: SettingsField[];
+}
+
+export interface SettingsPayload {
+  settings: Record<string, unknown>;
+  overrides: Record<string, unknown>;
+  form: SettingsSection[];
   error: string | null;
 }
 
@@ -92,15 +115,35 @@ export interface ThreadSummary {
   preview: string | null;
 }
 
+export interface ThreadMessage {
+  id: number;
+  role: "user" | "assistant" | "error";
+  content: string;
+  createdAt: number;
+  toolCalls: { tool: string; input: unknown; output: unknown }[] | null;
+}
+
+/** The in-flight turn's live tool-step trace; null when no turn is running. */
+export interface ThreadProgress {
+  startedAt: number;
+  updatedAt: number;
+  toolCalls: { tool: string; input: unknown; output: unknown }[];
+}
+
 export interface ThreadDetail {
-  session: ThreadSummary & { summary: string | null; carryover: string | null };
-  messages: {
+  session: {
     id: number;
-    role: "user" | "assistant";
-    content: string;
-    createdAt: number;
-    toolCalls: { tool: string; input: unknown; output: unknown }[] | null;
-  }[];
+    handle: string;
+    startedAt: number;
+    lastActivityAt: number;
+    endedAt: number | null;
+    endReason: string | null;
+    summary: string | null;
+    carryover: string | null;
+    compactedThrough: number;
+  };
+  messages: ThreadMessage[];
+  progress: ThreadProgress | null;
 }
 
 export interface GoogleAccount {
@@ -153,8 +196,8 @@ export const useStatus = () =>
     refetchInterval: 15_000,
   });
 
-export const useConfig = () =>
-  useQuery({ queryKey: ["config"], queryFn: () => request<ConfigFile>("/api/config") });
+export const useSettings = () =>
+  useQuery({ queryKey: ["settings"], queryFn: () => request<SettingsPayload>("/api/settings") });
 
 export const useSecrets = () =>
   useQuery({
@@ -179,12 +222,20 @@ export const useThreads = (offset: number, limit = 25) =>
       request<{ sessions: ThreadSummary[]; total: number }>(
         `/api/threads?limit=${limit}&offset=${offset}`,
       ),
+    refetchInterval: 10_000,
   });
 
 export const useThread = (id: number) =>
   useQuery({
     queryKey: ["thread", id],
     queryFn: () => request<ThreadDetail>(`/api/threads/${id}`),
+    // Live-follow active threads (faster while a turn is in flight); ended
+    // ones are immutable so a single fetch does.
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || data.session.endedAt !== null) return false;
+      return data.progress ? 1_000 : 2_500;
+    },
   });
 
 export const useSearch = (query: string) =>
@@ -239,16 +290,10 @@ export function useInvalidate() {
   };
 }
 
-export const validateConfig = (content: string) =>
-  request<{ valid: boolean; error: string | null }>("/api/config/validate", {
-    method: "POST",
-    body: JSON.stringify({ content }),
-  });
-
-export const saveConfig = (content: string) =>
-  request<{ ok: boolean; note?: string }>("/api/config", {
+export const saveSettings = (settings: Record<string, unknown>) =>
+  request<{ ok: boolean; note?: string }>("/api/settings", {
     method: "PUT",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ settings }),
   });
 
 export const setSecret = (key: string, value: string) =>

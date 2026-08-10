@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web \"tsx watch --conditions=development src/server/index.ts\" \"vite\"",
+    "dev": "concurrently -k -n api,web -c magenta,cyan \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:api": "tsx watch --conditions=development src/server/index.ts",
+    "dev:web": "vite",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "start": "pnpm --filter @nudge/console... build && node dist/server/index.js",
@@ -16,8 +18,7 @@
     "@nudge/schedule": "workspace:*",
     "@nudge/server": "workspace:*",
     "@nudge/store": "workspace:*",
-    "elysia": "^1.4.29",
-    "yaml": "^2.9.0"
+    "elysia": "^1.4.29"
   },
   "devDependencies": {
     "@codemirror/lang-markdown": "^6.3.0",

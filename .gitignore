@@ -2,7 +2,6 @@ node_modules/
 dist/
 .env
 .env.local
-nudge.config.yaml
 .data/
 coverage/
 *.log

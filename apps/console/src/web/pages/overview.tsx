@@ -26,15 +26,15 @@ export function OverviewPage() {
           : data.serverError
             ? `Listening on port ${data.serverPort}; degraded: ${data.serverError}`
             : `Listening on port ${data.serverPort}`,
-      to: "/config",
+      to: "/settings",
     },
     {
-      label: "Configuration",
-      ok: data.configValid,
-      detail: data.configValid
+      label: "Settings",
+      ok: data.settingsValid,
+      detail: data.settingsValid
         ? `owner_handle ${data.ownerHandle ?? "—"}`
-        : data.configError ?? "Invalid",
-      to: "/config",
+        : data.settingsError ?? "Invalid",
+      to: "/settings",
     },
     {
       label: "Conversation history",

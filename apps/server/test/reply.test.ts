@@ -52,9 +52,10 @@ describe("createReplyHandler", () => {
     expect(store.isWebhookProcessed("m1")).toBe(true);
   });
 
-  it("apologizes on real failures", async () => {
+  it("apologizes on real failures and journals the error into the thread", async () => {
     const store = new NudgeStore(":memory:");
     const logger = makeLogger();
+    const session = store.startSession(batch.handle);
     const sent: string[] = [];
     const handler = createReplyHandler({
       agent: {
@@ -69,9 +70,13 @@ describe("createReplyHandler", () => {
     await handler(batch, async (text) => void sent.push(text), new AbortController().signal);
 
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toContain("something went wrong");
+    expect(sent[0]).toContain("hit a snag");
     expect(logger.error).toHaveBeenCalled();
     expect(store.isWebhookProcessed("m1")).toBe(true);
+    expect(store.sessionMessages(session.id).at(-1)).toMatchObject({
+      role: "error",
+      content: "model down",
+    });
   });
 
   it("gives the owner an actionable message for subscription auth failures", async () => {

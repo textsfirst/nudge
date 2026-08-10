@@ -18,7 +18,7 @@ const NAV = [
   { to: "/threads", label: "Threads", icon: MessagesSquare },
   { to: "/files", label: "Files", icon: FileText },
   { to: "/connections", label: "Connections", icon: Cable },
-  { to: "/config", label: "Config", icon: Settings2 },
+  { to: "/settings", label: "Settings", icon: Settings2 },
   { to: "/secrets", label: "Secrets", icon: KeyRound },
 ];
 

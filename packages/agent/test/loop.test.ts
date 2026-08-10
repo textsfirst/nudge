@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { windDownSteps } from "../src/loop.js";
 import { makeAgent, promptMessages, toolCallChunks } from "./helpers.js";
 
 const HANDLE = "+15551234567";
@@ -18,6 +19,7 @@ describe("agent loop limits", () => {
     const secondCall = promptMessages(source.calls[1]!);
     const note = secondCall.filter((message) => message.role === "user").at(-1);
     expect(note?.text).toContain("tool steps");
+    expect(note?.text).toContain("only 3 model calls remain");
     expect(note?.text).toContain("Wrap up");
 
     // The injected note is loop-internal; thread history stays clean.
@@ -26,6 +28,12 @@ describe("agent loop limits", () => {
       ["user", "run something"],
       ["assistant", "all done"],
     ]);
+  });
+
+  it("gives a bigger cap a proportionally longer wind-down runway", () => {
+    expect(windDownSteps(4)).toBe(3);
+    expect(windDownSteps(64)).toBe(4);
+    expect(windDownSteps(256)).toBe(16);
   });
 
   it("does not inject the note on short runs", async () => {

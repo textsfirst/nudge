@@ -2,7 +2,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-export type MessageRole = "user" | "assistant";
+/** `error` rows are console-facing diagnostics; the agent excludes them from model context. */
+export type MessageRole = "user" | "assistant" | "error";
 export type OutboundKind = "reply" | "nudge";
 export type OutboundStatus = "pending" | "sending" | "sent" | "failed";
 
@@ -65,8 +66,18 @@ export interface MaintenanceResult {
   prunedWebhooks: number;
 }
 
+/** The live tool-step trace of a session's in-flight turn, for the console. */
+export interface TurnProgressRow {
+  sessionId: number;
+  handle: string;
+  startedAt: number;
+  updatedAt: number;
+  /** JSON array of {tool, input, output} entries — the same shape as a message's tool payload. */
+  steps: string;
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 3;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -159,6 +170,31 @@ const MIGRATIONS: readonly Migration[] = [
     // first created, so rebuild once while adopting version 1.
     db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
   },
+  (db) => {
+    // Settings overrides: dotted schema paths mapped to JSON values. Only
+    // explicitly-set values are stored; everything else falls back to the
+    // schema defaults at read time.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+  },
+  (db) => {
+    // Live tool-step traces for in-flight turns; the console polls this to
+    // show progress. One row per session, deleted when the turn settles.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS turn_progress (
+        session_id INTEGER PRIMARY KEY,
+        handle TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        steps TEXT NOT NULL
+      )
+    `);
+  },
 ];
 
 export class NudgeStore {
@@ -218,6 +254,7 @@ export class NudgeStore {
     this.#db
       .prepare("UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL")
       .run(at, reason, id);
+    this.clearTurnProgress(id);
   }
 
   setCompaction(id: number, summary: string, throughMessageId: number): void {
@@ -262,6 +299,7 @@ export class NudgeStore {
   /** Delete a session and all its messages (the FTS trigger prunes the index). */
   deleteSession(id: number): boolean {
     this.#db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
+    this.clearTurnProgress(id);
     const result = this.#db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
     return result.changes > 0;
   }
@@ -296,6 +334,39 @@ export class NudgeStore {
       toolPayload: input.toolPayload ?? null,
       createdAt: at,
     };
+  }
+
+  // -- turn progress -------------------------------------------------------
+
+  /** Upsert the live tool-step trace for a session's in-flight turn. */
+  setTurnProgress(sessionId: number, handle: string, steps: string, at = Date.now()): void {
+    this.#db
+      .prepare(
+        `INSERT INTO turn_progress (session_id, handle, started_at, updated_at, steps)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           steps = excluded.steps, updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, handle, at, at, steps);
+  }
+
+  turnProgress(sessionId: number): TurnProgressRow | undefined {
+    const row = this.#db
+      .prepare("SELECT * FROM turn_progress WHERE session_id = ?")
+      .get(sessionId);
+    return row
+      ? {
+          sessionId: requiredNumber(row, "session_id"),
+          handle: requiredString(row, "handle"),
+          startedAt: requiredNumber(row, "started_at"),
+          updatedAt: requiredNumber(row, "updated_at"),
+          steps: requiredString(row, "steps"),
+        }
+      : undefined;
+  }
+
+  clearTurnProgress(sessionId: number): void {
+    this.#db.prepare("DELETE FROM turn_progress WHERE session_id = ?").run(sessionId);
   }
 
   sessionMessages(sessionId: number, afterMessageId = 0): MessageRow[] {
@@ -448,6 +519,40 @@ export class NudgeStore {
          ON CONFLICT(id) DO UPDATE SET healthy = excluded.healthy, updated_at = excluded.updated_at`,
       )
       .run(id, healthy ? 1 : 0, at);
+  }
+
+  // -- settings ------------------------------------------------------------
+
+  /** Explicit setting overrides: dotted schema paths mapped to JSON values. */
+  settingsOverrides(): Record<string, unknown> {
+    const overrides: Record<string, unknown> = {};
+    for (const row of this.#db.prepare("SELECT key, value FROM settings ORDER BY key").all()) {
+      try {
+        overrides[requiredString(row, "key")] = JSON.parse(requiredString(row, "value"));
+      } catch {
+        // A corrupt row falls back to the schema default for that key.
+      }
+    }
+    return overrides;
+  }
+
+  /** Replace the full override set — a settings save is always a whole form. */
+  replaceSettingsOverrides(overrides: Record<string, unknown>, at = Date.now()): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.prepare("DELETE FROM settings").run();
+      const insert = this.#db.prepare(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+      );
+      for (const [key, value] of Object.entries(overrides)) {
+        if (value === undefined) continue;
+        insert.run(key, JSON.stringify(value), at);
+      }
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   // -- maintenance ---------------------------------------------------------

@@ -45,6 +45,34 @@ describe("NudgeStore", () => {
     expect(store.searchMessages('nonexistent"term -- injection')).toEqual([]);
   });
 
+  it("tracks live turn progress and clears it when the session settles", () => {
+    const store = new NudgeStore(":memory:");
+    const session = store.startSession(HANDLE, 1_000);
+    expect(store.turnProgress(session.id)).toBeUndefined();
+
+    store.setTurnProgress(session.id, HANDLE, "[]", 1_000);
+    store.setTurnProgress(session.id, HANDLE, '[{"tool":"bash"}]', 2_000);
+    expect(store.turnProgress(session.id)).toEqual({
+      sessionId: session.id,
+      handle: HANDLE,
+      startedAt: 1_000,
+      updatedAt: 2_000,
+      steps: '[{"tool":"bash"}]',
+    });
+
+    store.clearTurnProgress(session.id);
+    expect(store.turnProgress(session.id)).toBeUndefined();
+
+    store.setTurnProgress(session.id, HANDLE, "[]", 3_000);
+    store.endSession(session.id, "idle", 4_000);
+    expect(store.turnProgress(session.id)).toBeUndefined();
+
+    const next = store.startSession(HANDLE, 5_000);
+    store.setTurnProgress(next.id, HANDLE, "[]", 5_000);
+    store.deleteSession(next.id);
+    expect(store.turnProgress(next.id)).toBeUndefined();
+  });
+
   it("limits session messages to those after a compaction point", () => {
     const store = new NudgeStore(":memory:");
     const session = store.startSession(HANDLE);
@@ -199,11 +227,30 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("replaces the settings override set wholesale", () => {
+    const store = new NudgeStore(":memory:");
+    expect(store.settingsOverrides()).toEqual({});
+
+    store.replaceSettingsOverrides({
+      owner_handle: "+15551234567",
+      "threads.idle_hours": 2,
+      "model.fast_mode": true,
+    });
+    expect(store.settingsOverrides()).toEqual({
+      owner_handle: "+15551234567",
+      "threads.idle_hours": 2,
+      "model.fast_mode": true,
+    });
+
+    store.replaceSettingsOverrides({ owner_handle: "+15551234567" });
+    expect(store.settingsOverrides()).toEqual({ owner_handle: "+15551234567" });
   });
 
   it("refuses a database created by a newer schema", () => {

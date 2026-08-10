@@ -5,15 +5,16 @@ import { NudgeStore } from "@nudge/store";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
 
-const CONFIG = 'owner_handle: "+15551234567"\ntimezone: UTC\n';
-
 let root: string | undefined;
 
 function makeWorkspace(options: { env?: string } = {}): string {
   root = mkdtempSync(join(tmpdir(), "console-"));
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, "nudge.config.yaml"), CONFIG);
-  writeFileSync(join(root, ".env"), options.env ?? "SPECTRUM_PROJECT_ID=p1\n# a comment\n");
+  // PORT steers the status probe away from 3000, where a real dev server may be listening.
+  writeFileSync(
+    join(root, ".env"),
+    `PORT=59983\n${options.env ?? "SPECTRUM_PROJECT_ID=p1\n# a comment\n"}`,
+  );
   mkdirSync(join(root, ".data", "skills", "demo"), { recursive: true });
   writeFileSync(join(root, ".data", "SYSTEM.md"), "Be helpful.");
   writeFileSync(join(root, ".data", "README.md"), "system manual");
@@ -46,37 +47,57 @@ async function json(app: ConsoleApp, path: string, init?: RequestInit): Promise<
 }
 
 describe("console API", () => {
-  it("reports status from the workspace", async () => {
-    const { status, body } = await json(app(), "/api/status");
-    expect(status).toBe(200);
-    expect(body.configValid).toBe(true);
-    expect(body.ownerHandle).toBe("+15551234567");
-    expect(body.serverUp).toBe(false);
-    expect(body.serverHealthy).toBe(false);
-    expect(body.serverError).toContain("Missing required secrets");
+  it("reports status from the workspace, flagging the unset owner handle", async () => {
+    const application = app();
+    const before = await json(application, "/api/status");
+    expect(before.status).toBe(200);
+    expect(before.body.settingsValid).toBe(false);
+    expect(before.body.ownerHandle).toBeNull();
+    expect(before.body.serverUp).toBe(false);
+    expect(before.body.serverError).toContain("owner_handle is not set");
+
+    await json(application, "/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ settings: { owner_handle: "+15551234567" } }),
+    });
+    const after = await json(application, "/api/status");
+    expect(after.body.settingsValid).toBe(true);
+    expect(after.body.ownerHandle).toBe("+15551234567");
+    expect(after.body.serverError).toContain("Missing required secrets");
   });
 
-  it("round-trips config edits and rejects invalid YAML with diagnostics", async () => {
+  it("round-trips typed settings, storing only non-default overrides", async () => {
     const application = app();
-    const before = await json(application, "/api/config");
-    expect(before.body.valid).toBe(true);
+    const before = await json(application, "/api/settings");
+    expect(before.status).toBe(200);
+    expect(before.body.settings.owner_handle).toBe("");
+    expect(before.body.overrides).toEqual({});
+    expect(before.body.form.length).toBeGreaterThan(0);
 
-    const invalid = await json(application, "/api/config", {
+    const invalid = await json(application, "/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ content: "server:\n  port: 99999\n" }),
+      body: JSON.stringify({ settings: { threads: { idle_hours: 999 } } }),
     });
     expect(invalid.status).toBe(422);
-    expect(invalid.body.error).toContain("owner_handle");
-    // The broken write must not land on disk.
-    expect(readFileSync(join(root!, "nudge.config.yaml"), "utf8")).toBe(CONFIG);
+    expect(invalid.body.issues).toEqual([
+      { path: "threads.idle_hours", message: expect.stringContaining("168") },
+    ]);
+    // The broken write must not land in the database.
+    expect((await json(application, "/api/settings")).body.overrides).toEqual({});
 
-    const valid = await json(application, "/api/config", {
+    const valid = await json(application, "/api/settings", {
       method: "PUT",
-      body: JSON.stringify({ content: `${CONFIG}threads:\n  idle_hours: 2\n` }),
+      body: JSON.stringify({
+        settings: { owner_handle: "+15551234567", threads: { idle_hours: 2 } },
+      }),
     });
     expect(valid.status).toBe(200);
-    const after = await json(application, "/api/config");
-    expect(after.body.content).toContain("idle_hours: 2");
+    const after = await json(application, "/api/settings");
+    expect(after.body.settings.threads.idle_hours).toBe(2);
+    expect(after.body.overrides).toEqual({
+      owner_handle: "+15551234567",
+      "threads.idle_hours": 2,
+    });
   });
 
   it("lists secrets without values and edits .env preserving comments", async () => {
@@ -110,7 +131,7 @@ describe("console API", () => {
 
     const hidden = await json(application, "/api/files/content?path=chatgpt-auth.json");
     expect(hidden.status).toBe(403);
-    const outside = await json(application, "/api/files/content?path=../nudge.config.yaml");
+    const outside = await json(application, "/api/files/content?path=../.env");
     expect(outside.status).toBe(400);
   });
 
@@ -181,6 +202,11 @@ describe("console API", () => {
       role: "user",
       content: "hello there",
     });
+    store.setTurnProgress(
+      session.id,
+      "+15551234567",
+      JSON.stringify([{ tool: "bash", input: { command: "ls" }, output: "ok" }]),
+    );
     store.close();
 
     const list = await json(application, "/api/threads");
@@ -189,12 +215,18 @@ describe("console API", () => {
 
     const detail = await json(application, `/api/threads/${session.id}`);
     expect(detail.body.messages[0].content).toBe("hello there");
+    expect(detail.body.progress.toolCalls).toEqual([
+      { tool: "bash", input: { command: "ls" }, output: "ok" },
+    ]);
 
     const search = await json(application, "/api/search?q=hello");
     expect(search.body.hits).toHaveLength(1);
 
     const ended = await json(application, `/api/threads/${session.id}/end`, { method: "POST" });
     expect(ended.status).toBe(200);
+    // Ending the session drops any leftover progress trace.
+    const endedDetail = await json(application, `/api/threads/${session.id}`);
+    expect(endedDetail.body.progress).toBeNull();
     const endedAgain = await json(application, `/api/threads/${session.id}/end`, { method: "POST" });
     expect(endedAgain.status).toBe(409);
 

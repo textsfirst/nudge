@@ -1,8 +1,13 @@
-import { statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChatGptAuthManager } from "@nudge/agent";
 import { parseSchedule, nextRun } from "@nudge/schedule";
-import { parseSettings, CONFIG_FILE, type Settings } from "@nudge/server/config";
+import {
+  formatIssues,
+  overridesFromSettings,
+  SETTINGS_FORM,
+  settingsSchema,
+  type Settings,
+} from "@nudge/server/config";
 import { Elysia } from "elysia";
 import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./connections.js";
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
@@ -29,25 +34,28 @@ export function createConsoleApp(
       // -- status ----------------------------------------------------------
       .get("/api/status", async () => {
         const snapshot = context.settings();
-        const port = snapshot.settings?.server.port ?? 3000;
+        const port = context.serverPort();
         const server = await probe(`http://127.0.0.1:${port}/healthz`);
         const missingSecrets = listSecrets(context.envPath)
           .filter((secret) => secret.required && !secret.set)
           .map((secret) => secret.key);
-        const authError = snapshot.settings
-          ? await subscriptionAuthError(context.root, snapshot.settings)
-          : null;
-        const localStartupError =
+        const authError = await subscriptionAuthError(context.root, snapshot.settings);
+        const settingsError =
           snapshot.error ??
+          (snapshot.settings.owner_handle === ""
+            ? "owner_handle is not set — configure it on the Settings page."
+            : null);
+        const localStartupError =
+          settingsError ??
           (missingSecrets.length > 0
             ? `Missing required secrets: ${missingSecrets.join(", ")}`
             : authError);
         return {
           workspaceRoot: context.root,
-          dataDir: context.dataDir(snapshot.settings),
-          configValid: snapshot.error === undefined,
-          configError: snapshot.error ?? null,
-          ownerHandle: snapshot.settings?.owner_handle ?? null,
+          dataDir: context.dataDir(),
+          settingsValid: settingsError === null,
+          settingsError,
+          ownerHandle: snapshot.settings.owner_handle || null,
           serverPort: port,
           serverUp: server.reachable,
           serverHealthy: server.healthy,
@@ -56,35 +64,35 @@ export function createConsoleApp(
         };
       })
 
-      // -- config ----------------------------------------------------------
-      .get("/api/config", () => {
+      // -- settings ---------------------------------------------------------
+      .get("/api/settings", () => {
         const snapshot = context.settings();
         return {
-          content: snapshot.raw ?? "",
-          exists: snapshot.raw !== undefined,
-          valid: snapshot.error === undefined,
-          error: snapshot.error ?? null,
+          settings: snapshot.settings,
+          overrides: snapshot.overrides,
+          form: SETTINGS_FORM,
+          error: snapshot.error,
         };
       })
-      .post("/api/config/validate", ({ body }) => {
-        const content = contentOf(body);
-        try {
-          parseSettings(content);
-          return { valid: true, error: null };
-        } catch (error) {
-          return { valid: false, error: error instanceof Error ? error.message : String(error) };
-        }
-      })
-      .put("/api/config", ({ body, set }) => {
-        const content = contentOf(body);
-        try {
-          parseSettings(content);
-        } catch (error) {
+      .put("/api/settings", ({ body, set }) => {
+        const input = (body as Record<string, unknown>)?.settings;
+        const parsed = settingsSchema.safeParse(input ?? {});
+        if (!parsed.success) {
           set.status = 422;
-          return { error: error instanceof Error ? error.message : String(error) };
+          return {
+            error: formatIssues(parsed.error),
+            issues: parsed.error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
+          };
         }
-        writeFileSync(context.configPath, content);
-        return { ok: true, note: `${CONFIG_FILE} is read at boot — restart the Nudge server to apply.` };
+        context.store().replaceSettingsOverrides(overridesFromSettings(parsed.data));
+        return {
+          ok: true,
+          settings: parsed.data,
+          note: "Settings are read at boot — restart the Nudge server to apply.",
+        };
       })
 
       // -- secrets (values never leave the server) --------------------------
@@ -177,7 +185,7 @@ export function createConsoleApp(
       .post("/api/schedule/preview", ({ body }) => {
         const content = contentOf(body);
         const { entries, errors } = parseSchedule(content);
-        const timeZone = context.settings().settings?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const timeZone = context.settings().settings.timezone;
         const now = new Date();
         return {
           errors,
@@ -215,7 +223,21 @@ export function createConsoleApp(
           createdAt: message.createdAt,
           toolCalls: parseToolPayload(message.toolPayload),
         }));
-        return { session, messages };
+        // A live tool-step trace exists only while a turn is in flight. Traces
+        // that stopped updating (e.g. the server died mid-turn) are ignored.
+        const progress = session.endedAt === null ? context.store().turnProgress(id) : undefined;
+        const fresh = progress && Date.now() - progress.updatedAt < 10 * 60 * 1000;
+        return {
+          session,
+          messages,
+          progress: fresh
+            ? {
+                startedAt: progress.startedAt,
+                updatedAt: progress.updatedAt,
+                toolCalls: parseToolPayload(progress.steps) ?? [],
+              }
+            : null,
+        };
       })
       .post("/api/threads/:id/end", ({ params, set }) => {
         const id = Number(params.id);
@@ -267,6 +289,7 @@ function contentOf(body: unknown): string {
   const content = (body as Record<string, unknown>)?.content;
   return typeof content === "string" ? content : "";
 }
+
 
 function clamp(value: number, min: number, max: number): number {
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : min;

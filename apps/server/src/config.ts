@@ -1,17 +1,19 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
-import { formatIssues, loadSettings, type Settings } from "./config-file.js";
-import { resolveFromWorkspace } from "./paths.js";
+import { findWorkspaceRoot, resolveFromWorkspace } from "./paths.js";
+import { formatIssues, type Settings } from "./settings.js";
 
 export {
-  CONFIG_FILE,
-  ensureSettingsFile,
-  loadSettings,
-  parseSettings,
-  seedText,
-  type EnsureResult,
+  defaultSettings,
+  formatIssues,
+  overridesFromSettings,
+  SETTINGS_FORM,
+  settingsFromOverrides,
+  settingsSchema,
   type Settings,
-} from "./config-file.js";
+  type SettingsField,
+  type SettingsSection,
+} from "./settings.js";
 
 const optionalSecret = z.preprocess(
   (value) => (value === "" ? undefined : value),
@@ -51,34 +53,65 @@ type SecretValues = {
   [Spec in (typeof SECRET_SPECS)[number] as Spec["key"]]: Spec["required"] extends true
     ? string
     : string | undefined;
-} & { PORT?: number };
+};
 
 const secretShape = Object.fromEntries(
   SECRET_SPECS.map((spec) => [spec.key, spec.required ? z.string().min(1) : optionalSecret]),
 );
 
-const secretsSchema = z.object({
-  ...secretShape,
-  // Not a secret: per-process override of server.port so multiple checkouts
-  // (e.g. Conductor's PORT=$CONDUCTOR_PORT run script) can share one config.
-  PORT: z.preprocess(
-    (value) => (value === "" ? undefined : value),
-    z.coerce.number().int().min(1).max(65_535).optional(),
-  ),
+const secretsSchema = z.object(secretShape);
+
+const blankAsDefault = <T extends z.ZodType>(schema: T) =>
+  z.preprocess((value) => (value === "" ? undefined : value), schema);
+
+/**
+ * The values needed before the settings database can be opened, so they live
+ * in the environment (.env or the process) rather than in the database:
+ * NUDGE_DATA_DIR locates it, PORT is where the server (and its health probe)
+ * listens, and LOG_LEVEL applies from the first log line.
+ */
+const bootstrapSchema = z.object({
+  NUDGE_DATA_DIR: blankAsDefault(z.string().default(".data")),
+  PORT: blankAsDefault(z.coerce.number().int().min(1).max(65_535).default(3_000)),
+  LOG_LEVEL: blankAsDefault(z.enum(["debug", "info", "warn", "error"]).default("info")),
 });
+
+export interface Bootstrap {
+  dataDir: string;
+  dbPath: string;
+  port: number;
+  logLevel: "debug" | "info" | "warn" | "error";
+}
+
+export function loadBootstrap(
+  environment: NodeJS.ProcessEnv = process.env,
+  root = findWorkspaceRoot(),
+): Bootstrap {
+  const parsed = bootstrapSchema.safeParse(environment);
+  if (!parsed.success) {
+    throw new Error(`Invalid .env: ${formatIssues(parsed.error)}`);
+  }
+  const dataDir = resolve(root, parsed.data.NUDGE_DATA_DIR);
+  return {
+    dataDir,
+    dbPath: join(dataDir, "nudge.db"),
+    port: parsed.data.PORT,
+    logLevel: parsed.data.LOG_LEVEL,
+  };
+}
 
 export type AppConfig = ReturnType<typeof loadConfig>;
 
 export function loadConfig(
-  environment: NodeJS.ProcessEnv = process.env,
-  settings: Settings = loadSettings(),
+  environment: NodeJS.ProcessEnv,
+  settings: Settings,
+  boot: Bootstrap = loadBootstrap(environment),
 ) {
   const parsed = secretsSchema.safeParse(environment);
   if (!parsed.success) {
     throw new Error(`Invalid .env: ${formatIssues(parsed.error)}`);
   }
   const secrets = parsed.data as SecretValues;
-  const dataDir = resolveFromWorkspace(settings.data_dir);
   return {
     ownerHandle: settings.owner_handle,
     spectrum: {
@@ -115,16 +148,16 @@ export function loadConfig(
         : {}),
       ...(settings.model.fast_mode ? { serviceTier: "priority" as const } : {}),
     },
-    dataDir,
-    dbPath: join(dataDir, "nudge.db"),
-    systemFilePath: join(dataDir, "SYSTEM.md"),
-    schedulePath: join(dataDir, "SCHEDULE.md"),
+    dataDir: boot.dataDir,
+    dbPath: boot.dbPath,
+    systemFilePath: join(boot.dataDir, "SYSTEM.md"),
+    schedulePath: join(boot.dataDir, "SCHEDULE.md"),
     timeZone: settings.timezone,
     idleRolloverMs: Math.round(settings.threads.idle_hours * 60 * 60 * 1000),
     debounceMs: settings.threads.debounce_ms,
     maxToolSteps: settings.agent.max_tool_steps,
     maxHistoryMessages: settings.agent.max_history_messages,
-    port: secrets.PORT ?? settings.server.port,
-    logLevel: settings.server.log_level,
+    port: boot.port,
+    logLevel: boot.logLevel,
   };
 }

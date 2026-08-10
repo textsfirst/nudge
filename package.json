@@ -7,7 +7,8 @@
     "node": ">=22.5"
   },
   "scripts": {
-    "dev": "pnpm --filter @nudge/server dev",
+    "dev": "concurrently -k -n agent,console,web -c blue,magenta,cyan \"pnpm --filter @nudge/server dev\" \"pnpm --filter @nudge/console dev:api\" \"pnpm --filter @nudge/console dev:web\"",
+    "dev:agent": "pnpm --filter @nudge/server dev",
     "start": "pnpm --filter @nudge/server start",
     "console": "pnpm --filter @nudge/console dev",
     "console:start": "pnpm --filter @nudge/console start",
@@ -18,6 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "concurrently": "^9.1.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"

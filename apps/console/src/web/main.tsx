@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { Toaster } from "sonner";
 import { Layout } from "@/components/layout";
-import { ConfigPage } from "@/pages/config";
+import { SettingsPage } from "@/pages/settings";
 import { ConnectionsPage } from "@/pages/connections";
 import { FilesPage } from "@/pages/files";
 import { OverviewPage } from "@/pages/overview";
@@ -26,7 +26,7 @@ const router = createBrowserRouter([
       { path: "/threads/:id", element: <ThreadDetailPage /> },
       { path: "/files", element: <FilesPage /> },
       { path: "/connections", element: <ConnectionsPage /> },
-      { path: "/config", element: <ConfigPage /> },
+      { path: "/settings", element: <SettingsPage /> },
       { path: "/secrets", element: <SecretsPage /> },
     ],
   },

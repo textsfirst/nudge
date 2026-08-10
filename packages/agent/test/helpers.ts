@@ -30,6 +30,15 @@ export function textChunks(text: string): LanguageModelV3StreamPart[] {
   ];
 }
 
+/** A stream that fails mid-flight the way real providers do: an error part, no rejection. */
+export function errorChunks(error: unknown): LanguageModelV3StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "error", error },
+    { type: "finish", finishReason: "error", usage },
+  ];
+}
+
 export function toolCallChunks(toolName: string, input: object): LanguageModelV3StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
@@ -115,6 +124,8 @@ export function makeAgent(script: ScriptEntry[], overrides: Partial<NudgeAgentOp
     dataDir,
     systemFile: () => undefined,
     now: () => now,
+    // Real backoff would slow every stream-error test by seconds.
+    streamRetry: { attempts: 3, baseDelayMs: 1 },
     ...overrides,
   });
   return {

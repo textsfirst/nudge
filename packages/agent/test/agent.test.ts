@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { NudgeAgent, SubscriptionAuthError } from "../src/index.js";
 import type { ModelSource } from "../src/index.js";
-import { makeAgent, promptMessages, quietLogger, toolCallChunks } from "./helpers.js";
+import {
+  errorChunks,
+  makeAgent,
+  promptMessages,
+  quietLogger,
+  ScriptedSource,
+  toolCallChunks,
+} from "./helpers.js";
 
 const HANDLE = "+15551234567";
 const T0 = Date.UTC(2026, 7, 10, 15, 0, 0); // 2026-08-10 15:00 UTC
@@ -22,6 +29,27 @@ describe("NudgeAgent.reply", () => {
       ["user", "again"],
       ["assistant", "reply two"],
     ]);
+
+    const secondCall = promptMessages(source.calls[1]!);
+    expect(secondCall.filter((message) => message.role !== "system")).toEqual([
+      { role: "user", text: "hello" },
+      { role: "assistant", text: "reply one" },
+      { role: "user", text: "again" },
+    ]);
+  });
+
+  it("keeps journaled error rows out of the model's context", async () => {
+    const { agent, store, source } = makeAgent(["reply one", "reply two"]);
+    await agent.reply(HANDLE, "hello");
+    const session = store.activeSession(HANDLE);
+    store.appendMessage({
+      sessionId: session!.id,
+      handle: HANDLE,
+      role: "error",
+      content: "model down",
+    });
+
+    await expect(agent.reply(HANDLE, "again")).resolves.toBe("reply two");
 
     const secondCall = promptMessages(source.calls[1]!);
     expect(secondCall.filter((message) => message.role !== "system")).toEqual([
@@ -131,6 +159,26 @@ describe("NudgeAgent.reply", () => {
       .sessionMessages(store.activeSession(HANDLE)!.id)
       .find((message) => message.role === "assistant");
     expect(assistant?.toolPayload).toContain("write_file");
+  });
+
+  it("journals live tool-step progress during the turn and clears it after", async () => {
+    // The thunk for the second model call runs after the tool step landed, so
+    // it observes the progress trace exactly as a console poll would mid-turn.
+    let midTurn: string | undefined;
+    const harness = makeAgent([
+      toolCallChunks("bash", { command: "echo live progress" }),
+      () => {
+        const session = harness.store.activeSession(HANDLE);
+        midTurn = session ? harness.store.turnProgress(session.id)?.steps : undefined;
+        return "done";
+      },
+    ]);
+
+    await expect(harness.agent.reply(HANDLE, "run it")).resolves.toBe("done");
+    expect(midTurn).toContain('"bash"');
+    expect(midTurn).toContain("live progress");
+    const session = harness.store.activeSession(HANDLE);
+    expect(harness.store.turnProgress(session!.id)).toBeUndefined();
   });
 
   it("executes bash and records the tool payload", async () => {
@@ -290,5 +338,72 @@ describe("model source fallback", () => {
       systemFile: () => undefined,
     });
     await expect(agent.reply(HANDLE, "hi")).rejects.toThrow("rate limited");
+  });
+});
+
+describe("stream errors", () => {
+  // The real shape of a provider outage: the API keeps the SSE stream open and
+  // sends an error event, which streamText reports via onError instead of
+  // rejecting. Before the fix this read as an empty reply and shipped the
+  // "I hit my step limit" message after only a couple of tool steps.
+  const overloaded = {
+    type: "error",
+    sequence_number: 2,
+    error: {
+      type: "service_unavailable_error",
+      code: "server_is_overloaded",
+      message: "Our servers are currently overloaded. Please try again later.",
+    },
+  };
+
+  // Transient early errors are retried per model call (see providers/retry.ts),
+  // so persistent-failure tests script the error once per attempt (3 by default).
+  const persistentError = () => Array.from({ length: 3 }, () => errorChunks(overloaded));
+
+  it("retries an early stream failure and recovers without losing the turn", async () => {
+    const { agent, source } = makeAgent([errorChunks(overloaded), "recovered reply"]);
+    await expect(agent.reply(HANDLE, "hi")).resolves.toBe("recovered reply");
+    expect(source.calls).toHaveLength(2);
+  });
+
+  it("surfaces persistent mid-loop stream failures instead of misreading them as a step-limit cut", async () => {
+    const { agent, store } = makeAgent([
+      toolCallChunks("bash", { command: "echo probe" }),
+      ...persistentError(),
+    ]);
+
+    await expect(agent.reply(HANDLE, "look something up")).rejects.toThrow(
+      "Our servers are currently overloaded. Please try again later. (server_is_overloaded)",
+    );
+
+    // The completed tool step is preserved for the next turn's context.
+    const messages = store.sessionMessages(store.activeSession(HANDLE)!.id);
+    const note = messages.find((message) => message.content.includes("failed with an error"));
+    expect(note?.role).toBe("assistant");
+    expect(note?.content).toContain("echo probe");
+  });
+
+  it("rejects a tool-less turn whose stream errors persist through all retries", async () => {
+    const { agent, source } = makeAgent(persistentError());
+    await expect(agent.reply(HANDLE, "hi")).rejects.toThrow("server_is_overloaded");
+    expect(source.calls).toHaveLength(3);
+  });
+
+  it("falls back to the next source when the stream fails with an auth error", async () => {
+    const failing = new ScriptedSource(
+      "subscription",
+      Array.from({ length: 3 }, () => errorChunks(new SubscriptionAuthError("expired mid-stream"))),
+    );
+    const { source, store, dataDir } = makeAgent(["fallback reply"]);
+    const agent = new NudgeAgent({
+      sources: [failing, source],
+      store,
+      logger: quietLogger,
+      timeZone: "UTC",
+      dataDir,
+      systemFile: () => undefined,
+      streamRetry: { attempts: 3, baseDelayMs: 1 },
+    });
+    await expect(agent.reply(HANDLE, "hi")).resolves.toBe("fallback reply");
   });
 });

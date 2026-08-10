@@ -13,6 +13,7 @@ import { FileWorkspace } from "./files.js";
 import { createLoopGuard } from "./loop.js";
 import { MemoryFiles } from "./memory.js";
 import { SubscriptionAuthError } from "./providers/errors.js";
+import { withStreamRetry, type StreamRetryOptions } from "./providers/retry.js";
 import { buildSystemPrompt, type GoogleAccountRef } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
 import { startOfDayInZone } from "./time.js";
@@ -31,7 +32,7 @@ export interface NudgeAgentOptions {
   systemFile: () => string | undefined;
   idleRolloverMs?: number;
   compactAfterMessages?: number;
-  /** Backstop against runaway tool loops (default 64), not a per-task budget — see loop.ts. */
+  /** Backstop against runaway tool loops (default 256), not a per-task budget — see loop.ts. */
   maxToolSteps?: number;
   /** Firecrawl credentials; when absent the web tools are omitted entirely. */
   web?: FirecrawlOptions;
@@ -46,6 +47,8 @@ export interface NudgeAgentOptions {
   googleAccounts?: () => GoogleAccountRef[];
   /** OpenAI provider options applied to every model call (reasoningEffort, serviceTier, …). */
   modelOptions?: OpenAIResponsesProviderOptions;
+  /** Tuning for the early-stream-error retry (mainly for tests) — see providers/retry.ts. */
+  streamRetry?: Pick<StreamRetryOptions, "attempts" | "baseDelayMs">;
   now?: () => number;
 }
 
@@ -80,7 +83,7 @@ export class NudgeAgent {
     });
     this.#idleRolloverMs = options.idleRolloverMs ?? 6 * 60 * 60 * 1000;
     this.#compactAfterMessages = options.compactAfterMessages ?? 40;
-    this.#maxToolSteps = options.maxToolSteps ?? 64;
+    this.#maxToolSteps = options.maxToolSteps ?? 256;
   }
 
   /**
@@ -113,19 +116,32 @@ export class NudgeAgent {
       const steps: StepResult<ToolSet>[] = [];
       let raw: string;
       let toolPayload: string | undefined;
+      // The console polls this trace to show the turn live; cleared when the
+      // turn settles either way (the finished turn's messages replace it).
+      this.#options.store.setTurnProgress(session.id, handle, "[]", this.#now());
       try {
         ({ text: raw, toolPayload } = await this.#generate({
           system: this.#systemPromptFor(session, now),
-          messages: history.map(toModelMessage),
+          messages: toModelMessages(history),
           tools: this.#tools,
           ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
           stepSink: steps,
+          onStep: () => {
+            this.#options.store.setTurnProgress(
+              session.id,
+              handle,
+              serializeSteps(steps) ?? "[]",
+              this.#now(),
+            );
+          },
         }));
       } catch (error) {
-        if (options.abortSignal?.aborted) {
-          this.#recordInterruption(session, handle, steps);
-        }
+        this.#recordInterruption(session, handle, steps, {
+          aborted: options.abortSignal?.aborted === true,
+        });
         throw error;
+      } finally {
+        this.#options.store.clearTurnProgress(session.id);
       }
 
       const reply = raw.trim();
@@ -281,23 +297,30 @@ export class NudgeAgent {
   }
 
   /**
-   * A steered turn that already ran tools leaves side effects (files written,
-   * commands run) the next turn cannot see otherwise — history replays only
-   * message text. Record them as an assistant-turn note; pure-text turns that
-   * were steered leave nothing behind.
+   * A turn that already ran tools before being cut short — steered by the
+   * owner or killed by an error — leaves side effects (files written, commands
+   * run) the next turn cannot see otherwise: history replays only message
+   * text. Record them as an assistant-turn note; pure-text turns leave
+   * nothing behind.
    */
-  #recordInterruption(session: SessionRow, handle: string, steps: StepResult<ToolSet>[]): void {
+  #recordInterruption(
+    session: SessionRow,
+    handle: string,
+    steps: StepResult<ToolSet>[],
+    cause: { aborted: boolean },
+  ): void {
     const toolPayload = serializeSteps(steps);
     if (!toolPayload) return;
     const summary =
       toolPayload.length > 1_500 ? `${toolPayload.slice(0, 1_500)}…` : toolPayload;
+    const lead = cause.aborted
+      ? "The owner's next message interrupted this turn before any reply was sent."
+      : "This turn failed with an error before any reply was sent.";
     this.#options.store.appendMessage({
       sessionId: session.id,
       handle,
       role: "assistant",
-      content:
-        "[The owner's next message interrupted this turn before any reply was sent. " +
-        `Tool calls that already ran: ${summary}]`,
+      content: `[${lead} Tool calls that already ran: ${summary}]`,
       toolPayload,
       at: this.#now(),
     });
@@ -350,17 +373,28 @@ export class NudgeAgent {
     abortSignal?: AbortSignal;
     /** Collects finished steps as they land, so an aborted run can report the tool calls it already made. */
     stepSink?: StepResult<ToolSet>[];
+    /** Fires after each step lands in stepSink — the live-progress hook. */
+    onStep?: () => void;
   }): Promise<{ text: string; toolPayload?: string }> {
     const sources = this.#options.sources;
     for (let index = 0; index < sources.length; index += 1) {
       const source = sources[index]!;
       if (params.stepSink) params.stepSink.length = 0;
       try {
-        const model = await source.languageModel();
+        const model = withStreamRetry(await source.languageModel(), {
+          ...this.#options.streamRetry,
+          logger: this.#options.logger,
+        });
         // Stateful (once-per-streak warning), so one guard per attempt.
         const guard = params.tools
           ? createLoopGuard({ maxToolSteps: this.#maxToolSteps, logger: this.#options.logger })
           : undefined;
+        // streamText never rejects: API and mid-stream failures surface only
+        // through onError, and the result reads as an empty (or truncated)
+        // reply. Collect them so they can be rethrown below — otherwise a
+        // provider outage looks identical to a step-limit cut and never
+        // reaches the source-fallback loop or the caller's error path.
+        const streamErrors: unknown[] = [];
         const result = streamText({
           model,
           system: params.system,
@@ -377,18 +411,24 @@ export class NudgeAgent {
             ? {
                 onStepFinish: (step: StepResult<ToolSet>) => {
                   params.stepSink!.push(step);
+                  params.onStep?.();
                 },
               }
             : {}),
+          onError: ({ error }) => {
+            streamErrors.push(error);
+          },
           providerOptions: { openai: { ...this.#options.modelOptions, store: false } },
         });
         // Resolving .text consumes the complete SSE response (all tool steps included).
         let text = await result.text;
-        // streamText swallows stream errors into an empty result rather than
-        // rejecting; surface an abort explicitly so callers can tell a steered
-        // turn from a model failure.
+        // Surface an abort explicitly so callers can tell a steered turn from
+        // a model failure (an abort also lands in streamErrors — check it first).
         if (params.abortSignal?.aborted) {
           throw new DOMException("The turn was aborted mid-generation", "AbortError");
+        }
+        if (streamErrors.length > 0) {
+          throw toStreamError(streamErrors[0]);
         }
         const payload = params.tools ? serializeSteps(await result.steps) : undefined;
         // No text after tool calls means a stop condition cut the loop before
@@ -473,8 +513,32 @@ export class NudgeAgent {
   }
 }
 
-function toModelMessage(row: MessageRow): ModelMessage {
-  return { role: row.role, content: row.content };
+/**
+ * Stream failures arrive as Error instances or as raw provider wire events
+ * like {"type":"error","error":{"code":"server_is_overloaded","message":"…"}}.
+ * Normalize to an Error whose message is fit for logs and the console thread.
+ */
+function toStreamError(value: unknown): Error {
+  if (value instanceof Error) return value;
+  if (typeof value === "object" && value !== null) {
+    const nested = (value as { error?: unknown }).error;
+    if (typeof nested === "object" && nested !== null) {
+      const { code, message } = nested as { code?: unknown; message?: unknown };
+      if (typeof message === "string" && message) {
+        return new Error(typeof code === "string" ? `${message} (${code})` : message);
+      }
+    }
+  }
+  return new Error(
+    `The model stream failed: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+  );
+}
+
+/** Error rows are console-facing diagnostics — the model never sees them. */
+function toModelMessages(rows: MessageRow[]): ModelMessage[] {
+  return rows
+    .filter((row): row is MessageRow & { role: "user" | "assistant" } => row.role !== "error")
+    .map((row) => ({ role: row.role, content: row.content }));
 }
 
 function transcript(messages: MessageRow[]): string {

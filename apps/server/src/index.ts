@@ -10,7 +10,7 @@ import {
 } from "@nudge/agent";
 import { createPhotonTransport } from "@nudge/photon";
 import { NudgeStore } from "@nudge/store";
-import { loadConfig } from "./config.js";
+import { loadBootstrap, loadConfig, settingsFromOverrides } from "./config.js";
 import { DeliveryService } from "./delivery.js";
 import { loadWorkspaceEnvironment } from "./env.js";
 import { buildGwsBashEnv, readGoogleAccounts } from "./google.js";
@@ -39,11 +39,18 @@ function ensureDataReadme(dataDir: string, logger: ReturnType<typeof createLogge
 
 async function main(): Promise<void> {
   loadWorkspaceEnvironment();
-  const config = loadConfig();
-  const logger = createLogger(config.logLevel);
+  const boot = loadBootstrap();
+  const logger = createLogger(boot.logLevel);
+  const store = new NudgeStore(boot.dbPath);
+  const settings = settingsFromOverrides(store.settingsOverrides());
+  if (!settings.owner_handle) {
+    throw new Error(
+      "owner_handle is not set — open the console's Settings page, set your handle, then start again.",
+    );
+  }
+  const config = loadConfig(process.env, settings, boot);
   ensureDataReadme(config.dataDir, logger);
   syncBundledContent({ dataDir: config.dataDir, logger });
-  const store = new NudgeStore(config.dbPath);
   const providerHealth: ProviderHealth = { ok: true, degraded: false, error: null };
   if (config.provider.selected === "chatgpt-subscription") {
     const fallbackEnabled = Boolean(

@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { findWorkspaceRoot } from "@nudge/server/paths";
-import { CONFIG_FILE, parseSettings, type Settings } from "@nudge/server/config";
+import { defaultSettings, settingsFromOverrides, type Settings } from "@nudge/server/config";
 import { NudgeStore } from "@nudge/store";
+import { readEnvKeys } from "./env-file.js";
 
 export interface ConsoleOptions {
   /** Workspace root; tests point this at a temp directory. */
@@ -10,16 +11,17 @@ export interface ConsoleOptions {
 }
 
 export interface SettingsSnapshot {
-  raw: string | undefined;
-  settings: Settings | undefined;
-  error: string | undefined;
+  settings: Settings;
+  overrides: Record<string, unknown>;
+  error: string | null;
 }
 
 /**
  * Everything the console knows about the Nudge checkout it manages. Settings
- * are re-read per request — the console exists to edit them, so nothing may
- * cache a broken (or stale) copy. The console must boot and stay useful while
- * nudge.config.yaml is missing or invalid; only defaults degrade.
+ * live in the database and are re-read per request — the console exists to
+ * edit them, so nothing may cache a stale copy. Bootstrap values come from
+ * the workspace .env (with the process environment as fallback) because they
+ * are needed to locate the database in the first place.
  */
 export class ConsoleContext {
   readonly root: string;
@@ -30,45 +32,50 @@ export class ConsoleContext {
     this.root = options.root ?? findWorkspaceRoot();
   }
 
-  get configPath(): string {
-    return join(this.root, CONFIG_FILE);
-  }
-
   get envPath(): string {
     return join(this.root, ".env");
   }
 
-  settings(): SettingsSnapshot {
-    let raw: string | undefined;
-    try {
-      raw = readFileSync(this.configPath, "utf8");
-    } catch {
-      return { raw: undefined, settings: undefined, error: `${CONFIG_FILE} is missing.` };
-    }
-    try {
-      return { raw, settings: parseSettings(raw), error: undefined };
-    } catch (error) {
-      return {
-        raw,
-        settings: undefined,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+  #env(key: string): string | undefined {
+    return readEnvKeys(this.envPath).get(key) || process.env[key] || undefined;
   }
 
-  dataDir(settings = this.settings().settings): string {
-    return resolve(this.root, settings?.data_dir ?? ".data");
+  dataDir(): string {
+    return resolve(this.root, this.#env("NUDGE_DATA_DIR") ?? ".data");
   }
 
-  dbPath(settings = this.settings().settings): string {
-    return join(this.dataDir(settings), "nudge.db");
+  serverPort(): number {
+    const port = Number(this.#env("PORT"));
+    return Number.isInteger(port) && port >= 1 && port <= 65_535 ? port : 3_000;
+  }
+
+  dbPath(): string {
+    return join(this.dataDir(), "nudge.db");
   }
 
   dbExists(): boolean {
     return existsSync(this.dbPath());
   }
 
-  /** Shared store handle, reopened if a config edit moved data_dir. */
+  /**
+   * Effective settings from the database, with a defaults fallback so the
+   * console stays useful when stored overrides no longer fit the schema.
+   */
+  settings(): SettingsSnapshot {
+    let overrides: Record<string, unknown> = {};
+    try {
+      overrides = this.store().settingsOverrides();
+      return { settings: settingsFromOverrides(overrides), overrides, error: null };
+    } catch (error) {
+      return {
+        settings: defaultSettings(),
+        overrides,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Shared store handle, reopened if an env edit moved the data dir. */
   store(): NudgeStore {
     const path = this.dbPath();
     if (!this.#store || this.#storePath !== path) {
