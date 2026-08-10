@@ -147,6 +147,44 @@ describe("InboundProcessor", () => {
     expect(calls).toEqual([["first"], ["second", "third"]]);
   });
 
+  it("signals waiting from the first buffered text and again after a steered settle", async () => {
+    const waits: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onBatch = vi.fn(async (batch: InboundBatch) => {
+      // The first batch ignores its abort signal and finishes on release.
+      if (batch.texts.includes("first")) await gate;
+    });
+    const processor = new InboundProcessor<string>({
+      ownerHandle: "+100",
+      logger,
+      isDuplicate: () => false,
+      onBatch,
+      onWaiting: (context) => {
+        waits.push(context);
+      },
+      debounceMs: 30,
+    });
+
+    processor.process(message("0", "ignored", "+999"), "ctx-0");
+    expect(waits).toEqual([]); // filtered messages never show typing
+
+    processor.process(message("1", "first"), "ctx-1");
+    expect(waits).toEqual(["ctx-1"]); // typing starts before the debounce elapses
+    processor.process(message("2", "second"), "ctx-2");
+    expect(waits).toEqual(["ctx-1", "ctx-2"]);
+
+    await vi.waitFor(() => expect(onBatch).toHaveBeenCalledTimes(1));
+    processor.process(message("3", "third"), "ctx-3"); // steers the running reply
+    release();
+    // The settling run re-asserts typing for the still-buffered batch.
+    await vi.waitFor(() => expect(waits).toEqual(["ctx-1", "ctx-2", "ctx-3", "ctx-3"]));
+    await processor.flushNow();
+    expect(onBatch).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps serving after a batch handler throws", async () => {
     const onBatch = vi
       .fn<(batch: InboundBatch, context: unknown) => Promise<void>>()

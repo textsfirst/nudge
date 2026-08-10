@@ -33,6 +33,14 @@ export interface InboundProcessorOptions<Context> {
   onBatch: (batch: InboundBatch, context: Context, signal: AbortSignal) => Promise<void>;
   /** How long to wait for follow-up texts before replying. */
   debounceMs?: number;
+  /**
+   * Called with the freshest context whenever a batch is buffered and waiting
+   * out its debounce — on each accepted message, and again when a steered run
+   * settles with a batch still waiting — so the transport can show a typing
+   * indicator through the whole wait instead of only while the reply
+   * generates. Must not throw.
+   */
+  onWaiting?: (context: Context) => void;
 }
 
 interface PendingBatch<Context> {
@@ -107,17 +115,18 @@ export class InboundProcessor<Context> {
       existing.spaceId = message.spaceId;
       existing.ripe = false;
       existing.timer = setTimeout(() => this.#flush(message.handle), this.#debounceMs);
-      return;
+    } else {
+      this.#pending.set(message.handle, {
+        handle: message.handle,
+        spaceId: message.spaceId,
+        texts: [message.text],
+        messageIds: [message.id],
+        context,
+        timer: setTimeout(() => this.#flush(message.handle), this.#debounceMs),
+        ripe: false,
+      });
     }
-    this.#pending.set(message.handle, {
-      handle: message.handle,
-      spaceId: message.spaceId,
-      texts: [message.text],
-      messageIds: [message.id],
-      context,
-      timer: setTimeout(() => this.#flush(message.handle), this.#debounceMs),
-      ripe: false,
-    });
+    this.#options.onWaiting?.(context);
   }
 
   /** Deliver any buffered batches immediately (used on shutdown and in tests). */
@@ -173,8 +182,13 @@ export class InboundProcessor<Context> {
         if (this.#running.get(handle)?.controller === controller) {
           this.#running.delete(handle);
         }
-        if (this.#pending.get(handle)?.ripe) {
+        const held = this.#pending.get(handle);
+        if (held?.ripe) {
           this.#flush(handle);
+        } else if (held) {
+          // The settling run just cleared its typing indicator; re-show it
+          // while the held batch waits out the rest of its debounce.
+          this.#options.onWaiting?.(held.context);
         }
       });
     this.#running.set(handle, { controller, done });
