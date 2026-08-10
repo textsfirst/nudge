@@ -6,7 +6,7 @@ version: 1
 
 # Personal Memory
 
-The magic moment is "Tartine, last march. you had the morning bun 🥐" -
+The magic moment is "tartine, last march. you had the morning bun 🥐" -
 specific, instant, unannounced.
 
 ## What to capture (continuously, silently)

@@ -175,6 +175,18 @@ describe("NudgeStore", () => {
     expect(store.openOutbound(86_400_000 * 365, 3)).toHaveLength(0);
   });
 
+  it("keeps bubble-level delivery progress across retries", () => {
+    const store = new NudgeStore(":memory:");
+    const id = store.enqueueOutbound(HANDLE, "one\n\ntwo\n\nthree", "reply", 1_000);
+    expect(store.openOutbound(86_400_000, 3, 2_000)[0]?.sentChunks).toBe(0);
+
+    store.markOutbound(id, "sending", 2_000);
+    store.markOutboundProgress(id, 2, 2_500);
+    // A new attempt does not reset what already landed.
+    store.markOutbound(id, "sending", 3_000);
+    expect(store.openOutbound(86_400_000, 3, 4_000)[0]?.sentChunks).toBe(2);
+  });
+
   it("deduplicates webhook deliveries durably", () => {
     const store = new NudgeStore(":memory:");
     expect(store.isWebhookProcessed("m1")).toBe(false);
@@ -261,7 +273,7 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 5 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 6 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

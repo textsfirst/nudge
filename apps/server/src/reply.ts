@@ -1,5 +1,5 @@
 import { SubscriptionAuthError, type Logger } from "@nudge/agent";
-import type { BatchControls, InboundBatch } from "@nudge/photon";
+import type { BatchControls, InboundBatch, SendOptions } from "@nudge/photon";
 import type { NudgeStore } from "@nudge/store";
 
 const APOLOGY = "Sorry, I hit a snag on my end. Mind sending that again?";
@@ -31,7 +31,7 @@ export function createReplyHandler(deps: {
   logger: Logger;
 }): (
   batch: InboundBatch,
-  send: (text: string) => Promise<void>,
+  send: (text: string, options?: SendOptions) => Promise<void>,
   signal: AbortSignal,
   controls?: BatchControls,
 ) => Promise<void> {
@@ -42,7 +42,11 @@ export function createReplyHandler(deps: {
       signal.throwIfAborted();
       const ledgerId = store.enqueueOutbound(batch.handle, reply, "reply");
       store.markOutbound(ledgerId, "sending");
-      await send(reply);
+      // Per-bubble progress keeps a crash mid-reply from replaying bubbles
+      // that already landed: recovery resumes at the first unconfirmed one.
+      await send(reply, {
+        onChunkSent: (sent) => store.markOutboundProgress(ledgerId, sent),
+      });
       store.markOutbound(ledgerId, "sent");
       delivered = true;
       controls?.stopTyping();
