@@ -18,6 +18,8 @@ import { MEMORY_LIMITS, validateDataFile } from "@nudge/agent";
 
 const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json"]);
 const HIDDEN_PREFIXES = ["nudge.db"];
+/** Google OAuth credentials + token caches — managed on the Connections page. */
+const HIDDEN_DIRS = new Set(["google"]);
 const SYSTEM_MANAGED = new Set(["README.md"]);
 
 export interface FileInfo {
@@ -119,6 +121,7 @@ function guard(dataDir: string, path: string): FileResult<{ abs: string; rel: st
 function isHidden(rel: string): boolean {
   const parts = rel.split(sep);
   if (parts.some((part) => part.startsWith("."))) return true;
+  if (parts[0] !== undefined && HIDDEN_DIRS.has(parts[0])) return true;
   const base = parts.at(-1) ?? rel;
   if (HIDDEN_BASENAMES.has(base)) return true;
   return HIDDEN_PREFIXES.some((prefix) => base.startsWith(prefix));

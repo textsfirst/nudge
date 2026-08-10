@@ -7,6 +7,8 @@ import { NudgeStore } from "@nudge/store";
 import { loadConfig } from "./config.js";
 import { DeliveryService } from "./delivery.js";
 import { loadWorkspaceEnvironment } from "./env.js";
+import { buildGwsBashEnv, readGoogleAccounts } from "./google.js";
+import { buildConnectionProbes, ConnectionHealthMonitor } from "./health.js";
 import { createHttpApp } from "./http.js";
 import { createLogger } from "./logger.js";
 import { createReplyHandler } from "./reply.js";
@@ -41,6 +43,13 @@ async function main(): Promise<void> {
     maxToolSteps: config.maxToolSteps,
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,
+    bashEnv: buildGwsBashEnv({
+      dataDir: config.dataDir,
+      defaultAccount: config.google.defaultAccount,
+      gwsPath: config.google.gwsPath,
+    }),
+    googleAccounts: () =>
+      readGoogleAccounts(config.dataDir).map(({ label, email }) => ({ label, email })),
     modelOptions: config.modelOptions,
   });
 
@@ -76,15 +85,30 @@ async function main(): Promise<void> {
     });
   });
 
-  // Redeliver anything the last process died holding, then start the clock.
+  const health = new ConnectionHealthMonitor({
+    store,
+    delivery,
+    ownerHandle: config.ownerHandle,
+    logger,
+    probes: buildConnectionProbes({
+      dataDir: config.dataDir,
+      ...(config.provider.selected === "chatgpt-subscription"
+        ? { chatGptAuthFile: config.provider.chatGptAuthFile }
+        : {}),
+    }),
+  });
+
+  // Redeliver anything the last process died holding, then start the clocks.
   await delivery.recover();
   scheduler.start();
+  health.start();
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info("Shutting down", { signal });
+    health.stop();
     scheduler.stop();
     server.close();
     await transport.stop();

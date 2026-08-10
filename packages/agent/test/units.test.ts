@@ -52,6 +52,28 @@ describe("buildSystemPrompt", () => {
     const prompt = buildSystemPrompt({ ...base, systemFile: undefined });
     expect(prompt.startsWith(DEFAULT_SYSTEM_FILE.slice(0, 30))).toBe(true);
   });
+
+  it("names connected Google accounts only when bash carries the gws shim", () => {
+    const accounts = [{ label: "work", email: "w@corp.com" }];
+    const withGws = buildSystemPrompt({
+      ...base,
+      systemFile: "x",
+      bashEnabled: true,
+      googleAccounts: accounts,
+    });
+    expect(withGws).toContain("work (w@corp.com)");
+    expect(withGws).toContain("gws -a <account>");
+
+    const noBash = buildSystemPrompt({
+      ...base,
+      systemFile: "x",
+      bashEnabled: false,
+      googleAccounts: accounts,
+    });
+    expect(noBash).not.toContain("gws");
+    const noAccounts = buildSystemPrompt({ ...base, systemFile: "x", bashEnabled: true });
+    expect(noAccounts).not.toContain("gws -a");
+  });
 });
 
 describe("startOfDayInZone", () => {
@@ -77,10 +99,14 @@ describe("FileWorkspace", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "chatgpt-auth.json"), "{\"secret\":true}");
     writeFileSync(join(dir, "nudge.db"), "sqlite");
+    mkdirSync(join(dir, "google", "work"), { recursive: true });
+    writeFileSync(join(dir, "google", "work", "credentials.json"), "{\"refresh_token\":\"r\"}");
     const workspace = new FileWorkspace(dir);
 
     expect(workspace.read("../outside.md")).toContain("outside your data directory");
     expect(workspace.read("chatgpt-auth.json")).toContain("not readable");
+    expect(workspace.read("google/work/credentials.json")).toContain("not readable");
+    expect(workspace.write("google/notes.md", "x")).toContain("not writable");
     expect(workspace.write("nudge.db", "x")).toContain("not writable");
     expect(workspace.list()).toBe("(no files yet)");
   });

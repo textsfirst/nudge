@@ -12,7 +12,7 @@ export interface ToolContext {
   /** When absent, the web tools are omitted from the set entirely. */
   web?: FirecrawlClient;
   /** When absent, the bash tool is omitted. cwd is a default, not a jail. */
-  bash?: { cwd: string };
+  bash?: { cwd: string; env?: Record<string, string> | undefined };
 }
 
 /**
@@ -84,7 +84,7 @@ export function buildTools(context: ToolContext): ToolSet {
   };
 }
 
-function bashTool(bash: { cwd: string }): ToolSet {
+function bashTool(bash: { cwd: string; env?: Record<string, string> | undefined }): ToolSet {
   return {
     bash: tool({
       description: `Run a bash command; it executes in your data directory. Use it for file operations (ls, grep, wc, find) and quick computation. Returns stdout+stderr, capped at the last ${DEFAULT_MAX_LINES} lines / ${DEFAULT_MAX_BYTES / 1024}KB — when capped, the full output is saved to a temp file named in the footer. Commands time out after ${DEFAULT_BASH_TIMEOUT_SECONDS}s unless you pass timeout (seconds).`,
@@ -95,6 +95,7 @@ function bashTool(bash: { cwd: string }): ToolSet {
       execute: ({ command, timeout }, { abortSignal }) =>
         executeBash(command, {
           cwd: bash.cwd,
+          ...(bash.env ? { env: bash.env } : {}),
           ...(timeout !== undefined ? { timeoutSeconds: timeout } : {}),
           ...(abortSignal ? { signal: abortSignal } : {}),
         }),

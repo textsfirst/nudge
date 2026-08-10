@@ -31,6 +31,14 @@ describe("parseSettings", () => {
       parseSettings('owner_handle: "+15551234567"\ntimezone: Mars/Olympus'),
     ).toThrow(/timezone/);
   });
+
+  it("parses the optional google block", () => {
+    expect(parseSettings('owner_handle: "+1"').google).toEqual({});
+    const settings = parseSettings(
+      'owner_handle: "+1"\ngoogle:\n  default_account: work\n  gws_path: /opt/gws',
+    );
+    expect(settings.google).toEqual({ default_account: "work", gws_path: "/opt/gws" });
+  });
 });
 
 describe("loadConfig", () => {

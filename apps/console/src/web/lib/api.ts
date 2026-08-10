@@ -101,6 +101,39 @@ export interface ThreadDetail {
   }[];
 }
 
+export interface GoogleAccount {
+  label: string;
+  email: string;
+  scopes: string[];
+  connectedAt: string;
+  status: "ok" | "expired" | "unreachable" | "missing";
+}
+
+export interface Connections {
+  chatgpt: {
+    selected: "chatgpt-subscription" | "openai-api";
+    connected: boolean;
+    accountId: string | null;
+    updatedAt: string | null;
+  };
+  google: {
+    clientConfigured: boolean;
+    clientId: string | null;
+    defaultAccount: string | null;
+    gws: { installed: boolean; version?: string; path?: string };
+    services: { id: string; name: string; api: string }[];
+    accounts: GoogleAccount[];
+  };
+}
+
+export interface ChatGptFlow {
+  status: "pending" | "done" | "error";
+  verificationUrl: string;
+  userCode: string;
+  accountId?: string;
+  error?: string;
+}
+
 export interface SearchHit {
   id: number;
   sessionId: number;
@@ -159,7 +192,43 @@ export const useSearch = (query: string) =>
     enabled: query.trim().length > 1,
   });
 
+export const useConnections = () =>
+  useQuery({
+    queryKey: ["connections"],
+    queryFn: () => request<Connections>("/api/connections"),
+    refetchInterval: 60_000,
+  });
+
 // -- mutations --------------------------------------------------------------
+
+export const saveGoogleClient = (input: { json?: string; client_id?: string; client_secret?: string }) =>
+  request<{ clientId: string }>("/api/connections/google/client", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+
+export const startGoogleConnect = (input: {
+  label: string;
+  services: { id: string; access: "readonly" | "full" }[];
+}) =>
+  request<{ authUrl: string; redirectUri: string }>("/api/connections/google/start", {
+    method: "POST",
+    body: JSON.stringify({ ...input, origin: window.location.origin }),
+  });
+
+export const disconnectGoogle = (label: string) =>
+  request<{ ok: boolean }>(`/api/connections/google/${encodeURIComponent(label)}`, {
+    method: "DELETE",
+  });
+
+export const startChatGptConnect = () =>
+  request<{ flowId: string; verificationUrl: string; userCode: string }>(
+    "/api/connections/chatgpt/start",
+    { method: "POST" },
+  );
+
+export const getChatGptFlow = (flowId: string) =>
+  request<ChatGptFlow>(`/api/connections/chatgpt/flow/${encodeURIComponent(flowId)}`);
 
 export function useInvalidate() {
   const client = useQueryClient();

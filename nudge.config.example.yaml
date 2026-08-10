@@ -34,6 +34,15 @@ tools:
   # from the model when neither is set.
   # firecrawl_url: http://localhost:3002
 
+# Google accounts for the gws CLI are connected in the console (Connections
+# page); their credentials live under data_dir/google/, never in this file.
+google:
+  # Which account the agent uses when it doesn't pass -a. With exactly one
+  # account connected this is unnecessary.
+  # default_account: personal
+  # Explicit path to the gws binary when it isn't on PATH.
+  # gws_path: /opt/homebrew/bin/gws
+
 # Where Nudge keeps its SQLite database, SYSTEM.md, SCHEDULE.md, and skills/.
 data_dir: .data
 

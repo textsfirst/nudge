@@ -8,8 +8,8 @@ There is deliberately no command system. Threads roll over silently (at local mi
 
 The pnpm workspace keeps the replaceable boundaries small:
 
-- `apps/server` — configuration, HTTP lifecycle, SYSTEM.md loading, the scheduler, ledger-backed outbound delivery, and the OAuth login CLI
-- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, and secrets
+- `apps/server` — configuration, HTTP lifecycle, SYSTEM.md loading, the scheduler, ledger-backed outbound delivery, Google account plumbing for the gws CLI, and the daily connection health check
+- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, secrets, and all connection setup (Google accounts, ChatGPT sign-in)
 - `packages/agent` — the tool-calling agent loop (Vercel AI SDK), prompt stack, thread lifecycle (rollover/compaction/carryover), the file workspace with per-path validators, and model providers
 - `packages/photon` — signed webhook handling, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
 - `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and webhook dedupe
@@ -57,7 +57,8 @@ Every turn's system prompt is assembled from five slots, stable content first so
 - Node.js 22.5+ (Nudge uses the built-in `node:sqlite`)
 - pnpm 10
 - A Photon Cloud project and iMessage line
-- Either a ChatGPT subscription authorized through the included OAuth command, or an OpenAI API key
+- Either a ChatGPT subscription (authorized from the console's Connections page), or an OpenAI API key
+- Optional: the [`gws` CLI](https://github.com/googleworkspace/cli) plus a Google Cloud OAuth client for Google account access (see "Google accounts")
 - A public HTTPS URL for the webhook
 
 ## Setup
@@ -88,11 +89,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
    `owner_handle` must exactly match Photon's `message.sender.id`.
 
-3. For the default ChatGPT subscription provider, authorize once:
-
-   ```bash
-   pnpm auth:chatgpt
-   ```
+3. For the default ChatGPT subscription provider, authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser.
 
    To use only an API key instead: `provider.selected: openai-api` in `nudge.config.yaml` plus `OPENAI_API_KEY` in `.env`. With the subscription provider, a configured `OPENAI_API_KEY` + `provider.openai.fallback_enabled: true` is used only when subscription auth fails — ordinary model or network errors never silently spend API credits.
 
@@ -114,6 +111,7 @@ A local web app for everything you'd otherwise SSH in for:
 
 - **Threads** — browse every conversation, read messages (tool calls included), search all history, end the active thread, delete threads or single messages
 - **Files** — edit SYSTEM.md, SCHEDULE.md (with a live parse preview and next-run times), memory files (with budget meters), and skills, all validated by the same rules the agent's writes go through
+- **Connections** — all sign-in flows: ChatGPT subscription (device code) and Google accounts for the gws CLI (see below); live token status per account
 - **Config** — edit `nudge.config.yaml` with live schema validation
 - **Secrets** — manage `.env` write-only; values are never sent to the browser
 
@@ -123,7 +121,22 @@ pnpm --filter @nudge/console build    # build the UI
 pnpm console:start                    # serve API + built UI on :3100
 ```
 
+Google sign-in redirects back to the exact console address in your browser, so register that address (e.g. `http://localhost:3100/api/connections/google/callback` — and the `:5174` variant if you use the dev server) in your OAuth client; the wizard shows the exact string to copy.
+
 The console binds to `127.0.0.1` and has no auth of its own — it edits your secrets and prompt, so reach it remotely only through a tunnel you trust (Tailscale, `ssh -L`). `CONSOLE_PORT` and `CONSOLE_HOST` override the defaults. It reads the same SQLite file as the server (WAL + busy timeout make the two processes safe together).
+
+## Google accounts (gws)
+
+Nudge can work the owner's Gmail, Calendar, Drive, Docs, Sheets, Contacts, and Tasks through the [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli), driven over the existing bash tool — no extra tool schemas. Multiple accounts are first-class: each connected account (label like `personal` or `work`) gets its own credential store, and the agent picks one per command with `gws -a work gmail +triage`. A `google-workspace` skill is seeded on first connect; the prompt lists connected accounts.
+
+Setup lives entirely on the console's **Connections** page:
+
+1. **One-time Google Cloud app** — the wizard walks through creating a (free, private) Cloud project, publishing the OAuth consent screen to production (testing mode expires sign-ins after 7 days), enabling the APIs for the services you pick, and creating a **Web application** OAuth client with the redirect URI the wizard displays. Paste the client JSON and you never see this step again.
+2. **Per account** — pick services and access (read-only or full per service), name the account, and sign in with Google. Consent runs in your browser wherever it is — the redirect returns to the console's own origin, so it works over Tailscale or `ssh -L` against a fully headless server (no browser or OS keyring needed there; this is also why Nudge drives the OAuth flow itself instead of `gws auth login`).
+
+The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; `google.gws_path` for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
+
+A daily health check probes every connection (Google accounts and ChatGPT auth) and texts you once when one breaks — so an expired token doesn't surface as a silently failing morning briefing.
 
 ## Photon transport note
 
@@ -148,6 +161,8 @@ Settings live in `nudge.config.yaml` (copy `nudge.config.example.yaml`); secrets
 | `model.fast_mode` | `false` | Priority service tier for faster output |
 | `tools.bash_enabled` | `true` | Set `false` to remove the bash tool |
 | `tools.firecrawl_url` | Firecrawl cloud | Self-hosted Firecrawl endpoint (enables the web tools without a key) |
+| `google.default_account` | sole account | Account label `gws` uses when the agent omits `-a` |
+| `google.gws_path` | PATH lookup | Explicit path to the `gws` binary |
 | `data_dir` | `.data` | SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ |
 | `threads.idle_hours` | `6` | Idle gap before a thread rolls over |
 | `threads.debounce_ms` | `2500` | Burst window before replying |
@@ -179,7 +194,8 @@ Use a single server process: the scheduler's claims, webhook dedupe, and debounc
 
 - Photon HMAC verification runs on the exact raw request bytes, including the replay-window check.
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
-- The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
+- The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
+- Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.
 - OAuth tokens, API keys, and Photon secrets are never logged. `.env`, `nudge.config.yaml`, and `.data` are gitignored.
 - The console binds to localhost only, returns secret names but never values, and applies the same per-file validation and traversal guards as the agent's file tools.
 
@@ -191,7 +207,6 @@ The ChatGPT subscription endpoint and its OAuth contract are not part of the sta
 pnpm dev              # watch the server
 pnpm console          # watch the web console (API :3100, UI :5174)
 pnpm console:start    # serve the built console on :3100
-pnpm auth:chatgpt     # run device-code OAuth
 pnpm build            # compile all packages
 pnpm typecheck        # build, then type-check all packages
 pnpm test             # run unit tests

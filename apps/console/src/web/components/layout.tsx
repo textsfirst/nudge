@@ -1,4 +1,5 @@
 import {
+  Cable,
   FileText,
   KeyRound,
   LayoutDashboard,
@@ -16,6 +17,7 @@ const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/threads", label: "Threads", icon: MessagesSquare },
   { to: "/files", label: "Files", icon: FileText },
+  { to: "/connections", label: "Connections", icon: Cable },
   { to: "/config", label: "Config", icon: Settings2 },
   { to: "/secrets", label: "Secrets", icon: KeyRound },
 ];

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Agent-facing gws shim. Nudge prepends this directory to the bash tool's PATH;
+# the real binary is resolved by gws-shim.mjs and executed with per-account
+# GOOGLE_WORKSPACE_CLI_* environment.
+exec node "$(dirname "$0")/gws-shim.mjs" "$@"

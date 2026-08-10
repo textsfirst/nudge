@@ -44,6 +44,12 @@ const settingsSchema = z.object({
       firecrawl_url: z.url().optional(),
     })
     .prefault({}),
+  google: z
+    .object({
+      default_account: z.string().min(1).optional(),
+      gws_path: z.string().min(1).optional(),
+    })
+    .prefault({}),
   data_dir: z.string().min(1).default(".data"),
   threads: z
     .object({
@@ -165,6 +171,12 @@ export function loadConfig(
         }
       : {}),
     bashEnabled: settings.tools.bash_enabled,
+    google: {
+      ...(settings.google.default_account
+        ? { defaultAccount: settings.google.default_account }
+        : {}),
+      ...(settings.google.gws_path ? { gwsPath: settings.google.gws_path } : {}),
+    },
     modelOptions: {
       ...(settings.model.reasoning_effort
         ? { reasoningEffort: settings.model.reasoning_effort }

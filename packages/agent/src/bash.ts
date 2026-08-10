@@ -27,6 +27,8 @@ const EXIT_STDIO_GRACE_MS = 250;
 export interface BashOptions {
   /** Default working directory only — NOT a security boundary. */
   cwd: string;
+  /** Merged over process.env (PATH prepends, gws shim pointers, …). */
+  env?: Record<string, string> | undefined;
   timeoutSeconds?: number;
   signal?: AbortSignal;
 }
@@ -49,6 +51,7 @@ export async function executeBash(command: string, options: BashOptions): Promis
   const shell = existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
   const child = spawn(shell, ["-c", command], {
     cwd: options.cwd,
+    ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
     detached: true, // own process group, so timeout/abort can kill the whole tree
     stdio: ["ignore", "pipe", "pipe"],
   });

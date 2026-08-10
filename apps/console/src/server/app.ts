@@ -3,6 +3,7 @@ import { parseSchedule, nextRun } from "@nudge/schedule";
 import { parseSettings, CONFIG_FILE } from "@nudge/server/config";
 import { writeFileSync } from "node:fs";
 import { Elysia } from "elysia";
+import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./connections.js";
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
 import { deleteEnvValue, listSecrets, setEnvValue } from "./env-file.js";
 import { deleteDataFile, listDataFiles, readDataFile, writeDataFile } from "./files.js";
@@ -11,13 +12,16 @@ import { deleteDataFile, listDataFiles, readDataFile, writeDataFile } from "./fi
  * The console API. Everything is owner-facing and assumes a localhost bind —
  * there is deliberately no auth layer; see index.ts.
  */
-export function createConsoleApp(options: ConsoleOptions & { adapter?: never } = {}) {
+export function createConsoleApp(
+  options: ConsoleOptions & ConnectionsOptions & { adapter?: never } = {},
+) {
   const context = new ConsoleContext(options);
+  const connections = new ConnectionsService(context, options);
 
   return (
     new Elysia()
       .onError(({ error, set }) => {
-        set.status = 500;
+        set.status = error instanceof ApiProblem ? error.status : 500;
         return { error: error instanceof Error ? error.message : String(error) };
       })
 
@@ -124,6 +128,34 @@ export function createConsoleApp(options: ConsoleOptions & { adapter?: never } =
           return { error: result.error };
         }
         return result.value;
+      })
+
+      // -- connections (Google accounts for gws + ChatGPT subscription) -----
+      .get("/api/connections", () => connections.overview())
+      .put("/api/connections/google/client", ({ body }) =>
+        connections.saveClient((body ?? {}) as Record<string, unknown>),
+      )
+      .post("/api/connections/google/start", ({ body }) =>
+        connections.startGoogle((body ?? {}) as Record<string, unknown>),
+      )
+      .get("/api/connections/google/callback", ({ query }) =>
+        connections.googleCallback(query as Record<string, string | undefined>),
+      )
+      .delete("/api/connections/google/:label", async ({ params, set }) => {
+        if (!(await connections.disconnectGoogle(params.label))) {
+          set.status = 404;
+          return { error: `No Google account "${params.label}".` };
+        }
+        return { ok: true };
+      })
+      .post("/api/connections/chatgpt/start", () => connections.startChatGpt())
+      .get("/api/connections/chatgpt/flow/:id", ({ params, set }) => {
+        const flow = connections.chatGptFlow(params.id);
+        if (!flow) {
+          set.status = 404;
+          return { error: "No such sign-in attempt — start again." };
+        }
+        return flow;
       })
 
       // -- schedule preview -------------------------------------------------

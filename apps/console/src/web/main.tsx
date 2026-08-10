@@ -5,6 +5,7 @@ import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { Toaster } from "sonner";
 import { Layout } from "@/components/layout";
 import { ConfigPage } from "@/pages/config";
+import { ConnectionsPage } from "@/pages/connections";
 import { FilesPage } from "@/pages/files";
 import { OverviewPage } from "@/pages/overview";
 import { SecretsPage } from "@/pages/secrets";
@@ -24,6 +25,7 @@ const router = createBrowserRouter([
       { path: "/threads", element: <ThreadsPage /> },
       { path: "/threads/:id", element: <ThreadDetailPage /> },
       { path: "/files", element: <FilesPage /> },
+      { path: "/connections", element: <ConnectionsPage /> },
       { path: "/config", element: <ConfigPage /> },
       { path: "/secrets", element: <SecretsPage /> },
     ],
