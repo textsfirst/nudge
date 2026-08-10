@@ -7,5 +7,6 @@ export {
   type OutboundStatus,
   type ScheduleStateRow,
   type SessionRow,
+  type SessionSummaryRow,
   type SpaceRow,
 } from "./store.js";

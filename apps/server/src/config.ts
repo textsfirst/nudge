@@ -53,7 +53,7 @@ const settingsSchema = z.object({
     .prefault({}),
   agent: z
     .object({
-      max_tool_steps: z.number().int().min(1).max(32).default(8),
+      max_tool_steps: z.number().int().min(1).max(500).default(64),
       max_history_messages: z.number().int().min(4).max(400).default(40),
     })
     .prefault({}),
