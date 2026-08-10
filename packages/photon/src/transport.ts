@@ -6,6 +6,7 @@ import {
   type InboundBatch,
   type InboundLogger,
 } from "./inbound.js";
+import { TypingController } from "./typing.js";
 
 export interface PhotonTransportConfig {
   projectId: string;
@@ -19,25 +20,68 @@ export interface PhotonTransportConfig {
   /**
    * Handle one debounced inbound batch. `send` delivers text to the batch's
    * space, one paced bubble per paragraph (see splitMessage); a typing
-   * indicator shows from the first buffered text
-   * until the reply lands, so the debounce never reads as silence. The
+   * indicator appears a humanizing beat after the first buffered text and
+   * holds until the reply lands, so the wait reads as someone typing. The
    * signal aborts when a newer text arrives mid-run (steering) — abandon the
    * reply instead of sending it.
    */
   onBatch: (
     batch: InboundBatch,
-    send: (text: string) => Promise<void>,
+    send: (text: string, options?: SendOptions) => Promise<void>,
     signal: AbortSignal,
     controls: BatchControls,
   ) => Promise<void>;
   debounceMs?: number;
-  /** Pause between the bubbles of a multi-bubble send (default 500ms; 0 disables). */
+  /**
+   * Base pause between the bubbles of a multi-bubble send (default 500ms;
+   * 0 disables pacing). Each pause grows with the length of the bubble it
+   * precedes — see sendAll — so long bubbles read as typed, not pasted.
+   */
   chunkDelayMs?: number;
+  /**
+   * Pause before the typing indicator appears (default 1100ms, jittered).
+   * 0 restores the instant indicator.
+   */
+  typingDelayMs?: number;
+  /** Mark the owner's texts read shortly after they arrive (default true). */
+  readReceipts?: boolean;
+  /** Randomness for choreography jitter; tests inject a fixed source. */
+  random?: () => number;
   logLevel?: "debug" | "info" | "warn" | "error";
   logger: InboundLogger;
 }
 
 const DEFAULT_CHUNK_DELAY_MS = 500;
+/** Simulated typing speed: extra pause per character of the upcoming bubble. */
+const PACE_PER_CHAR_MS = 25;
+/** Cap on the length-based extra for any single inter-bubble pause. */
+const PACE_MAX_EXTRA_MS = 2_500;
+/** Cap on the summed length-based extra across one send, so long replies don't drag. */
+const PACE_TOTAL_EXTRA_CAP_MS = 4_000;
+/** A read receipt lands 300–800ms after the text — seen, not machine-scanned. */
+const READ_RECEIPT_MIN_DELAY_MS = 300;
+const READ_RECEIPT_JITTER_MS = 500;
+
+/** Levers on a text send, for ledger-tracked delivery and recovery. */
+export interface SendOptions {
+  /**
+   * Resume a partially delivered message: skip this many leading bubbles of
+   * the chunked text. Chunking is deterministic, so the indices are stable
+   * across process restarts.
+   */
+  skipChunks?: number;
+  /**
+   * An extra bubble sent ahead of the content (a recovery notice). Skipped
+   * entirely when every content bubble was already delivered, and excluded
+   * from `onChunkSent` accounting.
+   */
+  preamble?: string;
+  /**
+   * Called after each content bubble lands, with the cumulative count of
+   * delivered bubbles (skipped ones included).
+   */
+  onChunkSent?: (sent: number) => void;
+}
 
 /** Levers on the batch's space beyond plain text sends. */
 export interface BatchControls {
@@ -65,12 +109,13 @@ export interface WebhookResponse {
 export interface PhotonTransport {
   webhook(request: RawWebhookRequest): Promise<WebhookResponse>;
   /** Proactively send to a space persisted from an earlier inbound message. */
-  sendToSpace(spaceId: string, text: string): Promise<void>;
+  sendToSpace(spaceId: string, text: string, options?: SendOptions): Promise<void>;
   flushInbound(): Promise<void>;
   stop(): Promise<void>;
 }
 
 interface SendableSpace {
+  id: string;
   send(text: string): Promise<unknown>;
   startTyping(): Promise<unknown>;
   stopTyping(): Promise<unknown>;
@@ -78,6 +123,8 @@ interface SendableSpace {
 
 interface ReactableMessage {
   react(emoji: string): Promise<unknown>;
+  /** Marks the chat read on iMessage; optional so lean test doubles still fit. */
+  read?: () => Promise<unknown>;
 }
 
 export async function createPhotonTransport(
@@ -96,18 +143,48 @@ export async function createPhotonTransport(
     options: { logLevel: config.logLevel ?? "info" },
   });
 
+  const random = config.random ?? Math.random;
+  const typing = new TypingController({
+    logger: config.logger,
+    ...(config.typingDelayMs !== undefined ? { startDelayMs: config.typingDelayMs } : {}),
+    random,
+  });
+
   // Bubbles are paced, not fired back-to-back, so a multi-bubble reply lands
-  // like someone texting. The reply path holds its typing indicator through
-  // the pauses, so the gaps read as typing, not silence.
+  // like someone texting: each pause grows with the bubble it precedes, and
+  // the typing indicator is re-shown through it (delivering a bubble clears
+  // the indicator client-side), so the gaps read as typing, not silence.
   const chunkDelayMs = config.chunkDelayMs ?? DEFAULT_CHUNK_DELAY_MS;
-  const sendAll = async (space: SendableSpace, text: string): Promise<void> => {
+  const sendAll = async (
+    space: SendableSpace,
+    text: string,
+    options: SendOptions = {},
+  ): Promise<void> => {
+    const skip = options.skipChunks ?? 0;
+    const pending = splitMessage(text).slice(skip);
+    let sent = skip;
     let first = true;
-    for (const chunk of splitMessage(text)) {
+    let extraBudget = PACE_TOTAL_EXTRA_CAP_MS;
+    let paused = false;
+    if (options.preamble && pending.length > 0) {
+      await space.send(options.preamble);
+      first = false;
+    }
+    for (const chunk of pending) {
       if (!first && chunkDelayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+        const extra = Math.min(chunk.length * PACE_PER_CHAR_MS, PACE_MAX_EXTRA_MS, extraBudget);
+        extraBudget -= extra;
+        paused = true;
+        typing.assert(space);
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs + extra));
       }
       first = false;
       await space.send(chunk);
+      options.onChunkSent?.(++sent);
+    }
+    // The indicator asserted for a pause must not outlive the last bubble.
+    if (paused) {
+      typing.stop(space);
     }
   };
 
@@ -118,32 +195,34 @@ export async function createPhotonTransport(
     logger: config.logger,
     isDuplicate: config.isDuplicate,
     ...(config.debounceMs !== undefined ? { debounceMs: config.debounceMs } : {}),
-    // Typing shows as soon as a text starts buffering; `responding` below
-    // keeps it on through generation, so the indicator never gaps.
+    // A buffered text schedules the indicator after the humanizing delay —
+    // a beat of "they saw it" before "they're typing". Idempotent, so
+    // follow-up texts and steering re-fires never reset the clock.
     onWaiting: ({ space }) => {
-      void space.startTyping().catch((error: unknown) => {
-        config.logger.debug("Failed to show a typing indicator", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+      typing.schedule(space);
     },
-    // `responding` re-sends its own typing("stop") when the handler settles;
-    // an early stop inside it just clears the indicator sooner.
-    onBatch: (batch, context, signal) =>
-      spectrum.responding(context.space as never, () =>
-        config.onBatch(batch, (text) => sendAll(context.space, text), signal, {
-          stopTyping: () => {
-            void context.space.stopTyping().catch((error: unknown) => {
-              config.logger.debug("Failed to clear the typing indicator", {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
+    // The settle-path stop replaces `spectrum.responding` (which would show
+    // the indicator instantly, defeating the delay); like it, the finally
+    // guarantees no indicator outlives its batch.
+    onBatch: async (batch, context, signal) => {
+      try {
+        await config.onBatch(
+          batch,
+          (text, options) => sendAll(context.space, text, options),
+          signal,
+          {
+            stopTyping: () => {
+              typing.stop(context.space);
+            },
+            react: async (emoji) => {
+              await context.message.react(emoji);
+            },
           },
-          react: async (emoji) => {
-            await context.message.react(emoji);
-          },
-        }),
-      ),
+        );
+      } finally {
+        typing.stop(context.space);
+      }
+    },
   });
 
   return {
@@ -165,6 +244,22 @@ export async function createPhotonTransport(
         }
         if (message.platform.toLowerCase() === "imessage" && sender === config.ownerHandle) {
           config.rememberSpace(sender, space.id, message.platform);
+          // Surface a read receipt a jittered beat after the text arrives —
+          // "seen" comes before "typing" in the human rhythm. Best-effort,
+          // like every indicator signal.
+          if (config.readReceipts !== false && typeof message.read === "function") {
+            const readTimer = setTimeout(
+              () => {
+                void message.read?.().catch((error: unknown) => {
+                  config.logger.debug("Failed to send a read receipt", {
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                });
+              },
+              READ_RECEIPT_MIN_DELAY_MS + random() * READ_RECEIPT_JITTER_MS,
+            );
+            readTimer.unref?.();
+          }
         }
         processor.process(
           {
@@ -179,18 +274,19 @@ export async function createPhotonTransport(
       });
     },
 
-    async sendToSpace(spaceId, text) {
+    async sendToSpace(spaceId, text, options) {
       // The platform instance comes from calling the narrower with the
       // spectrum instance — the instance itself exposes no per-platform
       // property (unknown props resolve to custom event streams).
       const space = await imessage(spectrum).space.get(spaceId);
-      await sendAll(space, text);
+      await sendAll(space, text, options);
     },
 
     flushInbound: () => processor.flushNow(),
 
     async stop() {
       await processor.flushNow();
+      typing.clear();
       await spectrum.stop();
     },
   };

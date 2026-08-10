@@ -1,18 +1,25 @@
 import type { Logger } from "@nudge/agent";
+import type { SendOptions } from "@nudge/photon";
 import type { NudgeStore, OutboundKind } from "@nudge/store";
 
-const RECOVERED_PREFIX = "♻️ Recovered reply (may repeat):\n\n";
+// Recovery notices read like a person whose text may not have gone through,
+// not a system banner — the voice is the product, even on the failure path.
+// Bubble-level ledger progress keeps them rare: only the one bubble that was
+// mid-flight when the process died is ever ambiguous.
+const RESEND_NOTICE = "not sure that went through, so again:";
+const RESUME_NOTICE = "got cut off mid-text - here's the rest:";
 const MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface OutboundSender {
-  sendToSpace(spaceId: string, text: string): Promise<void>;
+  sendToSpace(spaceId: string, text: string, options?: SendOptions): Promise<void>;
 }
 
 /**
  * Ledger-backed at-least-once outbound delivery. Every proactive send is
- * journaled before it goes out; open entries (never started, or interrupted
- * mid-send) are retried by recover() — interrupted ones with an honest
- * "recovered" marker — bounded by the ledger's attempt and age limits.
+ * journaled before it goes out and its progress recorded per bubble; open
+ * entries are retried by recover() from the first unconfirmed bubble —
+ * interrupted ones behind an honest, conversational notice — bounded by the
+ * ledger's attempt and age limits.
  */
 export class DeliveryService {
   #lastMaintenanceAt = 0;
@@ -55,16 +62,32 @@ export class DeliveryService {
     for (const entry of this.store.openOutbound()) {
       const space = this.store.spaceFor(entry.handle);
       if (!space) continue;
-      const body =
-        entry.status === "sending" ? `${RECOVERED_PREFIX}${entry.body}` : entry.body;
-      await this.#send(entry.id, space.spaceId, body);
+      // A "sending" entry died mid-send: resume after the confirmed bubbles,
+      // behind a notice, since the next bubble may already have arrived. A
+      // "pending" entry never started — send it as-is, no notice.
+      const options: SendOptions =
+        entry.status === "sending"
+          ? {
+              skipChunks: entry.sentChunks,
+              preamble: entry.sentChunks > 0 ? RESUME_NOTICE : RESEND_NOTICE,
+            }
+          : {};
+      await this.#send(entry.id, space.spaceId, entry.body, options);
     }
   }
 
-  async #send(id: number, spaceId: string, body: string): Promise<boolean> {
+  async #send(
+    id: number,
+    spaceId: string,
+    body: string,
+    options: SendOptions = {},
+  ): Promise<boolean> {
     const attempt = this.store.markOutbound(id, "sending");
     try {
-      await this.sender.sendToSpace(spaceId, body);
+      await this.sender.sendToSpace(spaceId, body, {
+        ...options,
+        onChunkSent: (sent) => this.store.markOutboundProgress(id, sent),
+      });
       this.store.markOutbound(id, "sent");
       return true;
     } catch (error) {

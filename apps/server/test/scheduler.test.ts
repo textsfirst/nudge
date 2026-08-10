@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger, NudgeAgent } from "@nudge/agent";
+import type { SendOptions } from "@nudge/photon";
 import { NudgeStore } from "@nudge/store";
 import { describe, expect, it, vi } from "vitest";
 import { DeliveryService } from "../src/delivery.js";
@@ -155,13 +156,13 @@ describe("Scheduler", () => {
 });
 
 describe("DeliveryService", () => {
-  it("recovers interrupted sends with an honest marker", async () => {
+  it("recovers interrupted sends behind a conversational notice", async () => {
     const store = new NudgeStore(":memory:");
     store.rememberSpace(OWNER, "space-1", "imessage");
-    const sent: string[] = [];
+    const sent: { text: string; options?: SendOptions }[] = [];
     const delivery = new DeliveryService(
       store,
-      { sendToSpace: async (_space, text) => void sent.push(text) },
+      { sendToSpace: async (_space, text, options) => void sent.push({ text, options }) },
       logger,
     );
 
@@ -173,9 +174,33 @@ describe("DeliveryService", () => {
 
     await delivery.recover();
     expect(sent).toHaveLength(2);
-    expect(sent[0]).toContain("♻️ Recovered reply");
-    expect(sent[0]).toContain("did you make it?");
-    expect(sent[1]).toBe("fresh reminder");
+    expect(sent[0]?.text).toBe("did you make it?");
+    expect(sent[0]?.options?.preamble).toBe("not sure that went through, so again:");
+    expect(sent[0]?.options?.skipChunks).toBe(0);
+    expect(sent[1]?.text).toBe("fresh reminder");
+    expect(sent[1]?.options?.preamble).toBeUndefined();
+    expect(store.openOutbound()).toHaveLength(0);
+  });
+
+  it("resumes a partially delivered send after its confirmed bubbles", async () => {
+    const store = new NudgeStore(":memory:");
+    store.rememberSpace(OWNER, "space-1", "imessage");
+    const sent: { text: string; options?: SendOptions }[] = [];
+    const delivery = new DeliveryService(
+      store,
+      { sendToSpace: async (_space, text, options) => void sent.push({ text, options }) },
+      logger,
+    );
+
+    // Two of three bubbles landed before the previous process died.
+    const partial = store.enqueueOutbound(OWNER, "one\n\ntwo\n\nthree", "reply");
+    store.markOutbound(partial, "sending");
+    store.markOutboundProgress(partial, 2);
+
+    await delivery.recover();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.options?.skipChunks).toBe(2);
+    expect(sent[0]?.options?.preamble).toBe("got cut off mid-text - here's the rest:");
     expect(store.openOutbound()).toHaveLength(0);
   });
 

@@ -62,6 +62,8 @@ export interface OutboundRow {
   kind: OutboundKind;
   status: OutboundStatus;
   attempts: number;
+  /** Bubbles of the chunked body confirmed delivered; recovery resumes after them. */
+  sentChunks: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -83,7 +85,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -211,6 +213,11 @@ const MIGRATIONS: readonly Migration[] = [
     // Per-turn model metrics JSON (model id, TTFT, tokens/sec, cache tokens)
     // for the console. Nullable: user/error rows never have it.
     db.exec("ALTER TABLE messages ADD COLUMN metrics TEXT");
+  },
+  (db) => {
+    // Bubble-level delivery progress: how many chunks of the body already
+    // landed, so recovery resumes mid-message instead of replaying it all.
+    db.exec("ALTER TABLE outbound_ledger ADD COLUMN sent_chunks INTEGER NOT NULL DEFAULT 0");
   },
 ];
 
@@ -526,6 +533,13 @@ export class NudgeStore {
     return requiredNumber(row, "attempts");
   }
 
+  /** Record that the first `sentChunks` bubbles of the body landed. */
+  markOutboundProgress(id: number, sentChunks: number, at = Date.now()): void {
+    this.#db
+      .prepare("UPDATE outbound_ledger SET sent_chunks = ?, updated_at = ? WHERE id = ?")
+      .run(sentChunks, at, id);
+  }
+
   openOutbound(maxAgeMs = 24 * 60 * 60 * 1000, maxAttempts = 3, now = Date.now()): OutboundRow[] {
     return this.#db
       .prepare(
@@ -750,6 +764,7 @@ function toOutbound(row: Row): OutboundRow {
     kind: requiredString(row, "kind") as OutboundKind,
     status: requiredString(row, "status") as OutboundStatus,
     attempts: requiredNumber(row, "attempts"),
+    sentChunks: requiredNumber(row, "sent_chunks"),
     createdAt: requiredNumber(row, "created_at"),
     updatedAt: requiredNumber(row, "updated_at"),
   };

@@ -171,6 +171,11 @@ export function loadConfig(
     timeZone: settings.timezone,
     idleRolloverMs: Math.round(settings.threads.idle_hours * 60 * 60 * 1000),
     debounceMs: settings.threads.debounce_ms,
+    texting: {
+      readReceipts: settings.texting.read_receipts,
+      typingDelayMs: settings.texting.typing_delay_ms,
+      chunkDelayMs: settings.texting.chunk_delay_ms,
+    },
     maxToolSteps: settings.agent.max_tool_steps,
     contextWindowTokens: settings.agent.context_window_tokens,
     compactAtPercent: settings.agent.compact_at_percent,

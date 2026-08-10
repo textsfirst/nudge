@@ -69,6 +69,13 @@ export const settingsSchema = z.object({
       debounce_ms: z.number().int().min(0).max(30_000).default(250),
     })
     .prefault({}),
+  texting: z
+    .object({
+      read_receipts: z.boolean().default(true),
+      typing_delay_ms: z.number().int().min(0).max(10_000).default(1100),
+      chunk_delay_ms: z.number().int().min(0).max(5_000).default(500),
+    })
+    .prefault({}),
   agent: z
     .object({
       max_tool_steps: z.number().int().min(1).max(2000).default(256),
@@ -324,6 +331,31 @@ export const SETTINGS_FORM: SettingsSection[] = [
         label: "Debounce (ms)",
         control: "number",
         help: "Short coalescing window for near-simultaneous deliveries. Later texts steer the active reply.",
+      },
+    ],
+  },
+  {
+    title: "Texting feel",
+    description:
+      "Choreography of read receipts, the typing indicator, and bubble pacing — perception only; generation speed is unaffected.",
+    fields: [
+      {
+        path: "texting.read_receipts",
+        label: "Read receipts",
+        control: "boolean",
+        help: "Mark the owner's texts read a moment after they arrive, so \"seen\" precedes \"typing\".",
+      },
+      {
+        path: "texting.typing_delay_ms",
+        label: "Typing delay (ms)",
+        control: "number",
+        help: "Pause (jittered) before the typing indicator appears — a human takes a beat to see a text. 0 shows it instantly.",
+      },
+      {
+        path: "texting.chunk_delay_ms",
+        label: "Bubble gap (ms)",
+        control: "number",
+        help: "Base pause between the bubbles of a multi-bubble reply; each gap grows with the next bubble's length. 0 sends bubbles back-to-back.",
       },
     ],
   },
