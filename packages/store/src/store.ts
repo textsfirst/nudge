@@ -26,6 +26,10 @@ export interface MessageRow {
   role: MessageRole;
   content: string;
   toolPayload: string | null;
+  /** Model-reported prompt tokens for the turn that produced this row; assistant rows only. */
+  inputTokens: number | null;
+  /** Model-reported completion tokens for the turn that produced this row; assistant rows only. */
+  outputTokens: number | null;
   createdAt: number;
 }
 
@@ -77,7 +81,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -194,6 +198,12 @@ const MIGRATIONS: readonly Migration[] = [
         steps TEXT NOT NULL
       )
     `);
+  },
+  (db) => {
+    // Model-reported token usage per assistant message, for the console and
+    // for observing context pressure. Nullable: user/error rows never have it.
+    db.exec("ALTER TABLE messages ADD COLUMN input_tokens INTEGER");
+    db.exec("ALTER TABLE messages ADD COLUMN output_tokens INTEGER");
   },
 ];
 
@@ -317,14 +327,25 @@ export class NudgeStore {
     role: MessageRole;
     content: string;
     toolPayload?: string;
+    inputTokens?: number;
+    outputTokens?: number;
     at?: number;
   }): MessageRow {
     const at = input.at ?? Date.now();
     const result = this.#db
       .prepare(
-        "INSERT INTO messages (session_id, handle, role, content, tool_payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (session_id, handle, role, content, tool_payload, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(input.sessionId, input.handle, input.role, input.content, input.toolPayload ?? null, at);
+      .run(
+        input.sessionId,
+        input.handle,
+        input.role,
+        input.content,
+        input.toolPayload ?? null,
+        input.inputTokens ?? null,
+        input.outputTokens ?? null,
+        at,
+      );
     return {
       id: Number(result.lastInsertRowid),
       sessionId: input.sessionId,
@@ -332,6 +353,8 @@ export class NudgeStore {
       role: input.role,
       content: input.content,
       toolPayload: input.toolPayload ?? null,
+      inputTokens: input.inputTokens ?? null,
+      outputTokens: input.outputTokens ?? null,
       createdAt: at,
     };
   }
@@ -702,6 +725,8 @@ function toMessage(row: Row): MessageRow {
     role: requiredString(row, "role") as MessageRole,
     content: requiredString(row, "content"),
     toolPayload: nullableString(row, "tool_payload"),
+    inputTokens: nullableNumber(row, "input_tokens"),
+    outputTokens: nullableNumber(row, "output_tokens"),
     createdAt: requiredNumber(row, "created_at"),
   };
 }

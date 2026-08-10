@@ -63,7 +63,10 @@ export const settingsSchema = z.object({
   agent: z
     .object({
       max_tool_steps: z.number().int().min(1).max(2000).default(256),
-      max_history_messages: z.number().int().min(4).max(400).default(40),
+      // Compaction budget: 0 auto-detects the window from the model id.
+      context_window_tokens: z.number().int().min(0).max(2_000_000).default(0),
+      compact_at_percent: z.number().min(20).max(95).default(80),
+      keep_recent_tokens: z.number().int().min(1_000).max(100_000).default(20_000),
     })
     .prefault({}),
 });
@@ -298,10 +301,22 @@ export const SETTINGS_FORM: SettingsSection[] = [
         help: "Backstop against runaway tool loops, not a per-task budget — set it well above any real task.",
       },
       {
-        path: "agent.max_history_messages",
-        label: "History before compaction",
+        path: "agent.context_window_tokens",
+        label: "Context window (tokens)",
         control: "number",
-        help: "Messages kept verbatim in context before older turns are compacted into a summary.",
+        help: "Model context window the compaction budget is computed from. 0 auto-detects from the model id.",
+      },
+      {
+        path: "agent.compact_at_percent",
+        label: "Compact at (%)",
+        control: "number",
+        help: "Older turns fold into the thread summary when the estimated context reaches this share of the usable window.",
+      },
+      {
+        path: "agent.keep_recent_tokens",
+        label: "Recent tokens kept",
+        control: "number",
+        help: "How much recent conversation stays verbatim when older turns are compacted.",
       },
     ],
   },

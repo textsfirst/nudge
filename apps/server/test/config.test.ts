@@ -97,7 +97,9 @@ describe("loadConfig", () => {
         "threads.idle_hours": 2,
         "threads.debounce_ms": 100,
         "agent.max_tool_steps": 20,
-        "agent.max_history_messages": 60,
+        "agent.context_window_tokens": 64_000,
+        "agent.compact_at_percent": 70,
+        "agent.keep_recent_tokens": 10_000,
       }),
       boot,
     );
@@ -109,7 +111,9 @@ describe("loadConfig", () => {
     expect(config.idleRolloverMs).toBe(2 * 60 * 60 * 1000);
     expect(config.debounceMs).toBe(100);
     expect(config.maxToolSteps).toBe(20);
-    expect(config.maxHistoryMessages).toBe(60);
+    expect(config.contextWindowTokens).toBe(64_000);
+    expect(config.compactAtPercent).toBe(70);
+    expect(config.keepRecentTokens).toBe(10_000);
     expect(config.timeZone).toBe("America/New_York");
   });
 });

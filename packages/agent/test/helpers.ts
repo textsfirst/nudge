@@ -15,18 +15,30 @@ export const quietLogger: Logger = {
   error: () => undefined,
 };
 
-const usage = {
-  inputTokens: { total: 1, noCache: 1, cacheRead: undefined, cacheWrite: undefined },
-  outputTokens: { total: 1, text: 1, reasoning: undefined },
-};
+export interface UsageOverride {
+  inputTokens?: number;
+  outputTokens?: number;
+}
 
-export function textChunks(text: string): LanguageModelV3StreamPart[] {
+/** The provider-spec (V3) usage shape emitted on finish parts. */
+function v3Usage(override?: UsageOverride) {
+  const input = override?.inputTokens ?? 1;
+  const output = override?.outputTokens ?? 1;
+  return {
+    inputTokens: { total: input, noCache: input, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: output, text: output, reasoning: undefined },
+  };
+}
+
+const usage = v3Usage();
+
+export function textChunks(text: string, usageOverride?: UsageOverride): LanguageModelV3StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "text-start", id: "1" },
     { type: "text-delta", id: "1", delta: text },
     { type: "text-end", id: "1" },
-    { type: "finish", finishReason: "stop", usage },
+    { type: "finish", finishReason: "stop", usage: v3Usage(usageOverride) },
   ];
 }
 
@@ -65,6 +77,8 @@ export type ScriptEntry =
  */
 export class ScriptedSource implements ModelSource {
   readonly id: string;
+  /** Off-registry on purpose, so tests get the conservative default window. */
+  readonly modelId = "scripted-test-model";
   readonly mock: MockLanguageModelV3;
   #script: ScriptEntry[];
 

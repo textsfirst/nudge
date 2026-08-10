@@ -11,6 +11,19 @@ export {
   type SyncBundledResult,
 } from "./bundled.js";
 export { BUNDLED_CONTENT_DIR, BUNDLED_SKILLS_DIR } from "./content.js";
+export {
+  contextWindowFor,
+  DEFAULT_COMPACT_AT_FRACTION,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_KEEP_RECENT_TOKENS,
+  estimateMessageTokens,
+  estimateTokens,
+  planCompaction,
+  RESERVE_TOKENS,
+  usableWindow,
+  type CompactionBudget,
+  type CompactionPlan,
+} from "./context.js";
 export { DATA_README } from "./data-readme.js";
 export { applyEdits, type EditOutcome, type FileEdit } from "./edits.js";
 export { FileWorkspace, MAX_LIST_ENTRIES, MEMORY_LIMITS, validateDataFile } from "./files.js";
@@ -33,7 +46,7 @@ export {
   type DeviceLoginPrompt,
   type StoredChatGptTokens,
 } from "./providers/chatgpt-auth.js";
-export { SubscriptionAuthError } from "./providers/errors.js";
+export { isContextOverflowError, SubscriptionAuthError } from "./providers/errors.js";
 export { createModelSources, type ProviderConfig } from "./providers/factory.js";
 export { ChatGptSubscriptionSource, OpenAiApiSource } from "./providers/ai-sdk.js";
 export { SkillsLibrary, type SkillMeta } from "./skills.js";

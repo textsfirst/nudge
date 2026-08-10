@@ -37,6 +37,15 @@ describe("settingsFromOverrides", () => {
     expect(() => settingsFromOverrides({ timezone: "Mars/Olympus" })).toThrow(/timezone/);
     expect(() => settingsFromOverrides({ "threads.idle_hours": 999 })).toThrow(/Settings page/);
   });
+
+  it("ignores overrides for settings that no longer exist", () => {
+    // agent.max_history_messages predates token-based compaction; a stored
+    // override must not break boot after the upgrade.
+    const settings = settingsFromOverrides({ "agent.max_history_messages": 60 });
+    expect(settings.agent.context_window_tokens).toBe(0);
+    expect(settings.agent.compact_at_percent).toBe(80);
+    expect(settings.agent.keep_recent_tokens).toBe(20_000);
+  });
 });
 
 describe("overridesFromSettings", () => {

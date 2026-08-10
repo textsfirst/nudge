@@ -202,6 +202,14 @@ describe("console API", () => {
       role: "user",
       content: "hello there",
     });
+    store.appendMessage({
+      sessionId: session.id,
+      handle: "+15551234567",
+      role: "assistant",
+      content: "hi!",
+      inputTokens: 1_234,
+      outputTokens: 56,
+    });
     store.setTurnProgress(
       session.id,
       "+15551234567",
@@ -211,10 +219,12 @@ describe("console API", () => {
 
     const list = await json(application, "/api/threads");
     expect(list.body.total).toBe(1);
-    expect(list.body.sessions[0].messageCount).toBe(1);
+    expect(list.body.sessions[0].messageCount).toBe(2);
 
     const detail = await json(application, `/api/threads/${session.id}`);
     expect(detail.body.messages[0].content).toBe("hello there");
+    expect(detail.body.messages[0]).toMatchObject({ inputTokens: null, outputTokens: null });
+    expect(detail.body.messages[1]).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
     expect(detail.body.progress.toolCalls).toEqual([
       { tool: "bash", input: { command: "ls" }, output: "ok" },
     ]);

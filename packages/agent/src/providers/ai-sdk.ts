@@ -13,8 +13,11 @@ export interface ChatGptSubscriptionSourceOptions {
 
 export class ChatGptSubscriptionSource implements ModelSource {
   readonly id = "chatgpt-subscription";
+  readonly modelId: string;
 
-  constructor(private readonly options: ChatGptSubscriptionSourceOptions) {}
+  constructor(private readonly options: ChatGptSubscriptionSourceOptions) {
+    this.modelId = options.model;
+  }
 
   async languageModel(): Promise<LanguageModel> {
     const credentials = await this.options.auth.credentials();
@@ -46,9 +49,11 @@ export interface OpenAiApiSourceOptions {
 
 export class OpenAiApiSource implements ModelSource {
   readonly id = "openai-api";
+  readonly modelId: string;
   readonly #model: LanguageModel;
 
   constructor(options: OpenAiApiSourceOptions) {
+    this.modelId = options.model;
     this.#model = createOpenAI({ apiKey: options.apiKey }).responses(options.model);
   }
 

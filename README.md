@@ -164,7 +164,9 @@ Settings (console → Settings):
 | `threads.idle_hours` | `6` | Idle gap before a thread rolls over |
 | `threads.debounce_ms` | `2500` | Burst window before replying |
 | `agent.max_tool_steps` | `256` | Runaway-loop backstop per turn (the agent winds down gracefully near it) |
-| `agent.max_history_messages` | `40` | Thread length before compaction |
+| `agent.context_window_tokens` | `0` (auto) | Context window for compaction budgeting; `0` auto-detects from the model id |
+| `agent.compact_at_percent` | `80` | Older turns fold into the thread summary at this share of the usable window |
+| `agent.keep_recent_tokens` | `20000` | Recent conversation kept verbatim when older turns are compacted |
 
 `.env`:
 

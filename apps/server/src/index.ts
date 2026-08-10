@@ -84,7 +84,11 @@ async function main(): Promise<void> {
     dataDir: config.dataDir,
     systemFile: createSystemFileReader(config.systemFilePath, logger),
     idleRolloverMs: config.idleRolloverMs,
-    compactAfterMessages: config.maxHistoryMessages,
+    compaction: {
+      contextWindowTokens: config.contextWindowTokens,
+      compactAtFraction: config.compactAtPercent / 100,
+      keepRecentTokens: config.keepRecentTokens,
+    },
     maxToolSteps: config.maxToolSteps,
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,

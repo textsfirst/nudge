@@ -156,7 +156,9 @@ export function loadConfig(
     idleRolloverMs: Math.round(settings.threads.idle_hours * 60 * 60 * 1000),
     debounceMs: settings.threads.debounce_ms,
     maxToolSteps: settings.agent.max_tool_steps,
-    maxHistoryMessages: settings.agent.max_history_messages,
+    contextWindowTokens: settings.agent.context_window_tokens,
+    compactAtPercent: settings.agent.compact_at_percent,
+    keepRecentTokens: settings.agent.keep_recent_tokens,
     port: boot.port,
     logLevel: boot.logLevel,
   };

@@ -14,6 +14,8 @@ export interface ConversationMessage {
  */
 export interface ModelSource {
   readonly id: string;
+  /** The provider model id (e.g. "gpt-5-mini"), used to look up the context window. */
+  readonly modelId: string;
   languageModel(): Promise<LanguageModel>;
   isAuthError(error: unknown): boolean;
 }

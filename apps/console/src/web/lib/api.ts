@@ -121,6 +121,9 @@ export interface ThreadMessage {
   content: string;
   createdAt: number;
   toolCalls: { tool: string; input: unknown; output: unknown }[] | null;
+  /** Model-reported token usage; null on user/error rows and pre-upgrade history. */
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
 
 /** The in-flight turn's live tool-step trace; null when no turn is running. */

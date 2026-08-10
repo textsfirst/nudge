@@ -254,6 +254,14 @@ export function ThreadDetailPage() {
   );
 }
 
+function formatTokens(count: number): string {
+  return count >= 10_000
+    ? `${Math.round(count / 1000)}k`
+    : count >= 1_000
+      ? `${(count / 1000).toFixed(1)}k`
+      : String(count);
+}
+
 /**
  * Interruption notes ("[This turn failed… Tool calls that already ran: …]")
  * repeat the tool trace as text because the model's history replay is
@@ -317,6 +325,12 @@ function MessageItem({
         <span title={new Date(message.createdAt).toISOString()}>
           {formatTime(message.createdAt)}
         </span>
+        {message.inputTokens !== null && (
+          <span title="Model tokens this turn: context sent in · reply and reasoning out">
+            {formatTokens(message.inputTokens)} in
+            {message.outputTokens !== null && ` · ${formatTokens(message.outputTokens)} out`}
+          </span>
+        )}
         {message.role === "error" && !debug && (
           <button
             type="button"

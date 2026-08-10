@@ -7,6 +7,7 @@ import {
   promptMessages,
   quietLogger,
   ScriptedSource,
+  textChunks,
   toolCallChunks,
 } from "./helpers.js";
 
@@ -117,29 +118,116 @@ describe("NudgeAgent.reply", () => {
     expect(nightSession.id).toBeLessThan(morningSession.id);
   });
 
-  it("compacts long threads into a rolling summary", async () => {
+  // Compaction test geometry: a 24k window has a usable budget of 12k tokens
+  // (floored at half the window) and folds at 80% of that — 9,600 tokens. The
+  // long messages below estimate at ~5k tokens each, so two of them in history
+  // trip the threshold while one plus the ~1.7k-token system stack does not.
+  const long = (label: string) => `${label} ${"x".repeat(20_000)}`;
+  const tightBudget = { contextWindowTokens: 24_000, keepRecentTokens: 6_000 };
+
+  it("compacts when the estimated context outgrows the window, keeping recent turns verbatim", async () => {
     const script = [
       "r1",
+      "first summary", // second turn's pre-flight folds m1
       "r2",
-      "r3", // third exchange pushes past the cap...
-      "compacted summary", // ...so a summarize call follows
-      "r4",
+      "updated summary", // third turn's pre-flight folds r1 + m2
+      "r3",
     ];
-    const { agent, store, source } = makeAgent(script, { compactAfterMessages: 4 });
+    const { agent, store, source } = makeAgent(script, { compaction: tightBudget });
 
+    await agent.reply(HANDLE, long("m1"));
+    expect(store.activeSession(HANDLE)!.summary).toBeNull();
+
+    await agent.reply(HANDLE, long("m2"));
+    const afterFirst = store.activeSession(HANDLE)!;
+    expect(afterFirst.summary).toBe("first summary");
+    expect(afterFirst.compactedThrough).toBeGreaterThan(0);
+    // The first fold starts a fresh summary...
+    const firstSummarize = promptMessages(source.calls[1]!);
+    expect(firstSummarize[0]?.text).toContain("compacting the history");
+    expect(firstSummarize[0]?.text).not.toContain("preserve every item");
+    // ...and the reply that follows sees the summary in place of the folded turn.
+    const secondReply = promptMessages(source.calls[2]!);
+    expect(secondReply[0]?.text).toContain("Earlier in this thread");
+    expect(secondReply[0]?.text).toContain("first summary");
+    expect(secondReply.filter((message) => message.role !== "system")).toHaveLength(2);
+
+    await agent.reply(HANDLE, long("m3"));
+    const afterSecond = store.activeSession(HANDLE)!;
+    expect(afterSecond.summary).toBe("updated summary");
+    expect(afterSecond.compactedThrough).toBeGreaterThan(afterFirst.compactedThrough);
+    // Later folds merge into the previous summary instead of re-summarizing it.
+    const secondSummarize = promptMessages(source.calls[3]!);
+    expect(secondSummarize[0]?.text).toContain("preserve every item");
+    expect(secondSummarize.at(-1)?.text).toContain("Existing summary:\nfirst summary");
+  });
+
+  it("leaves short threads un-compacted", async () => {
+    const { agent, store } = makeAgent(["r1", "r2"], { compaction: tightBudget });
     await agent.reply(HANDLE, "m1");
     await agent.reply(HANDLE, "m2");
-    await agent.reply(HANDLE, "m3");
+    const session = store.activeSession(HANDLE)!;
+    expect(session.summary).toBeNull();
+    expect(session.compactedThrough).toBe(0);
+  });
+
+  it("recovers from a provider context overflow by folding hard and retrying once", async () => {
+    const overflow = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+        message: "Your input exceeds the context window of this model.",
+      },
+    };
+    const { agent, store, source } = makeAgent([
+      "r1",
+      // Early stream errors are retried per model call (attempts: 3) before
+      // the failure surfaces to the overflow-recovery path.
+      ...Array.from({ length: 3 }, () => errorChunks(overflow)),
+      "rescue summary",
+      "recovered reply",
+    ]);
+
+    await agent.reply(HANDLE, "m1");
+    await expect(agent.reply(HANDLE, "m2")).resolves.toBe("recovered reply");
 
     const session = store.activeSession(HANDLE)!;
-    expect(session.summary).toBe("compacted summary");
+    expect(session.summary).toBe("rescue summary");
     expect(session.compactedThrough).toBeGreaterThan(0);
+    const retry = promptMessages(source.calls.at(-1)!);
+    expect(retry[0]?.text).toContain("rescue summary");
+    expect(retry.filter((message) => message.role !== "system")).toHaveLength(2);
+  });
 
-    await agent.reply(HANDLE, "m4");
-    const lastCall = promptMessages(source.calls[4]!);
-    expect(lastCall[0]?.text).toContain("Earlier in this thread");
-    // Folded turns are no longer replayed verbatim.
-    expect(lastCall.filter((message) => message.role !== "system").length).toBeLessThan(7);
+  it("drops folded turns with a note when the summarizer fails and the prompt cannot fit", async () => {
+    const boom = () => {
+      throw new Error("summarizer down");
+    };
+    // An 8k window floors the usable budget at 4k tokens; two ~5k-token
+    // messages exceed it outright, so a failed summary cannot leave the
+    // prompt oversized — the fold happens anyway, without a summary.
+    const { agent, store } = makeAgent(["r1", boom, "r2"], {
+      compaction: { contextWindowTokens: 8_000, keepRecentTokens: 6_000 },
+    });
+
+    await agent.reply(HANDLE, long("m1"));
+    await expect(agent.reply(HANDLE, long("m2"))).resolves.toBe("r2");
+
+    const session = store.activeSession(HANDLE)!;
+    expect(session.summary).toContain("dropped before they could be summarized");
+    expect(session.compactedThrough).toBeGreaterThan(0);
+  });
+
+  it("records model-reported token usage on assistant rows", async () => {
+    const { agent, store } = makeAgent([
+      textChunks("counted reply", { inputTokens: 1_234, outputTokens: 56 }),
+    ]);
+    await agent.reply(HANDLE, "hi");
+    const assistant = store
+      .sessionMessages(store.activeSession(HANDLE)!.id)
+      .find((message) => message.role === "assistant");
+    expect(assistant).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
   });
 
   it("executes file tools and records the tool payload", async () => {
@@ -305,6 +393,7 @@ describe("NudgeAgent.runTask", () => {
 describe("model source fallback", () => {
   const failing: ModelSource = {
     id: "subscription",
+    modelId: "scripted-test-model",
     languageModel: () => Promise.reject(new SubscriptionAuthError("expired")),
     isAuthError: (error) => error instanceof SubscriptionAuthError,
   };
@@ -325,6 +414,7 @@ describe("model source fallback", () => {
   it("does not mask non-auth failures", async () => {
     const broken: ModelSource = {
       id: "subscription",
+      modelId: "scripted-test-model",
       languageModel: () => Promise.reject(new Error("rate limited")),
       isAuthError: (error) => error instanceof SubscriptionAuthError,
     };

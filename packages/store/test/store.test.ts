@@ -73,6 +73,25 @@ describe("NudgeStore", () => {
     expect(store.turnProgress(next.id)).toBeUndefined();
   });
 
+  it("round-trips per-message token usage", () => {
+    const store = new NudgeStore(":memory:");
+    const session = store.startSession(HANDLE);
+    store.appendMessage({ sessionId: session.id, handle: HANDLE, role: "user", content: "hi" });
+    const reply = store.appendMessage({
+      sessionId: session.id,
+      handle: HANDLE,
+      role: "assistant",
+      content: "hello",
+      inputTokens: 1_234,
+      outputTokens: 56,
+    });
+    expect(reply).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
+
+    const [user, assistant] = store.sessionMessages(session.id);
+    expect(user).toMatchObject({ inputTokens: null, outputTokens: null });
+    expect(assistant).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
+  });
+
   it("limits session messages to those after a compaction point", () => {
     const store = new NudgeStore(":memory:");
     const session = store.startSession(HANDLE);
@@ -224,10 +243,12 @@ describe("NudgeStore", () => {
 
       const store = new NudgeStore(path);
       expect(store.searchMessages("searchable")).toHaveLength(1);
+      // The token-usage migration backfills legacy rows as null.
+      expect(store.sessionMessages(1)[0]).toMatchObject({ inputTokens: null, outputTokens: null });
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 4 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

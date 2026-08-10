@@ -222,6 +222,8 @@ export function createConsoleApp(
           content: message.content,
           createdAt: message.createdAt,
           toolCalls: parseToolPayload(message.toolPayload),
+          inputTokens: message.inputTokens,
+          outputTokens: message.outputTokens,
         }));
         // A live tool-step trace exists only while a turn is in flight. Traces
         // that stopped updating (e.g. the server died mid-turn) are ignored.
