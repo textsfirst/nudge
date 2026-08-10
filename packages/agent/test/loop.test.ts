@@ -49,6 +49,65 @@ describe("agent loop limits", () => {
     }
   });
 
+  it("nudges a multi-step turn that has texted the owner nothing", async () => {
+    const commands = ["echo a", "echo b", "echo c", "echo d"];
+    const { agent, source } = makeAgent([
+      ...commands.map((command) => toolCallChunks("bash", { command })),
+      "done",
+    ]);
+
+    await expect(
+      agent.reply(HANDLE, "long job", { onProgress: async () => undefined }),
+    ).resolves.toBe("done");
+
+    // The nudge lands before the fifth model call, and only there.
+    const note = promptMessages(source.calls[4]!)
+      .filter((message) => message.role === "user")
+      .at(-1);
+    expect(note?.text).toContain("owner has heard nothing");
+    expect(note?.text).toContain("send_update");
+    for (const call of source.calls.slice(0, 4)) {
+      for (const message of promptMessages(call)) {
+        expect(message.text).not.toContain("owner has heard nothing");
+      }
+    }
+  });
+
+  it("does not nudge once the model has already texted an update", async () => {
+    const { agent, source } = makeAgent([
+      toolCallChunks("send_update", { text: "on it" }),
+      ...["echo a", "echo b", "echo c", "echo d"].map((command) =>
+        toolCallChunks("bash", { command }),
+      ),
+      "done",
+    ]);
+
+    await agent.reply(HANDLE, "long job", { onProgress: async () => undefined });
+
+    for (const call of source.calls) {
+      for (const message of promptMessages(call)) {
+        expect(message.text).not.toContain("owner has heard nothing");
+      }
+    }
+  });
+
+  it("does not nudge when the send_update tool is absent", async () => {
+    const { agent, source } = makeAgent([
+      ...["echo a", "echo b", "echo c", "echo d"].map((command) =>
+        toolCallChunks("bash", { command }),
+      ),
+      "done",
+    ]);
+
+    await agent.reply(HANDLE, "long job");
+
+    for (const call of source.calls) {
+      for (const message of promptMessages(call)) {
+        expect(message.text).not.toContain("owner has heard nothing");
+      }
+    }
+  });
+
   it("never flags repeated calls whose results change (polling with progress)", async () => {
     // The same command seven times, but each run appends a line and prints the
     // new count — identical input, different output every step. That is

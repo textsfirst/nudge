@@ -8,6 +8,8 @@ import { z } from "zod";
  * .env, and the bootstrap values needed before the database can be opened
  * (NUDGE_DATA_DIR, PORT, LOG_LEVEL) come from the environment — see config.ts.
  */
+const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
 export const settingsSchema = z.object({
   // Empty until the owner sets it in the console; the server refuses to start
   // without it (config.ts) so it can point at the Settings page.
@@ -45,9 +47,7 @@ export const settingsSchema = z.object({
     .prefault({}),
   model: z
     .object({
-      reasoning_effort: z
-        .enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
-        .optional(),
+      reasoning_effort: z.enum(REASONING_EFFORTS).optional(),
       fast_mode: z.boolean().default(false),
     })
     .prefault({}),
@@ -66,7 +66,7 @@ export const settingsSchema = z.object({
   threads: z
     .object({
       idle_hours: z.number().min(0.1).max(168).default(6),
-      debounce_ms: z.number().int().min(0).max(30_000).default(2_500),
+      debounce_ms: z.number().int().min(0).max(30_000).default(250),
     })
     .prefault({}),
   agent: z
@@ -76,6 +76,10 @@ export const settingsSchema = z.object({
       context_window_tokens: z.number().int().min(0).max(2_000_000).default(0),
       compact_at_percent: z.number().min(20).max(95).default(80),
       keep_recent_tokens: z.number().int().min(1_000).max(100_000).default(20_000),
+      // The dedicated summarizer: same provider and auth as replies, its own model.
+      compaction_model: z.string().min(1).default("gpt-5.6-luna"),
+      compaction_reasoning_effort: z.enum(REASONING_EFFORTS).default("high"),
+      compaction_fast_mode: z.boolean().default(true),
     })
     .prefault({}),
 });
@@ -254,7 +258,7 @@ export const SETTINGS_FORM: SettingsSection[] = [
         label: "Reasoning effort",
         control: "select",
         optional: true,
-        options: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        options: [...REASONING_EFFORTS],
         help: "Reasoning level for model calls. Empty uses the model's default.",
       },
       {
@@ -319,7 +323,7 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "threads.debounce_ms",
         label: "Debounce (ms)",
         control: "number",
-        help: "How long to wait for follow-up texts before replying to a burst as one message.",
+        help: "Short coalescing window for near-simultaneous deliveries. Later texts steer the active reply.",
       },
     ],
   },
@@ -349,6 +353,25 @@ export const SETTINGS_FORM: SettingsSection[] = [
         label: "Recent tokens kept",
         control: "number",
         help: "How much recent conversation stays verbatim when older turns are compacted.",
+      },
+      {
+        path: "agent.compaction_model",
+        label: "Compaction model",
+        control: "text",
+        help: "Model that writes compaction and carryover summaries, on the same provider and auth as replies. For the custom provider, pick a model the endpoint serves.",
+      },
+      {
+        path: "agent.compaction_reasoning_effort",
+        label: "Compaction reasoning effort",
+        control: "select",
+        options: [...REASONING_EFFORTS],
+        help: "Reasoning level for summary calls — high keeps folds faithful.",
+      },
+      {
+        path: "agent.compaction_fast_mode",
+        label: "Compaction fast mode",
+        control: "boolean",
+        help: "Run summary calls on the priority service tier so folds don't delay replies.",
       },
     ],
   },

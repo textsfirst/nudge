@@ -1,30 +1,18 @@
 const DEFAULT_MAX = 1_000;
 
 /**
- * Split a long reply into iMessage-sized chunks, preferring paragraph
- * boundaries, then sentence/space boundaries for oversized paragraphs.
+ * Split a reply into one message per paragraph, the way people text: each
+ * blank-line-separated thought becomes its own bubble. Single line breaks
+ * stay inside a bubble, so short structured lines (and anything the model
+ * deliberately keeps together, like a drafted email) arrive as one message.
+ * Paragraphs over the platform cap are further split at sentence, then space
+ * boundaries.
  */
 export function splitMessage(text: string, max = DEFAULT_MAX): string[] {
-  const trimmed = text.trim();
-  if (trimmed.length <= max) {
-    return trimmed ? [trimmed] : [];
-  }
-
   const chunks: string[] = [];
-  let current = "";
-  for (const paragraph of trimmed.split(/\n{2,}/)) {
-    for (const piece of splitOversized(paragraph.trim(), max)) {
-      if (!current) {
-        current = piece;
-      } else if (current.length + piece.length + 2 <= max) {
-        current = `${current}\n\n${piece}`;
-      } else {
-        chunks.push(current);
-        current = piece;
-      }
-    }
+  for (const paragraph of text.split(/\n{2,}/)) {
+    chunks.push(...splitOversized(paragraph.trim(), max));
   }
-  if (current) chunks.push(current);
   return chunks;
 }
 

@@ -99,10 +99,14 @@ export function buildSendUpdateTool(send: (text: string) => Promise<void>): Tool
   return {
     send_update: tool({
       description:
-        "Text the owner one short progress line while you keep working. Only for tasks that take many steps; your usual voice rules apply. This never replaces your reply — finish the turn with a normal reply that doesn't repeat the updates.",
+        'Text the owner one short line while you keep working ("on it", "give me a sec, checking your calendar"). Send one before diving into any task that takes more than a moment; your usual voice rules apply. This never replaces your reply — finish the turn with a normal reply that doesn\'t repeat the updates.',
       inputSchema: z.object({ text: z.string().min(1) }),
       execute: async ({ text }) => {
-        const update = text.replaceAll("[SILENT]", "").replaceAll("[NEW_THREAD]", "").trim();
+        const update = text
+          .replaceAll("[SILENT]", "")
+          .replaceAll("[NEW_THREAD]", "")
+          .replace(/\[REACT:[^\]]{0,16}\]/g, "")
+          .trim();
         if (!update) return "skipped: empty update";
         if (update === lastSent) return "skipped: that update was already sent";
         if (sent >= UPDATE_CAP) {
@@ -153,9 +157,13 @@ function webTools(web: FirecrawlClient): ToolSet {
         query: z.string().min(1),
         limit: z.number().int().min(1).max(10).optional(),
       }),
-      execute: async ({ query, limit }) => {
+      execute: async ({ query, limit }, options) => {
         try {
-          const hits = await web.search(query, limit ?? SEARCH_LIMIT_DEFAULT);
+          const hits = await web.search(
+            query,
+            limit ?? SEARCH_LIMIT_DEFAULT,
+            options?.abortSignal,
+          );
           if (hits.length === 0) return `No results for "${query}".`;
           return hits
             .map(
@@ -164,6 +172,7 @@ function webTools(web: FirecrawlClient): ToolSet {
             )
             .join("\n");
         } catch (error) {
+          options?.abortSignal?.throwIfAborted();
           return `Error: ${error instanceof Error ? error.message : String(error)}`;
         }
       },
@@ -176,10 +185,18 @@ function webTools(web: FirecrawlClient): ToolSet {
         urls: z.array(z.string()).min(1).max(EXTRACT_URL_MAX),
         char_limit: z.number().int().min(2_000).max(50_000).optional(),
       }),
-      execute: async ({ urls, char_limit }) => {
+      execute: async ({ urls, char_limit }, options) => {
         const sections: string[] = [];
         for (const url of urls) {
-          sections.push(await extractOne(web, url, char_limit ?? EXTRACT_CHAR_DEFAULT));
+          options?.abortSignal?.throwIfAborted();
+          sections.push(
+            await extractOne(
+              web,
+              url,
+              char_limit ?? EXTRACT_CHAR_DEFAULT,
+              options?.abortSignal,
+            ),
+          );
         }
         return sections.join("\n\n---\n\n");
       },
@@ -187,18 +204,24 @@ function webTools(web: FirecrawlClient): ToolSet {
   };
 }
 
-async function extractOne(web: FirecrawlClient, url: string, budget: number): Promise<string> {
+async function extractOne(
+  web: FirecrawlClient,
+  url: string,
+  budget: number,
+  abortSignal?: AbortSignal,
+): Promise<string> {
   const secret = findUrlSecret(url);
   if (secret) {
     return `## ${url}\nError: blocked — this URL contains ${secret}. Secrets must not be sent to the web extractor.`;
   }
   try {
-    const page = await web.scrape(url);
+    const page = await web.scrape(url, abortSignal);
     const clean = stripBase64Images(page.markdown).trim();
     if (!clean) return `## ${url}\nNo readable content at this URL.`;
     const heading = page.title ? `## ${page.title} — ${url}` : `## ${url}`;
     return `${heading}\n\n${truncateHeadTail(clean, budget)}`;
   } catch (error) {
+    abortSignal?.throwIfAborted();
     return `## ${url}\nError: ${error instanceof Error ? error.message : String(error)}`;
   }
 }

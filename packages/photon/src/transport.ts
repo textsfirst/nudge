@@ -17,8 +17,9 @@ export interface PhotonTransportConfig {
   /** Persist the freshest space id per handle for proactive sends. */
   rememberSpace: (handle: string, spaceId: string, platform: string) => void;
   /**
-   * Handle one debounced inbound batch. `send` chunks and delivers text to
-   * the batch's space; a typing indicator shows from the first buffered text
+   * Handle one debounced inbound batch. `send` delivers text to the batch's
+   * space, one paced bubble per paragraph (see splitMessage); a typing
+   * indicator shows from the first buffered text
    * until the reply lands, so the debounce never reads as silence. The
    * signal aborts when a newer text arrives mid-run (steering) — abandon the
    * reply instead of sending it.
@@ -27,10 +28,27 @@ export interface PhotonTransportConfig {
     batch: InboundBatch,
     send: (text: string) => Promise<void>,
     signal: AbortSignal,
+    controls: BatchControls,
   ) => Promise<void>;
   debounceMs?: number;
+  /** Pause between the bubbles of a multi-bubble send (default 500ms; 0 disables). */
+  chunkDelayMs?: number;
   logLevel?: "debug" | "info" | "warn" | "error";
   logger: InboundLogger;
+}
+
+const DEFAULT_CHUNK_DELAY_MS = 500;
+
+/** Levers on the batch's space beyond plain text sends. */
+export interface BatchControls {
+  /**
+   * Clear the typing indicator early — call it the moment the turn is known
+   * to send nothing, so a deliberately silent reply doesn't read as typing
+   * that trailed off. Fire-and-forget; failures are logged at debug.
+   */
+  stopTyping: () => void;
+  /** Tapback the newest text of the batch with `emoji`. Rejects on failure. */
+  react: (emoji: string) => Promise<void>;
 }
 
 export interface RawWebhookRequest {
@@ -55,6 +73,11 @@ export interface PhotonTransport {
 interface SendableSpace {
   send(text: string): Promise<unknown>;
   startTyping(): Promise<unknown>;
+  stopTyping(): Promise<unknown>;
+}
+
+interface ReactableMessage {
+  react(emoji: string): Promise<unknown>;
 }
 
 export async function createPhotonTransport(
@@ -73,13 +96,24 @@ export async function createPhotonTransport(
     options: { logLevel: config.logLevel ?? "info" },
   });
 
+  // Bubbles are paced, not fired back-to-back, so a multi-bubble reply lands
+  // like someone texting. The reply path holds its typing indicator through
+  // the pauses, so the gaps read as typing, not silence.
+  const chunkDelayMs = config.chunkDelayMs ?? DEFAULT_CHUNK_DELAY_MS;
   const sendAll = async (space: SendableSpace, text: string): Promise<void> => {
+    let first = true;
     for (const chunk of splitMessage(text)) {
+      if (!first && chunkDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+      }
+      first = false;
       await space.send(chunk);
     }
   };
 
-  const processor = new InboundProcessor<{ space: SendableSpace }>({
+  // The context tracks the batch's newest message so reactions land on the
+  // text the owner sent last, not an id lookup after the fact.
+  const processor = new InboundProcessor<{ space: SendableSpace; message: ReactableMessage }>({
     ownerHandle: config.ownerHandle,
     logger: config.logger,
     isDuplicate: config.isDuplicate,
@@ -93,9 +127,22 @@ export async function createPhotonTransport(
         });
       });
     },
+    // `responding` re-sends its own typing("stop") when the handler settles;
+    // an early stop inside it just clears the indicator sooner.
     onBatch: (batch, context, signal) =>
       spectrum.responding(context.space as never, () =>
-        config.onBatch(batch, (text) => sendAll(context.space, text), signal),
+        config.onBatch(batch, (text) => sendAll(context.space, text), signal, {
+          stopTyping: () => {
+            void context.space.stopTyping().catch((error: unknown) => {
+              config.logger.debug("Failed to clear the typing indicator", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+          },
+          react: async (emoji) => {
+            await context.message.react(emoji);
+          },
+        }),
       ),
   });
 
@@ -127,7 +174,7 @@ export async function createPhotonTransport(
             spaceId: space.id,
             platform: message.platform,
           },
-          { space },
+          { space, message },
         );
       });
     },

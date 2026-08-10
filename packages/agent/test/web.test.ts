@@ -12,7 +12,10 @@ import {
 } from "../src/web.js";
 
 type RecordedCall = { url: string; init: RequestInit };
-type Execute = (input: unknown) => Promise<string>;
+type Execute = (
+  input: unknown,
+  options?: { abortSignal?: AbortSignal },
+) => Promise<string>;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -143,6 +146,32 @@ describe("web_search", () => {
     const search = toolset(client(hanging, 20)).web_search!.execute as Execute;
     expect(await search({ query: "q" })).toContain("timed out");
   });
+
+  it("propagates a turn abort instead of converting it to an error result", async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const hanging = ((_url: unknown, init?: RequestInit) => {
+      markStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as typeof globalThis.fetch;
+    const search = toolset(client(hanging)).web_search!.execute as Execute;
+    const controller = new AbortController();
+
+    const pending = search({ query: "q" }, { abortSignal: controller.signal });
+    await started;
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
 
 describe("web_extract", () => {
@@ -232,6 +261,35 @@ describe("web_extract", () => {
     const { fetch } = recordingFetch([jsonResponse({ success: true, nope: 1 })]);
     const extract = toolset(client(fetch)).web_extract!.execute as Execute;
     expect(await extract({ urls: ["https://a.dev"] })).toContain("Unexpected response shape");
+  });
+
+  it("propagates a turn abort instead of isolating it as a page failure", async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const hanging = ((_url: unknown, init?: RequestInit) => {
+      markStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    }) as typeof globalThis.fetch;
+    const extract = toolset(client(hanging)).web_extract!.execute as Execute;
+    const controller = new AbortController();
+
+    const pending = extract(
+      { urls: ["https://a.dev"] },
+      { abortSignal: controller.signal },
+    );
+    await started;
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 

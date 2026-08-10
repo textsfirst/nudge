@@ -87,6 +87,8 @@ export class ScriptedSource implements ModelSource {
   readonly id: string;
   /** Off-registry on purpose, so tests get the conservative default window. */
   readonly modelId = "scripted-test-model";
+  /** The model override passed to each languageModel() call (undefined = the source's own). */
+  readonly modelRequests: (string | undefined)[] = [];
   readonly mock: MockLanguageModelV3;
   #script: ScriptEntry[];
 
@@ -116,7 +118,8 @@ export class ScriptedSource implements ModelSource {
     return this.mock.doStreamCalls;
   }
 
-  languageModel() {
+  languageModel(modelOverride?: string) {
+    this.modelRequests.push(modelOverride);
     return Promise.resolve(this.mock);
   }
 

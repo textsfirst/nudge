@@ -496,6 +496,48 @@ function MetricHeading({ children }: { children: React.ReactNode }) {
   );
 }
 
+function StepTimingList({ timings }: { timings: NonNullable<MessageMetrics["stepTimings"]> }) {
+  return (
+    <div className="col-span-2 flex flex-col gap-1.5">
+      {timings.map((timing) => (
+        <div key={timing.step} className="rounded-md border border-border bg-muted/30 p-2">
+          <div className="flex min-w-0 items-center gap-1.5 font-mono text-[10px]">
+            <span className="font-medium text-foreground">step {timing.step}</span>
+            <span className="text-muted-foreground">{timing.finishReason}</span>
+            {timing.toolCalls && timing.toolCalls.length > 0 && (
+              <span
+                className="ml-auto truncate text-muted-foreground"
+                title={timing.toolCalls.join(", ")}
+              >
+                {timing.toolCalls.join(", ")}
+              </span>
+            )}
+          </div>
+          <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-[10px] sm:grid-cols-3">
+            <span title="Time to this step's first output">
+              TTFT {timing.ttftMs !== undefined ? formatMs(timing.ttftMs) : "–"}
+            </span>
+            <span title="Time waiting for this model response">
+              model {formatMs(timing.modelMs)}
+            </span>
+            <span title="Whole step including client-side tools">
+              total {formatMs(timing.durationMs)}
+            </span>
+            {timing.toolMs !== undefined && <span>tools {formatMs(timing.toolMs)}</span>}
+            {timing.outputTps !== undefined && <span>{formatTps(timing.outputTps)}</span>}
+            {(timing.inputTokens !== undefined || timing.outputTokens !== undefined) && (
+              <span title="Input and output tokens for this model call">
+                {timing.inputTokens !== undefined ? formatTokens(timing.inputTokens) : "–"} →{" "}
+                {timing.outputTokens !== undefined ? formatTokens(timing.outputTokens) : "–"}
+              </span>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * The on-demand home for everything that used to bloat the meta row: a small
  * chart icon (visible on hover) opens the turn's full metrics.
@@ -520,7 +562,7 @@ function MetricsPopover({
           <ChartNoAxesColumn className="size-3.5" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-64 text-[11px]">
+      <PopoverContent className="max-h-[calc(100vh-2rem)] w-96 max-w-[calc(100vw-2rem)] overflow-y-auto text-[11px]">
         {m && (
           <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-4 gap-y-1">
             <MetricHeading>Model</MetricHeading>
@@ -529,7 +571,7 @@ function MetricsPopover({
             <MetricRow label="finish" value={m.finishReason} />
             <MetricHeading>Latency</MetricHeading>
             <MetricRow
-              label="TTFT"
+              label="first TTFT"
               title="Time to the first output chunk of the turn's first step"
               value={m.ttftMs !== undefined ? formatMs(m.ttftMs) : undefined}
             />
@@ -539,8 +581,13 @@ function MetricsPopover({
               value={m.outputTps !== undefined ? formatTps(m.outputTps) : undefined}
             />
             <MetricRow
-              label="model time"
+              label="total time"
               value={m.durationMs !== undefined ? formatMs(m.durationMs) : undefined}
+            />
+            <MetricRow
+              label="model time"
+              title="Time waiting for model responses across all steps"
+              value={m.modelMs !== undefined ? formatMs(m.modelMs) : undefined}
             />
             <MetricRow
               label="tool time"
@@ -548,6 +595,12 @@ function MetricsPopover({
             />
             <MetricRow label="steps" value={m.steps} />
             <MetricRow label="retries" value={m.retries} />
+            {m.stepTimings && m.stepTimings.length > 0 && (
+              <>
+                <MetricHeading>Model steps</MetricHeading>
+                <StepTimingList timings={m.stepTimings} />
+              </>
+            )}
             <MetricHeading>Tokens</MetricHeading>
             <MetricRow
               label="in (context)"
@@ -636,10 +689,19 @@ function ThreadStats({ messages }: { messages: ThreadMessage[] }) {
     cacheRead !== undefined && inputTotal !== undefined && inputTotal > 0
       ? cacheRead / inputTotal
       : undefined;
-  const ttfts = turns
-    .map((turn) => turn.metrics.ttftMs)
-    .filter((value): value is number => value !== undefined);
-  const modelTime = sumDefined(turns.map((turn) => turn.metrics.durationMs));
+  const ttfts = turns.flatMap((turn) => {
+    const perStep = turn.metrics.stepTimings
+      ?.map((step) => step.ttftMs)
+      .filter((value): value is number => value !== undefined);
+    // Pre-upgrade rows only have the first-step aggregate.
+    return perStep && perStep.length > 0
+      ? perStep
+      : turn.metrics.ttftMs !== undefined
+        ? [turn.metrics.ttftMs]
+        : [];
+  });
+  const totalTime = sumDefined(turns.map((turn) => turn.metrics.durationMs));
+  const modelTime = sumDefined(turns.map((turn) => turn.metrics.modelMs));
   const toolTime = sumDefined(turns.map((turn) => turn.metrics.toolMs));
   const retries = sumDefined(turns.map((turn) => turn.metrics.retries));
 
@@ -667,7 +729,7 @@ function ThreadStats({ messages }: { messages: ThreadMessage[] }) {
       outputTotal !== undefined &&
       `${formatTokens(inputTotal)} in · ${formatTokens(outputTotal)} out`,
     hitRate !== undefined && `${formatPercent(hitRate)} cached`,
-    ttfts.length > 0 && `${formatMs(quantile(ttfts, 0.5))} TTFT`,
+    ttfts.length > 0 && `${formatMs(quantile(ttfts, 0.5))} step TTFT`,
     outputTps !== undefined && formatTps(outputTps),
   ].filter((part): part is string => Boolean(part));
 
@@ -707,7 +769,7 @@ function ThreadStats({ messages }: { messages: ThreadMessage[] }) {
           value={hitRate !== undefined ? formatPercent(hitRate) : undefined}
         />
         <MetricRow
-          label="TTFT p50 / p90"
+          label="step TTFT p50 / p90"
           value={
             ttfts.length > 0
               ? `${formatMs(quantile(ttfts, 0.5))} / ${formatMs(quantile(ttfts, 0.9))}`
@@ -719,10 +781,12 @@ function ThreadStats({ messages }: { messages: ThreadMessage[] }) {
           value={outputTps !== undefined ? formatTps(outputTps) : undefined}
         />
         <MetricRow
-          label="model / tool time"
+          label="turn / model / tool time"
           value={
-            modelTime !== undefined
-              ? `${formatMs(modelTime)}${toolTime !== undefined ? ` / ${formatMs(toolTime)}` : ""}`
+            totalTime !== undefined || modelTime !== undefined || toolTime !== undefined
+              ? `${totalTime !== undefined ? formatMs(totalTime) : "–"} / ${
+                  modelTime !== undefined ? formatMs(modelTime) : "–"
+                } / ${toolTime !== undefined ? formatMs(toolTime) : "–"}`
               : undefined
           }
         />

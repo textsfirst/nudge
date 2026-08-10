@@ -209,7 +209,22 @@ describe("console API", () => {
       content: "hi!",
       inputTokens: 1_234,
       outputTokens: 56,
-      metrics: '{"ttftMs":420,"modelId":"gpt-5-mini","cacheReadTokens":1000}',
+      metrics: JSON.stringify({
+        ttftMs: 420,
+        modelMs: 900,
+        modelId: "gpt-5-mini",
+        cacheReadTokens: 1000,
+        stepTimings: [
+          {
+            step: 1,
+            modelId: "gpt-5-mini",
+            finishReason: "stop",
+            durationMs: 950,
+            modelMs: 900,
+            ttftMs: 420,
+          },
+        ],
+      }),
     });
     store.appendMessage({
       sessionId: session.id,
@@ -239,8 +254,19 @@ describe("console API", () => {
     expect(detail.body.messages[1]).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
     expect(detail.body.messages[1].metrics).toEqual({
       ttftMs: 420,
+      modelMs: 900,
       modelId: "gpt-5-mini",
       cacheReadTokens: 1000,
+      stepTimings: [
+        {
+          step: 1,
+          modelId: "gpt-5-mini",
+          finishReason: "stop",
+          durationMs: 950,
+          modelMs: 900,
+          ttftMs: 420,
+        },
+      ],
     });
     // Malformed metrics JSON degrades to null instead of breaking the page.
     expect(detail.body.messages[2].metrics).toBeNull();

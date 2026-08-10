@@ -292,6 +292,7 @@ describe("send_update", () => {
     const update = makeTool(async (text) => void sent.push(text));
     await expect(update("on it [NEW_THREAD]")).resolves.toBe("sent");
     await expect(update("[SILENT]")).resolves.toBe("skipped: empty update");
+    await expect(update("[REACT:👍]")).resolves.toBe("skipped: empty update");
     expect(sent).toEqual(["on it"]);
   });
 

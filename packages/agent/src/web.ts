@@ -64,8 +64,8 @@ export class FirecrawlClient {
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
-  async search(query: string, limit: number): Promise<WebSearchHit[]> {
-    const payload = await this.#post("/v2/search", { query, limit });
+  async search(query: string, limit: number, abortSignal?: AbortSignal): Promise<WebSearchHit[]> {
+    const payload = await this.#post("/v2/search", { query, limit }, abortSignal);
     const parsed = searchResponseSchema.safeParse(payload);
     if (!parsed.success) {
       throw new Error("Unexpected response shape from Firecrawl search.");
@@ -77,12 +77,16 @@ export class FirecrawlClient {
     }));
   }
 
-  async scrape(url: string): Promise<WebPage> {
-    const payload = await this.#post("/v2/scrape", {
-      url,
-      formats: ["markdown"],
-      timeout: SCRAPE_BODY_TIMEOUT_MS,
-    });
+  async scrape(url: string, abortSignal?: AbortSignal): Promise<WebPage> {
+    const payload = await this.#post(
+      "/v2/scrape",
+      {
+        url,
+        formats: ["markdown"],
+        timeout: SCRAPE_BODY_TIMEOUT_MS,
+      },
+      abortSignal,
+    );
     const parsed = scrapeResponseSchema.safeParse(payload);
     if (!parsed.success) {
       throw new Error("Unexpected response shape from Firecrawl scrape.");
@@ -94,7 +98,12 @@ export class FirecrawlClient {
     };
   }
 
-  async #post(path: string, body: unknown): Promise<unknown> {
+  async #post(path: string, body: unknown, abortSignal?: AbortSignal): Promise<unknown> {
+    abortSignal?.throwIfAborted();
+    const timeoutSignal = AbortSignal.timeout(this.#timeoutMs);
+    const requestSignal = abortSignal
+      ? AbortSignal.any([abortSignal, timeoutSignal])
+      : timeoutSignal;
     let response: Response;
     try {
       response = await this.#fetch(`${this.#apiUrl}${path}`, {
@@ -104,10 +113,20 @@ export class FirecrawlClient {
           ...(this.#apiKey ? { Authorization: `Bearer ${this.#apiKey}` } : {}),
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.#timeoutMs),
+        signal: requestSignal,
       });
     } catch (error) {
-      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      // A steered turn must stay an abort all the way to streamText; turning it
+      // into a tool-result string would keep the abandoned loop alive.
+      if (abortSignal?.aborted) {
+        throw abortSignal.reason instanceof Error
+          ? abortSignal.reason
+          : new DOMException("The turn was aborted during a web request", "AbortError");
+      }
+      if (
+        timeoutSignal.aborted ||
+        (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+      ) {
         throw new Error(`Firecrawl request timed out after ${Math.round(this.#timeoutMs / 1000)}s.`);
       }
       throw new Error(

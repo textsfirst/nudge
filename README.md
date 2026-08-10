@@ -49,7 +49,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 ### Reliability
 
-- Photon webhooks are deduplicated durably and delivered at-least-once; bursts of texts are debounced (~2.5 s) into one considered reply, with a typing indicator showing from the first text so the wait never reads as silence.
+- Photon webhooks are deduplicated durably and delivered at-least-once; near-simultaneous texts are coalesced (~250 ms), while later texts steer the active reply. A typing indicator shows from the first text.
 - A text arriving while a reply is still being generated steers it: the in-flight model call aborts, everything sent while busy folds into one follow-up turn (full history included), and no stale reply goes out. If the aborted turn had already run tools, a note recording those calls lands in history so the next turn doesn't redo them.
 - Every outbound message is journaled in a ledger before sending. On restart, sends that never started go out as-is; ones interrupted mid-send are retried with a visible "♻️ Recovered reply" marker, bounded to 3 attempts within 24 hours.
 - Scheduled entries claim crash-safely and never back-fill occurrences from before they existed; a one-shot that came due while the server was down fires late, once.
@@ -167,11 +167,14 @@ Settings (console → Settings):
 | `google.default_account` | sole account | Account label `gws` uses when the agent omits `-a` |
 | `google.gws_path` | PATH lookup | Explicit path to the `gws` binary |
 | `threads.idle_hours` | `6` | Idle gap before a thread rolls over |
-| `threads.debounce_ms` | `2500` | Burst window before replying |
+| `threads.debounce_ms` | `250` | Near-simultaneous delivery coalescing window before replying; `0` starts immediately |
 | `agent.max_tool_steps` | `256` | Runaway-loop backstop per turn (the agent winds down gracefully near it) |
 | `agent.context_window_tokens` | `0` (auto) | Context window for compaction budgeting; `0` auto-detects from the model id |
 | `agent.compact_at_percent` | `80` | Older turns fold into the thread summary at this share of the usable window |
 | `agent.keep_recent_tokens` | `20000` | Recent conversation kept verbatim when older turns are compacted |
+| `agent.compaction_model` | `gpt-5.6-luna` | Model that writes compaction/carryover summaries (same provider and auth as replies) |
+| `agent.compaction_reasoning_effort` | `high` | Reasoning level for summary calls |
+| `agent.compaction_fast_mode` | `true` | Run summary calls on the priority service tier |
 
 `.env`:
 
@@ -195,6 +198,17 @@ pnpm start
 ```
 
 Use a single server process: the scheduler's claims, webhook dedupe, and debouncing assume one process over one SQLite file.
+
+## Updating
+
+```bash
+git pull
+pnpm install
+pnpm check
+pnpm start   # or restart your process manager / pnpm dev
+```
+
+No manual steps beyond the restart: database migrations run automatically as ordered transactions on boot, and settings added by the update appear on the console's Settings page with their defaults (only values you have changed are stored). Interrupted outbound sends recover on startup via the ledger, and a one-shot schedule entry that came due during the downtime fires late, once. Your `.env` and everything in `data_dir` (SYSTEM.md, SCHEDULE.md, memory, skills, the database) are untouched by updates.
 
 ## Security boundaries
 

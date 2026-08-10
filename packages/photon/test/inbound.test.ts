@@ -79,7 +79,7 @@ describe("InboundProcessor", () => {
     expect(batches[0]?.batch.messageIds).toEqual(["fresh"]);
   });
 
-  it("steers an in-flight reply when a newer message arrives", async () => {
+  it("starts immediately at zero debounce and steers when a newer message arrives", async () => {
     const steerLogger = { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const seen: { texts: string[]; signal: AbortSignal }[] = [];
     const onBatch = vi.fn(async (batch: InboundBatch, _context: unknown, signal: AbortSignal) => {
@@ -98,7 +98,7 @@ describe("InboundProcessor", () => {
       logger: steerLogger,
       isDuplicate: () => false,
       onBatch,
-      debounceMs: 5,
+      debounceMs: 0,
     });
 
     processor.process(message("1", "book friday"), null);
@@ -117,7 +117,7 @@ describe("InboundProcessor", () => {
     });
   });
 
-  it("folds every text sent while a reply is running into one follow-up batch", async () => {
+  it("holds follow-up texts together when the steered run ignores cancellation", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -133,7 +133,7 @@ describe("InboundProcessor", () => {
       logger,
       isDuplicate: () => false,
       onBatch,
-      debounceMs: 5,
+      debounceMs: 0,
     });
 
     processor.process(message("1", "first"), null);
@@ -209,17 +209,27 @@ describe("InboundProcessor", () => {
 });
 
 describe("splitMessage", () => {
-  it("returns short messages untouched", () => {
+  it("returns a short single paragraph untouched", () => {
     expect(splitMessage("hello")).toEqual(["hello"]);
     expect(splitMessage("   ")).toEqual([]);
   });
 
-  it("splits on paragraph boundaries under the limit", () => {
-    const paragraphs = Array.from({ length: 6 }, (_, index) => `Paragraph ${index} ${"x".repeat(300)}`);
-    const chunks = splitMessage(paragraphs.join("\n\n"), 1_000);
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(chunks.every((chunk) => chunk.length <= 1_000)).toBe(true);
-    expect(chunks.join("\n\n")).toContain("Paragraph 5");
+  it("sends every paragraph as its own message, even short ones", () => {
+    expect(splitMessage("on it\n\nMU771 lands 6:30pm\n\nno rain gear needed")).toEqual([
+      "on it",
+      "MU771 lands 6:30pm",
+      "no rain gear needed",
+    ]);
+  });
+
+  it("keeps single line breaks inside one message", () => {
+    expect(splitMessage("AMS: 24C, clear\nDelft: 21C, clear")).toEqual([
+      "AMS: 24C, clear\nDelft: 21C, clear",
+    ]);
+  });
+
+  it("drops blank paragraphs from stray whitespace", () => {
+    expect(splitMessage("first\n\n   \n\nsecond")).toEqual(["first", "second"]);
   });
 
   it("splits a single oversized paragraph on word boundaries", () => {

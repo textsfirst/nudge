@@ -19,7 +19,7 @@ export class ChatGptSubscriptionSource implements ModelSource {
     this.modelId = options.model;
   }
 
-  async languageModel(): Promise<LanguageModel> {
+  async languageModel(modelOverride?: string): Promise<LanguageModel> {
     const credentials = await this.options.auth.credentials();
     const openai = createOpenAI({
       apiKey: credentials.accessToken,
@@ -30,7 +30,7 @@ export class ChatGptSubscriptionSource implements ModelSource {
       },
       ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
     });
-    return openai.responses(this.options.model);
+    return openai.responses(modelOverride ?? this.options.model);
   }
 
   isAuthError(error: unknown): boolean {
@@ -64,25 +64,26 @@ export interface CustomEndpointSourceOptions {
 export class CustomEndpointSource implements ModelSource {
   readonly id = "custom";
   readonly modelId: string;
-  readonly #model: LanguageModel;
+  readonly #api: "chat-completions" | "responses";
+  readonly #provider: ReturnType<typeof createOpenAI>;
 
   constructor(options: CustomEndpointSourceOptions) {
     this.modelId = options.model;
-    const provider = createOpenAI({
+    this.#api = options.api;
+    this.#provider = createOpenAI({
       baseURL: options.baseUrl,
       // Keyless local servers ignore the header, but the SDK insists on a
       // value — send a placeholder when no key is configured.
       apiKey: options.apiKey ?? "none",
       ...(options.fetch ? { fetch: options.fetch } : {}),
     });
-    this.#model =
-      options.api === "responses"
-        ? provider.responses(options.model)
-        : provider.chat(options.model);
   }
 
-  languageModel(): Promise<LanguageModel> {
-    return Promise.resolve(this.#model);
+  languageModel(modelOverride?: string): Promise<LanguageModel> {
+    const model = modelOverride ?? this.modelId;
+    return Promise.resolve(
+      this.#api === "responses" ? this.#provider.responses(model) : this.#provider.chat(model),
+    );
   }
 
   isAuthError(): boolean {
@@ -93,15 +94,15 @@ export class CustomEndpointSource implements ModelSource {
 export class OpenAiApiSource implements ModelSource {
   readonly id = "openai-api";
   readonly modelId: string;
-  readonly #model: LanguageModel;
+  readonly #provider: ReturnType<typeof createOpenAI>;
 
   constructor(options: OpenAiApiSourceOptions) {
     this.modelId = options.model;
-    this.#model = createOpenAI({ apiKey: options.apiKey }).responses(options.model);
+    this.#provider = createOpenAI({ apiKey: options.apiKey });
   }
 
-  languageModel(): Promise<LanguageModel> {
-    return Promise.resolve(this.#model);
+  languageModel(modelOverride?: string): Promise<LanguageModel> {
+    return Promise.resolve(this.#provider.responses(modelOverride ?? this.modelId));
   }
 
   isAuthError(): boolean {

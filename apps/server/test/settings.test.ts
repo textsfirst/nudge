@@ -14,8 +14,11 @@ describe("settingsFromOverrides", () => {
     expect(settings.provider.chatgpt.auth_file).toBe(".data/chatgpt-auth.json");
     expect(settings.provider.openai.fallback_enabled).toBe(false);
     expect(settings.tools.bash_enabled).toBe(true);
-    expect(settings.threads.debounce_ms).toBe(2_500);
+    expect(settings.threads.debounce_ms).toBe(250);
     expect(settings.agent.max_tool_steps).toBe(256);
+    expect(settings.agent.compaction_model).toBe("gpt-5.6-luna");
+    expect(settings.agent.compaction_reasoning_effort).toBe("high");
+    expect(settings.agent.compaction_fast_mode).toBe(true);
     expect(settings.timezone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
   });
 

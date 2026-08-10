@@ -77,6 +77,69 @@ describe("NudgeAgent.reply", () => {
     expect(messages.at(-1)?.content).toBe("[SILENT]");
   });
 
+  it("fires onSilent as soon as silence is known, before the turn is persisted", async () => {
+    const { agent, store } = makeAgent(["[SILENT]"]);
+    let rowsWhenFired = -1;
+    await expect(
+      agent.reply(HANDLE, "thanks", {
+        onSilent: () => {
+          rowsWhenFired = store.sessionMessages(store.activeSession(HANDLE)!.id).length;
+        },
+      }),
+    ).resolves.toBeNull();
+    // Only the owner's message was in the store — the assistant row lands after.
+    expect(rowsWhenFired).toBe(1);
+  });
+
+  it("does not fire onSilent when the model actually replies", async () => {
+    const { agent } = makeAgent(["sure thing"]);
+    let fired = false;
+    await expect(
+      agent.reply(HANDLE, "hi", { onSilent: () => (fired = true) }),
+    ).resolves.toBe("sure thing");
+    expect(fired).toBe(false);
+  });
+
+  it("fires onReaction for a lone [REACT] token and treats the turn as silent", async () => {
+    const { agent, store } = makeAgent(["[REACT:❤️]"]);
+    const reactions: string[] = [];
+    let silent = false;
+    await expect(
+      agent.reply(HANDLE, "thanks!", {
+        onReaction: (emoji) => reactions.push(emoji),
+        onSilent: () => (silent = true),
+      }),
+    ).resolves.toBeNull();
+    expect(reactions).toEqual(["❤️"]);
+    expect(silent).toBe(true);
+    // The raw token is persisted so the thread remembers the reaction.
+    const session = store.activeSession(HANDLE);
+    expect(store.sessionMessages(session!.id).at(-1)?.content).toBe("[REACT:❤️]");
+  });
+
+  it("reacts and replies when text follows the [REACT] token", async () => {
+    const { agent } = makeAgent(["[REACT:👍] on it"]);
+    const reactions: string[] = [];
+    let silent = false;
+    await expect(
+      agent.reply(HANDLE, "can you book it?", {
+        onReaction: (emoji) => reactions.push(emoji),
+        onSilent: () => (silent = true),
+      }),
+    ).resolves.toBe("on it");
+    expect(reactions).toEqual(["👍"]);
+    expect(silent).toBe(false);
+  });
+
+  it("drops a reaction outside the tapback set without leaking the token", async () => {
+    const { agent } = makeAgent(["[REACT:🙏] anytime"]);
+    const reactions: string[] = [];
+    await expect(
+      agent.reply(HANDLE, "ty", { onReaction: (emoji) => reactions.push(emoji) }),
+    ).resolves.toBe("anytime");
+    expect(reactions).toEqual([]);
+  });
+
   it("rolls the thread after the idle gap, with a carryover summary", async () => {
     // Script: first reply, then the carryover summary, then the new-thread reply.
     const { agent, store, source, setNow } = makeAgent([
@@ -125,6 +188,31 @@ describe("NudgeAgent.reply", () => {
   const long = (label: string) => `${label} ${"x".repeat(20_000)}`;
   const tightBudget = { contextWindowTokens: 24_000, keepRecentTokens: 6_000 };
 
+  it("fires onReplyReady before post-turn compaction", async () => {
+    const longReply = long("answer");
+    const { agent, store } = makeAgent(["seed reply", longReply, "fold summary"], {
+      compaction: tightBudget,
+    });
+    let summaryAtDelivery: string | null | undefined;
+
+    // Leave one old turn available to fold. The next user message still fits
+    // pre-flight; its large answer is what crosses the threshold post-turn.
+    await agent.reply(HANDLE, "seed question");
+    await expect(
+      agent.reply(HANDLE, long("question"), {
+        onReplyReady: async (reply) => {
+          expect(reply).toBe(longReply);
+          const session = store.activeSession(HANDLE)!;
+          summaryAtDelivery = session.summary;
+          expect(store.sessionMessages(session.id).at(-1)?.content).toBe(longReply);
+        },
+      }),
+    ).resolves.toBe(longReply);
+
+    expect(summaryAtDelivery).toBeNull();
+    expect(store.activeSession(HANDLE)!.summary).toBe("fold summary");
+  });
+
   it("compacts when the estimated context outgrows the window, keeping recent turns verbatim", async () => {
     const script = [
       "r1",
@@ -169,6 +257,31 @@ describe("NudgeAgent.reply", () => {
     const session = store.activeSession(HANDLE)!;
     expect(session.summary).toBeNull();
     expect(session.compactedThrough).toBe(0);
+  });
+
+  it("runs summaries on the dedicated compaction model with its own options", async () => {
+    const script = ["r1", "fold summary", "r2"];
+    const { agent, store, source } = makeAgent(script, {
+      compaction: tightBudget,
+      summarizer: {
+        model: "gpt-5.6-luna",
+        modelOptions: { reasoningEffort: "high", serviceTier: "priority" },
+      },
+    });
+
+    await agent.reply(HANDLE, long("m1"));
+    await agent.reply(HANDLE, long("m2"));
+    expect(store.activeSession(HANDLE)!.summary).toBe("fold summary");
+
+    // Reply calls run the source's own model; only the fold asks for the override.
+    expect(source.modelRequests).toEqual([undefined, "gpt-5.6-luna", undefined]);
+    const summarize = source.calls[1]!;
+    expect(summarize.providerOptions?.openai).toMatchObject({
+      reasoningEffort: "high",
+      serviceTier: "priority",
+    });
+    const reply = source.calls[0]!;
+    expect(reply.providerOptions?.openai).not.toMatchObject({ serviceTier: "priority" });
   });
 
   it("recovers from a provider context overflow by folding hard and retrying once", async () => {
@@ -246,7 +359,57 @@ describe("NudgeAgent.reply", () => {
     });
     // Timing comes from the SDK's real clock, so assert shape only.
     expect(metrics.durationMs).toBeTypeOf("number");
+    expect(metrics.modelMs).toBeTypeOf("number");
+    expect(metrics.stepTimings).toEqual([
+      expect.objectContaining({
+        step: 1,
+        modelId: "mock-model-id",
+        finishReason: "stop",
+        durationMs: expect.any(Number),
+        modelMs: expect.any(Number),
+        ttftMs: expect.any(Number),
+        inputTokens: 1_234,
+        outputTokens: 56,
+        reasoningTokens: 8,
+      }),
+    ]);
     expect(metrics.retries).toBeUndefined();
+  });
+
+  it("records timing for every model step in a tool loop", async () => {
+    const { agent, store } = makeAgent([
+      toolCallChunks("list_files", {}),
+      textChunks("done", { inputTokens: 20, outputTokens: 4 }),
+    ]);
+
+    await agent.reply(HANDLE, "what files are there?");
+    const assistant = store
+      .sessionMessages(store.activeSession(HANDLE)!.id)
+      .find((message) => message.role === "assistant");
+    const metrics = JSON.parse(assistant!.metrics!) as {
+      steps: number;
+      stepTimings: Array<Record<string, unknown>>;
+    };
+
+    expect(metrics.steps).toBe(2);
+    expect(metrics.stepTimings).toHaveLength(2);
+    expect(metrics.stepTimings[0]).toMatchObject({
+      step: 1,
+      finishReason: "tool-calls",
+      toolCalls: ["list_files"],
+      durationMs: expect.any(Number),
+      modelMs: expect.any(Number),
+      ttftMs: expect.any(Number),
+    });
+    expect(metrics.stepTimings[1]).toMatchObject({
+      step: 2,
+      finishReason: "stop",
+      inputTokens: 20,
+      outputTokens: 4,
+      durationMs: expect.any(Number),
+      modelMs: expect.any(Number),
+      ttftMs: expect.any(Number),
+    });
   });
 
   it("executes file tools and records the tool payload", async () => {
@@ -456,6 +619,13 @@ describe("NudgeAgent.runTask", () => {
     const { agent, store } = makeAgent(["[SILENT]"]);
     await expect(agent.runTask(HANDLE, "Check-in", "Anything to say?")).resolves.toBeNull();
     expect(store.activeSession(HANDLE)).toBeUndefined();
+  });
+
+  it("strips reaction tokens — a scheduled turn has nothing to react to", async () => {
+    const { agent } = makeAgent(["[REACT:👍] reminder: gym at 6"]);
+    await expect(agent.runTask(HANDLE, "Reminder", "Nudge the gym.")).resolves.toBe(
+      "reminder: gym at 6",
+    );
   });
 });
 
