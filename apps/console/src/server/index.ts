@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { node } from "@elysiajs/node";
+import { CONFIG_FILE, ensureSettingsFile } from "@nudge/server/config";
 import { Elysia } from "elysia";
 import { createConsoleApp } from "./app.js";
 
@@ -45,6 +46,36 @@ function serveStatic(pathname: string): Response {
       "Cache-Control": pathname.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache",
     },
   });
+}
+
+// Seed or update the settings file so the Config tab always opens with the
+// current template instead of an empty editor.
+try {
+  const ensured = ensureSettingsFile();
+  if (ensured.created) {
+    console.log(
+      JSON.stringify({
+        level: "info",
+        message: `Created ${CONFIG_FILE} with defaults — set owner_handle in the Config tab.`,
+      }),
+    );
+  } else if (ensured.added.length > 0) {
+    console.log(
+      JSON.stringify({
+        level: "info",
+        message: `Added new settings to ${CONFIG_FILE}`,
+        added: ensured.added,
+      }),
+    );
+  }
+} catch (error) {
+  console.log(
+    JSON.stringify({
+      level: "warn",
+      message: `Could not seed ${CONFIG_FILE}`,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
 }
 
 new Elysia({ adapter: node() })
