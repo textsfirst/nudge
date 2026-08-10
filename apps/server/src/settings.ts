@@ -19,7 +19,9 @@ export const settingsSchema = z.object({
     .refine(isValidTimeZone, { message: "must be an IANA timezone like America/Los_Angeles" }),
   provider: z
     .object({
-      selected: z.enum(["chatgpt-subscription", "openai-api"]).default("chatgpt-subscription"),
+      selected: z
+        .enum(["chatgpt-subscription", "openai-api", "custom"])
+        .default("chatgpt-subscription"),
       chatgpt: z
         .object({
           model: z.string().min(1).default("gpt-5.4-mini"),
@@ -30,6 +32,13 @@ export const settingsSchema = z.object({
         .object({
           model: z.string().min(1).default("gpt-5-mini"),
           fallback_enabled: z.boolean().default(false),
+        })
+        .prefault({}),
+      custom: z
+        .object({
+          base_url: z.url().optional(),
+          model: z.string().min(1).optional(),
+          api: z.enum(["chat-completions", "responses"]).default("chat-completions"),
         })
         .prefault({}),
     })
@@ -195,8 +204,8 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "provider.selected",
         label: "Provider",
         control: "select",
-        options: ["chatgpt-subscription", "openai-api"],
-        help: "chatgpt-subscription signs in on the Connections page; openai-api needs OPENAI_API_KEY in Secrets.",
+        options: ["chatgpt-subscription", "openai-api", "custom"],
+        help: "chatgpt-subscription signs in on the Connections page; openai-api needs OPENAI_API_KEY in Secrets; custom talks to any OpenAI-compatible endpoint configured below.",
       },
       { path: "provider.chatgpt.model", label: "ChatGPT model", control: "text" },
       {
@@ -211,6 +220,29 @@ export const SETTINGS_FORM: SettingsSection[] = [
         label: "API-credit fallback",
         control: "boolean",
         help: "Answer with the OpenAI API when subscription auth fails. Needs OPENAI_API_KEY in Secrets and can spend API credits.",
+      },
+      {
+        path: "provider.custom.base_url",
+        label: "Custom base URL",
+        control: "text",
+        optional: true,
+        placeholder: "http://localhost:11434/v1",
+        help: "Base URL of an OpenAI-compatible endpoint (OpenRouter, Ollama, vLLM, a proxy). If it needs a key, set CUSTOM_API_KEY in Secrets.",
+      },
+      {
+        path: "provider.custom.model",
+        label: "Custom model",
+        control: "text",
+        optional: true,
+        placeholder: "llama3.3:70b",
+        help: "Model id the endpoint expects. For unrecognized models, set the Agent section's context window explicitly.",
+      },
+      {
+        path: "provider.custom.api",
+        label: "Custom API flavor",
+        control: "select",
+        options: ["chat-completions", "responses"],
+        help: "Which OpenAI API the endpoint implements. Most compatible servers only support chat-completions.",
       },
     ],
   },

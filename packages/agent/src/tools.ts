@@ -84,6 +84,43 @@ export function buildTools(context: ToolContext): ToolSet {
   };
 }
 
+/** Progress texts allowed per turn before further updates are refused. */
+const UPDATE_CAP = 5;
+
+/**
+ * The mid-turn progress tool, built fresh per reply turn around that turn's
+ * send closure — the dedupe and cap state must not outlive the turn. Progress
+ * is best-effort: a failed send degrades to a result string the model can
+ * read, never an error that would sink the turn.
+ */
+export function buildSendUpdateTool(send: (text: string) => Promise<void>): ToolSet {
+  let lastSent: string | undefined;
+  let sent = 0;
+  return {
+    send_update: tool({
+      description:
+        "Text the owner one short progress line while you keep working. Only for tasks that take many steps; your usual voice rules apply. This never replaces your reply — finish the turn with a normal reply that doesn't repeat the updates.",
+      inputSchema: z.object({ text: z.string().min(1) }),
+      execute: async ({ text }) => {
+        const update = text.replaceAll("[SILENT]", "").replaceAll("[NEW_THREAD]", "").trim();
+        if (!update) return "skipped: empty update";
+        if (update === lastSent) return "skipped: that update was already sent";
+        if (sent >= UPDATE_CAP) {
+          return "skipped: update limit reached for this turn — finish the task and reply";
+        }
+        try {
+          await send(update);
+        } catch (error) {
+          return `failed to send: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        lastSent = update;
+        sent += 1;
+        return "sent";
+      },
+    }),
+  };
+}
+
 function bashTool(bash: { cwd: string; env?: Record<string, string> | undefined }): ToolSet {
   return {
     bash: tool({

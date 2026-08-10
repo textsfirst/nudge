@@ -115,22 +115,49 @@ export interface ThreadSummary {
   preview: string | null;
 }
 
+/** Per-turn model metrics; every field is optional — old rows and sparse providers omit some. */
+export interface MessageMetrics {
+  provider?: string;
+  modelId?: string;
+  finishReason?: string;
+  steps?: number;
+  durationMs?: number;
+  ttftMs?: number;
+  outputTps?: number;
+  toolMs?: number;
+  inputTokensTotal?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  retries?: number;
+}
+
+/** One recorded tool call; durationMs is absent on pre-upgrade history. */
+export interface ToolCallRecord {
+  tool: string;
+  input: unknown;
+  output: unknown;
+  durationMs?: number;
+}
+
 export interface ThreadMessage {
   id: number;
   role: "user" | "assistant" | "error";
   content: string;
   createdAt: number;
-  toolCalls: { tool: string; input: unknown; output: unknown }[] | null;
+  toolCalls: ToolCallRecord[] | null;
   /** Model-reported token usage; null on user/error rows and pre-upgrade history. */
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Turn metrics; null on user/error rows and pre-upgrade history. */
+  metrics: MessageMetrics | null;
 }
 
 /** The in-flight turn's live tool-step trace; null when no turn is running. */
 export interface ThreadProgress {
   startedAt: number;
   updatedAt: number;
-  toolCalls: { tool: string; input: unknown; output: unknown }[];
+  toolCalls: ToolCallRecord[];
 }
 
 export interface ThreadDetail {
@@ -159,7 +186,7 @@ export interface GoogleAccount {
 
 export interface Connections {
   chatgpt: {
-    selected: "chatgpt-subscription" | "openai-api";
+    selected: "chatgpt-subscription" | "openai-api" | "custom";
     connected: boolean;
     accountId: string | null;
     updatedAt: string | null;

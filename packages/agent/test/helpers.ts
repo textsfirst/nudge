@@ -18,15 +18,23 @@ export const quietLogger: Logger = {
 export interface UsageOverride {
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  reasoningTokens?: number;
 }
 
 /** The provider-spec (V3) usage shape emitted on finish parts. */
 function v3Usage(override?: UsageOverride) {
   const input = override?.inputTokens ?? 1;
   const output = override?.outputTokens ?? 1;
+  const cacheRead = override?.cacheReadTokens;
   return {
-    inputTokens: { total: input, noCache: input, cacheRead: undefined, cacheWrite: undefined },
-    outputTokens: { total: output, text: output, reasoning: undefined },
+    inputTokens: {
+      total: input,
+      noCache: cacheRead === undefined ? input : input - cacheRead,
+      cacheRead,
+      cacheWrite: undefined,
+    },
+    outputTokens: { total: output, text: output, reasoning: override?.reasoningTokens },
   };
 }
 
@@ -38,7 +46,7 @@ export function textChunks(text: string, usageOverride?: UsageOverride): Languag
     { type: "text-start", id: "1" },
     { type: "text-delta", id: "1", delta: text },
     { type: "text-end", id: "1" },
-    { type: "finish", finishReason: "stop", usage: v3Usage(usageOverride) },
+    { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: v3Usage(usageOverride) },
   ];
 }
 
@@ -47,7 +55,7 @@ export function errorChunks(error: unknown): LanguageModelV3StreamPart[] {
   return [
     { type: "stream-start", warnings: [] },
     { type: "error", error },
-    { type: "finish", finishReason: "error", usage },
+    { type: "finish", finishReason: { unified: "error", raw: "error" }, usage },
   ];
 }
 
@@ -60,7 +68,7 @@ export function toolCallChunks(toolName: string, input: object): LanguageModelV3
       toolName,
       input: JSON.stringify(input),
     },
-    { type: "finish", finishReason: "tool-calls", usage },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: "tool-calls" }, usage },
   ];
 }
 

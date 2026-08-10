@@ -47,6 +47,49 @@ export interface OpenAiApiSourceOptions {
   model: string;
 }
 
+export interface CustomEndpointSourceOptions {
+  baseUrl: string;
+  model: string;
+  api: "chat-completions" | "responses";
+  apiKey?: string;
+  fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * Any OpenAI-compatible endpoint (OpenRouter, Ollama, vLLM, LM Studio, a
+ * proxy, ...). Defaults to the Chat Completions API, which is what most
+ * compatible servers implement; switch to Responses only when the endpoint
+ * supports it.
+ */
+export class CustomEndpointSource implements ModelSource {
+  readonly id = "custom";
+  readonly modelId: string;
+  readonly #model: LanguageModel;
+
+  constructor(options: CustomEndpointSourceOptions) {
+    this.modelId = options.model;
+    const provider = createOpenAI({
+      baseURL: options.baseUrl,
+      // Keyless local servers ignore the header, but the SDK insists on a
+      // value — send a placeholder when no key is configured.
+      apiKey: options.apiKey ?? "none",
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+    });
+    this.#model =
+      options.api === "responses"
+        ? provider.responses(options.model)
+        : provider.chat(options.model);
+  }
+
+  languageModel(): Promise<LanguageModel> {
+    return Promise.resolve(this.#model);
+  }
+
+  isAuthError(): boolean {
+    return false;
+  }
+}
+
 export class OpenAiApiSource implements ModelSource {
   readonly id = "openai-api";
   readonly modelId: string;

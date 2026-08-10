@@ -224,6 +224,7 @@ export function createConsoleApp(
           toolCalls: parseToolPayload(message.toolPayload),
           inputTokens: message.inputTokens,
           outputTokens: message.outputTokens,
+          metrics: parseMetrics(message.metrics),
         }));
         // A live tool-step trace exists only while a turn is in flight. Traces
         // that stopped updating (e.g. the server died mid-turn) are ignored.
@@ -302,6 +303,18 @@ function parseToolPayload(payload: string | null): unknown[] | null {
   try {
     const parsed: unknown = JSON.parse(payload);
     return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseMetrics(payload: string | null): Record<string, unknown> | null {
+  if (!payload) return null;
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
     return null;
   }

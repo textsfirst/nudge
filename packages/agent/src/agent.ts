@@ -28,7 +28,7 @@ import { withStreamRetry, type StreamRetryOptions } from "./providers/retry.js";
 import { buildSystemPrompt, type GoogleAccountRef } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
 import { startOfDayInZone } from "./time.js";
-import { buildTools } from "./tools.js";
+import { buildSendUpdateTool, buildTools } from "./tools.js";
 import type { Logger, ModelSource } from "./types.js";
 import { FirecrawlClient, type FirecrawlOptions } from "./web.js";
 
@@ -98,9 +98,34 @@ const UPDATE_SUMMARY_PROMPT =
   "the new turns do not resolve or supersede, fold the new turns in, and update items the " +
   "new turns settle. Never drop a commitment or fact merely because it is old.";
 
-interface TurnUsage {
+/**
+ * Everything worth recording about a finished model turn. `inputTokens` and
+ * `outputTokens` land in their own store columns; the rest is serialized into
+ * the message's `metrics` JSON for the console.
+ */
+interface TurnMetrics {
   inputTokens?: number;
   outputTokens?: number;
+  /** The source that actually answered — reveals a mid-turn fallback. */
+  provider?: string;
+  /** The last step's model id — the model that wrote the reply, post-fallback. */
+  modelId?: string;
+  finishReason?: string;
+  steps?: number;
+  durationMs?: number;
+  /** First step's time to first output — the user-perceived latency start. */
+  ttftMs?: number;
+  /** Output-token-weighted tokens/sec across steps. */
+  outputTps?: number;
+  /** Total client-side tool execution time across steps. */
+  toolMs?: number;
+  /** Per-step input tokens summed — the billing basis, unlike the watermark. */
+  inputTokensTotal?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  /** In-stream retries that preceded the reply; absent when none. */
+  retries?: number;
 }
 
 export class NudgeAgent {
@@ -151,11 +176,18 @@ export class NudgeAgent {
    * and this rejects — the owner's message is already in history, so the next
    * turn folds it in. Tool calls the abandoned run completed are recorded as
    * an in-history interruption note so the model knows what already happened.
+   *
+   * `onProgress` enables the send_update tool for this turn: the model can
+   * text the owner short progress lines mid-turn while it keeps working.
+   * Updates live only in the tool trace, never as history rows.
    */
   reply(
     handle: string,
     text: string,
-    options: { abortSignal?: AbortSignal } = {},
+    options: {
+      abortSignal?: AbortSignal;
+      onProgress?: (text: string) => Promise<void>;
+    } = {},
   ): Promise<string | null> {
     return this.#serialized(handle, async () => {
       const now = this.#now();
@@ -176,16 +208,23 @@ export class NudgeAgent {
       const steps: StepResult<ToolSet>[] = [];
       let raw: string;
       let toolPayload: string | undefined;
-      let usage: TurnUsage | undefined;
+      let usage: TurnMetrics | undefined;
       // The console polls this trace to show the turn live; cleared when the
       // turn settles either way (the finished turn's messages replace it).
       this.#options.store.setTurnProgress(session.id, handle, "[]", this.#now());
+      // Built once per turn, not per attempt: the tool's dedupe/cap state must
+      // survive the overflow retry so a resend doesn't repeat sent updates.
+      const tools = options.onProgress
+        ? { ...this.#tools, ...buildSendUpdateTool(options.onProgress) }
+        : this.#tools;
       // History is re-read per attempt so a fold in between is picked up.
       const attempt = () =>
         this.#generate({
-          system: this.#systemPromptFor(session, now),
+          system: this.#systemPromptFor(session, now, {
+            progress: options.onProgress !== undefined,
+          }),
           messages: toModelMessages(this.#history(session)),
-          tools: this.#tools,
+          tools,
           ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
           stepSink: steps,
           onStep: () => {
@@ -225,6 +264,7 @@ export class NudgeAgent {
       if (!reply) {
         throw new Error("The model returned an empty response");
       }
+      const metrics = serializeMetrics(usage);
       this.#options.store.appendMessage({
         sessionId: session.id,
         handle,
@@ -233,6 +273,7 @@ export class NudgeAgent {
         ...(toolPayload ? { toolPayload } : {}),
         ...(usage?.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
         ...(usage?.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+        ...(metrics ? { metrics } : {}),
         at: this.#now(),
       });
       this.#options.store.touchSession(session.id, this.#now());
@@ -289,6 +330,7 @@ export class NudgeAgent {
       }
       const session =
         this.#options.store.activeSession(handle) ?? this.#options.store.startSession(handle, now);
+      const metrics = serializeMetrics(usage);
       this.#options.store.appendMessage({
         sessionId: session.id,
         handle,
@@ -297,6 +339,7 @@ export class NudgeAgent {
         ...(toolPayload ? { toolPayload } : {}),
         ...(usage?.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
         ...(usage?.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+        ...(metrics ? { metrics } : {}),
         at: this.#now(),
       });
       return reply;
@@ -357,7 +400,11 @@ export class NudgeAgent {
     return store.sessionMessages(session.id, compactedThrough);
   }
 
-  #systemPromptFor(session: SessionRow, now: number): string {
+  #systemPromptFor(
+    session: SessionRow,
+    now: number,
+    opts: { progress?: boolean } = {},
+  ): string {
     if (!this.#systemFileCache.has(session.id)) {
       this.#systemFileCache.set(session.id, this.#options.systemFile());
     }
@@ -374,6 +421,7 @@ export class NudgeAgent {
       timeZone: this.#options.timeZone,
       webEnabled: Boolean(this.#options.web),
       bashEnabled: this.#options.bashEnabled !== false,
+      ...(opts.progress ? { progressEnabled: true } : {}),
       googleAccounts: this.#googleAccounts(),
     });
   }
@@ -533,15 +581,19 @@ export class NudgeAgent {
     stepSink?: StepResult<ToolSet>[];
     /** Fires after each step lands in stepSink — the live-progress hook. */
     onStep?: () => void;
-  }): Promise<{ text: string; toolPayload?: string; usage?: TurnUsage }> {
+  }): Promise<{ text: string; toolPayload?: string; usage?: TurnMetrics }> {
     const sources = this.#options.sources;
     for (let index = 0; index < sources.length; index += 1) {
       const source = sources[index]!;
       if (params.stepSink) params.stepSink.length = 0;
       try {
+        let retries = 0;
         const model = withStreamRetry(await source.languageModel(), {
           ...this.#options.streamRetry,
           logger: this.#options.logger,
+          onRetry: () => {
+            retries += 1;
+          },
         });
         // Stateful (once-per-streak warning), so one guard per attempt.
         const guard = params.tools
@@ -589,12 +641,12 @@ export class NudgeAgent {
           throw toStreamError(streamErrors[0]);
         }
         const allSteps = await result.steps;
-        const usage = turnUsage(allSteps, await result.usage);
+        const usage = turnMetrics(allSteps, await result.usage, {
+          provider: source.id,
+          retries,
+        });
         if (usage) {
-          this.#options.logger.debug("Model turn finished", {
-            provider: source.id,
-            ...usage,
-          });
+          this.#options.logger.debug("Model turn finished", { ...usage });
         }
         const payload = params.tools ? serializeSteps(allSteps) : undefined;
         // No text after tool calls means a stop condition cut the loop before
@@ -707,19 +759,87 @@ function toStreamError(value: unknown): Error {
 /**
  * The last step's input count is the turn's context watermark — each step
  * resends the whole conversation — while outputs meaningfully sum across
- * steps. Undefined when the provider reported nothing.
+ * steps. Timing and cache fields aggregate what the SDK measured per step;
+ * a field is absent only when every step lacked it, so providers that omit
+ * some detail degrade gracefully. Undefined when there were no steps at all.
  */
-function turnUsage(
+function turnMetrics(
   steps: ReadonlyArray<StepResult<ToolSet>>,
   totals: LanguageModelUsage,
-): TurnUsage | undefined {
-  const inputTokens = steps.at(-1)?.usage.inputTokens ?? totals.inputTokens;
+  meta: { provider: string; retries: number },
+): TurnMetrics | undefined {
+  const last = steps.at(-1);
+  const inputTokens = last?.usage.inputTokens ?? totals.inputTokens;
   const outputTokens = totals.outputTokens;
-  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  if (!last) {
+    if (inputTokens === undefined && outputTokens === undefined) return undefined;
+    return {
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(outputTokens !== undefined ? { outputTokens } : {}),
+    };
+  }
+
+  const durationMs = sumDefined(steps.map((step) => step.performance.stepTimeMs));
+  const ttftMs = steps[0]?.performance.timeToFirstOutputMs;
+  const toolMs = sumDefined(
+    steps.map((step) => sumDefined(Object.values(step.performance.toolExecutionMs))),
+  );
+  // Weight each step's rate by its output so a long step counts for its share,
+  // instead of averaging fast and slow rates as equals.
+  let weightedOut = 0;
+  let weightedSeconds = 0;
+  for (const step of steps) {
+    const out = step.usage.outputTokens;
+    const tps = step.performance.outputTokensPerSecond;
+    if (out !== undefined && out > 0 && tps !== undefined && tps > 0) {
+      weightedOut += out;
+      weightedSeconds += out / tps;
+    }
+  }
+  const outputTps = weightedSeconds > 0 ? weightedOut / weightedSeconds : undefined;
+  const inputTokensTotal = sumDefined(steps.map((step) => step.usage.inputTokens));
+  const cacheReadTokens = sumDefined(
+    steps.map((step) => step.usage.inputTokenDetails.cacheReadTokens),
+  );
+  const cacheWriteTokens = sumDefined(
+    steps.map((step) => step.usage.inputTokenDetails.cacheWriteTokens),
+  );
+  const reasoningTokens = sumDefined(
+    steps.map((step) => step.usage.outputTokenDetails.reasoningTokens),
+  );
+
   return {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
+    provider: meta.provider,
+    modelId: last.model.modelId,
+    finishReason: last.finishReason,
+    steps: steps.length,
+    ...(durationMs !== undefined ? { durationMs: Math.round(durationMs) } : {}),
+    ...(ttftMs !== undefined ? { ttftMs: Math.round(ttftMs) } : {}),
+    ...(outputTps !== undefined ? { outputTps: Math.round(outputTps * 10) / 10 } : {}),
+    ...(toolMs !== undefined && toolMs > 0 ? { toolMs: Math.round(toolMs) } : {}),
+    ...(inputTokensTotal !== undefined ? { inputTokensTotal } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(meta.retries > 0 ? { retries: meta.retries } : {}),
   };
+}
+
+/** Sum, skipping undefined; undefined only when every value was. */
+function sumDefined(values: ReadonlyArray<number | undefined>): number | undefined {
+  return values.reduce<number | undefined>(
+    (total, value) => (value === undefined ? total : (total ?? 0) + value),
+    undefined,
+  );
+}
+
+/** The JSON for the store's metrics column: everything but the token columns. */
+function serializeMetrics(metrics: TurnMetrics | undefined): string | undefined {
+  if (!metrics) return undefined;
+  const { inputTokens: _in, outputTokens: _out, ...rest } = metrics;
+  return Object.keys(rest).length > 0 ? JSON.stringify(rest) : undefined;
 }
 
 /** Error rows are console-facing diagnostics — the model never sees them. */
@@ -735,16 +855,25 @@ function transcript(messages: MessageRow[]): string {
 
 function serializeSteps(steps: ReadonlyArray<StepResult<ToolSet>>): string | undefined {
   const calls = steps.flatMap((step) =>
-    step.toolCalls.map((call, index) => ({
-      tool: call.toolName,
-      input: call.input,
-      output: clip(step.toolResults[index]?.output),
-    })),
+    step.toolCalls.map((call, index) => {
+      const durationMs = step.performance.toolExecutionMs[call.toolCallId];
+      return {
+        tool: call.toolName,
+        input: call.input,
+        output: clip(step.toolResults[index]?.output),
+        ...(durationMs !== undefined ? { durationMs: Math.round(durationMs) } : {}),
+      };
+    }),
   );
   return calls.length > 0 ? JSON.stringify(calls) : undefined;
 }
 
+/**
+ * Head-and-tail, not head-only: tool results put their status where humans
+ * put conclusions — at the end ("Command timed out after 120 seconds", exit
+ * codes, truncation footers) — and that line is the one worth keeping.
+ */
 function clip(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  return value.length > 500 ? `${value.slice(0, 500)}…` : value;
+  if (typeof value !== "string" || value.length <= 500) return value;
+  return `${value.slice(0, 300)} …[${value.length - 500} chars omitted]… ${value.slice(-200)}`;
 }

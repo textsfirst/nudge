@@ -8,7 +8,10 @@ export interface ReplyAgent {
   reply(
     handle: string,
     text: string,
-    options?: { abortSignal?: AbortSignal },
+    options?: {
+      abortSignal?: AbortSignal;
+      onProgress?: (text: string) => Promise<void>;
+    },
   ): Promise<string | null>;
 }
 
@@ -29,6 +32,14 @@ export function createReplyHandler(deps: {
     try {
       const reply = await agent.reply(batch.handle, batch.texts.join("\n"), {
         abortSignal: signal,
+        // Progress texts are best-effort and skip the outbound ledger:
+        // recovery re-sending a stale "checking…" line later would be wrong.
+        // The audit trail is the turn's tool payload.
+        onProgress: async (update) => {
+          if (signal.aborted) return;
+          logger.info("Sending a mid-turn progress update", { handle: batch.handle });
+          await send(update);
+        },
       });
       if (reply) {
         const ledgerId = store.enqueueOutbound(batch.handle, reply, "reply");

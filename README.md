@@ -89,6 +89,8 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
    To use only an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`. API fallback is off by default. With the subscription provider, a configured `OPENAI_API_KEY` + the API-credit fallback toggle is used only when subscription auth fails; startup and logs call out when it can spend API credits.
 
+   To use any other OpenAI-compatible endpoint (OpenRouter, Ollama, vLLM, LM Studio, a proxy): set Provider to `custom` in console Settings, fill in the custom base URL and model id, and — if the endpoint needs one — set `CUSTOM_API_KEY` in `.env`. Most compatible servers implement the Chat Completions API (the default); switch the API flavor to `responses` only when the endpoint supports it. For model ids the context-window registry does not recognize, set `agent.context_window_tokens` explicitly.
+
 4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
 
 5. Start everything and expose port 3000 via your HTTPS host or tunnel:
@@ -150,11 +152,14 @@ Settings (console → Settings):
 | --- | --- | --- |
 | `owner_handle` | required | The one handle allowed to talk to Nudge |
 | `timezone` | machine timezone | IANA zone for schedules and midnight rollover |
-| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription` or `openai-api` |
+| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `openai-api`, or `custom` |
 | `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the subscription endpoint |
 | `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | OAuth credential file |
 | `provider.openai.model` | `gpt-5-mini` | Standard API model |
 | `provider.openai.fallback_enabled` | `false` | API-key fallback for subscription auth failures |
+| `provider.custom.base_url` | unset | Base URL of an OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1`) |
+| `provider.custom.model` | unset | Model id the custom endpoint expects |
+| `provider.custom.api` | `chat-completions` | API flavor the endpoint implements: `chat-completions` or `responses` |
 | `model.reasoning_effort` | model default | `none` … `max` reasoning level |
 | `model.fast_mode` | `false` | Priority service tier for faster output |
 | `tools.bash_enabled` | `true` | Set `false` to remove the bash tool |
@@ -174,6 +179,7 @@ Settings (console → Settings):
 | --- | --- |
 | `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` / `SPECTRUM_WEBHOOK_SECRET` | Photon credentials (required) |
 | `OPENAI_API_KEY` | Optional API provider / subscription fallback |
+| `CUSTOM_API_KEY` | Optional key for the custom provider endpoint (omit for keyless local servers) |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
 | `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ (default `.data`) |
 | `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Conductor's per-workspace ports) |

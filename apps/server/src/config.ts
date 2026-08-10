@@ -43,6 +43,11 @@ export const SECRET_SPECS = [
     description: "OpenAI API key — API provider, or fallback for subscription auth",
   },
   {
+    key: "CUSTOM_API_KEY",
+    required: false,
+    description: "API key for the custom provider endpoint (omit for keyless local servers)",
+  },
+  {
     key: "FIRECRAWL_API_KEY",
     required: false,
     description: "Enables the web_search / web_extract tools",
@@ -126,6 +131,12 @@ export function loadConfig(
       ...(secrets.OPENAI_API_KEY ? { openAiApiKey: secrets.OPENAI_API_KEY } : {}),
       openAiModel: settings.provider.openai.model,
       openAiFallbackEnabled: settings.provider.openai.fallback_enabled,
+      ...(settings.provider.custom.base_url
+        ? { customBaseUrl: settings.provider.custom.base_url }
+        : {}),
+      ...(settings.provider.custom.model ? { customModel: settings.provider.custom.model } : {}),
+      customApi: settings.provider.custom.api,
+      ...(secrets.CUSTOM_API_KEY ? { customApiKey: secrets.CUSTOM_API_KEY } : {}),
     },
     ...(secrets.FIRECRAWL_API_KEY || settings.tools.firecrawl_url
       ? {

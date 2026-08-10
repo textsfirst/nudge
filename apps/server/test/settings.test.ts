@@ -78,6 +78,8 @@ describe("SETTINGS_FORM", () => {
     // Optional leaves are absent from the defaults, so set them all.
     const everyLeaf = settingsFromOverrides({
       timezone: "UTC",
+      "provider.custom.base_url": "http://localhost:11434/v1",
+      "provider.custom.model": "llama3.3:70b",
       "model.reasoning_effort": "medium",
       "tools.firecrawl_url": "http://localhost:3002",
       "google.default_account": "personal",

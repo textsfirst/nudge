@@ -56,6 +56,12 @@ const BASH_TOOL_GUIDANCE = `bash runs shell commands with your data directory as
 Use it for file operations (ls, grep, wc, find) and quick computation. Do not
 use it to bypass the file tools' validation of SCHEDULE.md and memory files.`;
 
+/** Appended only on the reply path, where the send_update tool is in the set. */
+const PROGRESS_TOOL_GUIDANCE = `send_update texts the owner one short progress line while you keep working.
+When a task will clearly take many steps, send one natural line before diving
+in ("let me check your calendar"), then more only sparingly. Most turns need
+none, and it never replaces the reply you finish the turn with.`;
+
 /** One line per connected Google account, only when bash carries the gws shim. */
 function googleGuidance(accounts: GoogleAccountRef[]): string {
   const list = accounts
@@ -83,6 +89,8 @@ export interface PromptStackInput {
   timeZone: string;
   webEnabled?: boolean;
   bashEnabled?: boolean;
+  /** True only on the reply path, where the send_update tool exists. */
+  progressEnabled?: boolean;
   /** Connected Google accounts; non-empty adds gws guidance (needs bash). */
   googleAccounts?: GoogleAccountRef[];
 }
@@ -98,6 +106,7 @@ export function buildSystemPrompt(input: PromptStackInput): string {
   if (input.bashEnabled && input.googleAccounts && input.googleAccounts.length > 0) {
     guidance += `\n\n${googleGuidance(input.googleAccounts)}`;
   }
+  if (input.progressEnabled) guidance += `\n\n${PROGRESS_TOOL_GUIDANCE}`;
   const sections = [input.systemFile?.trim() || DEFAULT_SYSTEM_FILE, guidance];
 
   if (input.memory) {

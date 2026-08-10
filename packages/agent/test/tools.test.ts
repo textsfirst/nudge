@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   applyEdits,
+  buildSendUpdateTool,
   DEFAULT_MAX_LINES,
   executeBash,
   FileWorkspace,
@@ -267,5 +268,55 @@ describe("executeBash", () => {
   it("reports spawn failures as errors", async () => {
     const result = await executeBash("echo hi", { cwd: join(cwd, "does-not-exist") });
     expect(result.startsWith("Error:")).toBe(true);
+  });
+});
+
+describe("send_update", () => {
+  function makeTool(send: (text: string) => Promise<void>) {
+    const execute = buildSendUpdateTool(send)["send_update"]!.execute as (
+      input: { text: string },
+      options: { toolCallId: string; messages: [] },
+    ) => Promise<string>;
+    return (text: string) => execute({ text }, { toolCallId: "call-1", messages: [] });
+  }
+
+  it("sends the trimmed update and confirms", async () => {
+    const sent: string[] = [];
+    const update = makeTool(async (text) => void sent.push(text));
+    await expect(update("  checking your calendar  ")).resolves.toBe("sent");
+    expect(sent).toEqual(["checking your calendar"]);
+  });
+
+  it("strips reply tokens and skips updates that were nothing else", async () => {
+    const sent: string[] = [];
+    const update = makeTool(async (text) => void sent.push(text));
+    await expect(update("on it [NEW_THREAD]")).resolves.toBe("sent");
+    await expect(update("[SILENT]")).resolves.toBe("skipped: empty update");
+    expect(sent).toEqual(["on it"]);
+  });
+
+  it("skips a repeat of the last update", async () => {
+    const sent: string[] = [];
+    const update = makeTool(async (text) => void sent.push(text));
+    await update("still digging");
+    await expect(update("still digging")).resolves.toContain("skipped");
+    expect(sent).toEqual(["still digging"]);
+  });
+
+  it("refuses updates past the per-turn cap", async () => {
+    const sent: string[] = [];
+    const update = makeTool(async (text) => void sent.push(text));
+    for (let i = 0; i < 5; i += 1) {
+      await expect(update(`update ${i}`)).resolves.toBe("sent");
+    }
+    await expect(update("one too many")).resolves.toContain("update limit reached");
+    expect(sent).toHaveLength(5);
+  });
+
+  it("degrades a send failure to a result string", async () => {
+    const update = makeTool(async () => {
+      throw new Error("space unavailable");
+    });
+    await expect(update("hello")).resolves.toBe("failed to send: space unavailable");
   });
 });

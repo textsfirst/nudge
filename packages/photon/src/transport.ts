@@ -133,13 +133,10 @@ export async function createPhotonTransport(
     },
 
     async sendToSpace(spaceId, text) {
-      const instance: unknown = Reflect.get(spectrum, "imessage");
-      if (!hasSpaceGetter(instance)) {
-        throw new Error(
-          "The Spectrum iMessage instance does not expose space.get; check the installed spectrum-ts version",
-        );
-      }
-      const space = await instance.space.get(spaceId);
+      // The platform instance comes from calling the narrower with the
+      // spectrum instance — the instance itself exposes no per-platform
+      // property (unknown props resolve to custom event streams).
+      const space = await imessage(spectrum).space.get(spaceId);
       await sendAll(space, text);
     },
 
@@ -150,17 +147,4 @@ export async function createPhotonTransport(
       await spectrum.stop();
     },
   };
-}
-
-function hasSpaceGetter(value: unknown): value is {
-  space: { get(id: string): Promise<SendableSpace> };
-} {
-  if (typeof value !== "object" || value === null || !("space" in value)) return false;
-  const space = value.space;
-  return (
-    typeof space === "object" &&
-    space !== null &&
-    "get" in space &&
-    typeof space.get === "function"
-  );
 }

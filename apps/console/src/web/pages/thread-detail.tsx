@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   ArrowLeft,
-  Bug,
+  ChartNoAxesColumn,
   Check,
   ChevronDown,
   Copy,
@@ -17,17 +17,17 @@ import { Page } from "@/components/layout";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Confirm } from "@/components/ui/confirm";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   deleteMessage,
   deleteThread,
   endThread,
   useInvalidate,
   useThread,
+  type MessageMetrics,
   type ThreadMessage,
 } from "@/lib/api";
 import { cn, formatTime } from "@/lib/utils";
-
-const DEBUG_KEY = "nudge.console.thread-debug";
 
 export function ThreadDetailPage() {
   const { id } = useParams();
@@ -35,14 +35,6 @@ export function ThreadDetailPage() {
   const { data, isLoading } = useThread(threadId);
   const invalidate = useInvalidate();
   const navigate = useNavigate();
-  const [debug, setDebug] = useState(() => localStorage.getItem(DEBUG_KEY) === "1");
-
-  const toggleDebug = () => {
-    setDebug((on) => {
-      localStorage.setItem(DEBUG_KEY, on ? "0" : "1");
-      return !on;
-    });
-  };
 
   // Follow-scroll: jump to the latest message when an active thread opens, then
   // stick to the bottom as new messages poll in — but only while the user is
@@ -111,14 +103,6 @@ export function ThreadDetailPage() {
       description={`${formatTime(session.startedAt)} → ${active ? "now" : formatTime(session.endedAt)}`}
       actions={
         <>
-          <Button
-            variant={debug ? "default" : "outline"}
-            size="sm"
-            onClick={toggleDebug}
-            aria-pressed={debug}
-          >
-            <Bug /> Debug
-          </Button>
           <Button variant="outline" size="sm" onClick={() => navigate("/threads")}>
             <ArrowLeft /> Back
           </Button>
@@ -193,6 +177,8 @@ export function ThreadDetailPage() {
         {session.carryover && <span>carryover: “{session.carryover}”</span>}
       </div>
 
+      <ThreadStats messages={messages} />
+
       {session.summary && (
         <div className="rounded-lg border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
           <span className="font-medium text-foreground">
@@ -212,7 +198,6 @@ export function ThreadDetailPage() {
           <div key={message.id} className="contents">
             <MessageItem
               message={message}
-              debug={debug}
               compacted={message.id <= session.compactedThrough}
               previousAt={index > 0 ? messages[index - 1]!.createdAt : null}
               onDelete={() => {
@@ -275,13 +260,11 @@ function interruptionLead(content: string): string | null {
 
 function MessageItem({
   message,
-  debug,
   compacted,
   previousAt,
   onDelete,
 }: {
   message: ThreadMessage;
-  debug: boolean;
   compacted: boolean;
   previousAt: number | null;
   onDelete: () => void;
@@ -292,7 +275,7 @@ function MessageItem({
       className={cn(
         "group flex flex-col gap-1.5",
         mine ? "items-end" : "items-start",
-        debug && compacted && "opacity-60",
+        compacted && "opacity-60",
       )}
     >
       {message.toolCalls && message.toolCalls.length > 0 && (
@@ -331,7 +314,7 @@ function MessageItem({
             {message.outputTokens !== null && ` · ${formatTokens(message.outputTokens)} out`}
           </span>
         )}
-        {message.role === "error" && !debug && (
+        {message.role === "error" && (
           <button
             type="button"
             className="opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
@@ -345,25 +328,7 @@ function MessageItem({
             <Copy className="size-3" />
           </button>
         )}
-        {debug && (
-          <span className="flex items-center gap-2 font-mono text-[10px]">
-            <span>#{message.id}</span>
-            {previousAt !== null && <span>+{formatDelta(message.createdAt - previousAt)}</span>}
-            <span>{message.content.length} chars</span>
-            <button
-              type="button"
-              className="opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-              aria-label="Copy message as JSON"
-              onClick={() => {
-                void navigator.clipboard
-                  .writeText(JSON.stringify(message, null, 2))
-                  .then(() => toast.success("Message JSON copied"));
-              }}
-            >
-              <Copy className="size-3" />
-            </button>
-          </span>
-        )}
+        <MetricsPopover message={message} previousAt={previousAt} />
         <Confirm
           title="Delete this message?"
           description="Removes it from history and search. The agent will no longer see it."
@@ -402,6 +367,11 @@ function ToolSteps({ calls }: { calls: NonNullable<ThreadMessage["toolCalls"]> }
               {inputHint(call.input)}
             </span>
             <span className="ml-auto flex shrink-0 items-center gap-1.5 text-muted-foreground">
+              {call.durationMs !== undefined && (
+                <span className="font-mono text-[10px]" title="Tool execution time">
+                  {formatDelta(call.durationMs)}
+                </span>
+              )}
               {call.output === undefined ? (
                 <span className="text-[10px] text-warning">no output</span>
               ) : (
@@ -455,4 +425,319 @@ function formatDelta(ms: number): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+/** Sub-minute times keep a decimal (TTFT reads as "1.4s", not "1s"). */
+function formatMs(ms: number): string {
+  if (ms < 1_000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  return formatDelta(ms);
+}
+
+function formatPercent(ratio: number): string {
+  return `${Math.round(ratio * 100)}%`;
+}
+
+function formatTps(tps: number): string {
+  return `${tps >= 10 ? Math.round(tps) : tps.toFixed(1)} tok/s`;
+}
+
+/** Nearest-rank quantile of an unsorted sample. */
+function quantile(values: number[], q: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.ceil(q * sorted.length) - 1)]!;
+}
+
+/** Sum, skipping undefined/null; undefined when nothing contributed. */
+function sumDefined(values: Array<number | undefined | null>): number | undefined {
+  let total: number | undefined;
+  for (const value of values) {
+    if (value !== undefined && value !== null) total = (total ?? 0) + value;
+  }
+  return total;
+}
+
+function cacheHitRate(metrics: {
+  cacheReadTokens?: number;
+  inputTokensTotal?: number;
+}): number | undefined {
+  return metrics.cacheReadTokens !== undefined &&
+    metrics.inputTokensTotal !== undefined &&
+    metrics.inputTokensTotal > 0
+    ? metrics.cacheReadTokens / metrics.inputTokensTotal
+    : undefined;
+}
+
+function MetricRow({
+  label,
+  value,
+  title,
+}: {
+  label: string;
+  value: React.ReactNode;
+  title?: string;
+}) {
+  if (value === undefined || value === null) return null;
+  return (
+    <>
+      <dt className="text-muted-foreground" {...(title ? { title } : {})}>
+        {label}
+      </dt>
+      <dd className="text-right font-mono">{value}</dd>
+    </>
+  );
+}
+
+function MetricHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="col-span-2 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground first:pt-0">
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The on-demand home for everything that used to bloat the meta row: a small
+ * chart icon (visible on hover) opens the turn's full metrics.
+ */
+function MetricsPopover({
+  message,
+  previousAt,
+}: {
+  message: ThreadMessage;
+  previousAt: number | null;
+}) {
+  const m = message.metrics;
+  const hitRate = m ? cacheHitRate(m) : undefined;
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 data-[state=open]:text-foreground data-[state=open]:opacity-100"
+          aria-label="Message details"
+        >
+          <ChartNoAxesColumn className="size-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-64 text-[11px]">
+        {m && (
+          <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-4 gap-y-1">
+            <MetricHeading>Model</MetricHeading>
+            <MetricRow label="model" value={m.modelId} />
+            <MetricRow label="source" value={m.provider} />
+            <MetricRow label="finish" value={m.finishReason} />
+            <MetricHeading>Latency</MetricHeading>
+            <MetricRow
+              label="TTFT"
+              title="Time to the first output chunk of the turn's first step"
+              value={m.ttftMs !== undefined ? formatMs(m.ttftMs) : undefined}
+            />
+            <MetricRow
+              label="speed"
+              title="Output tokens per second, weighted across steps"
+              value={m.outputTps !== undefined ? formatTps(m.outputTps) : undefined}
+            />
+            <MetricRow
+              label="model time"
+              value={m.durationMs !== undefined ? formatMs(m.durationMs) : undefined}
+            />
+            <MetricRow
+              label="tool time"
+              value={m.toolMs !== undefined ? formatMs(m.toolMs) : undefined}
+            />
+            <MetricRow label="steps" value={m.steps} />
+            <MetricRow label="retries" value={m.retries} />
+            <MetricHeading>Tokens</MetricHeading>
+            <MetricRow
+              label="in (context)"
+              title="Prompt tokens of the final step — the turn's context watermark"
+              value={message.inputTokens !== null ? formatTokens(message.inputTokens) : undefined}
+            />
+            <MetricRow
+              label="in (billed)"
+              title="Prompt tokens summed across all steps of the turn"
+              value={
+                m.inputTokensTotal !== undefined ? formatTokens(m.inputTokensTotal) : undefined
+              }
+            />
+            <MetricRow
+              label="out"
+              value={message.outputTokens !== null ? formatTokens(message.outputTokens) : undefined}
+            />
+            <MetricRow
+              label="reasoning"
+              value={
+                m.reasoningTokens !== undefined ? formatTokens(m.reasoningTokens) : undefined
+              }
+            />
+            <MetricRow
+              label="cache read"
+              value={
+                m.cacheReadTokens !== undefined ? formatTokens(m.cacheReadTokens) : undefined
+              }
+            />
+            <MetricRow
+              label="cache write"
+              value={
+                m.cacheWriteTokens !== undefined ? formatTokens(m.cacheWriteTokens) : undefined
+              }
+            />
+            <MetricRow
+              label="cache hit"
+              title="Cache-read share of billed prompt tokens"
+              value={hitRate !== undefined ? formatPercent(hitRate) : undefined}
+            />
+          </dl>
+        )}
+        <div
+          className={cn(
+            "flex items-center gap-2 font-mono text-[10px] text-muted-foreground",
+            m && "mt-2.5 border-t border-border pt-2",
+          )}
+        >
+          <span>#{message.id}</span>
+          {previousAt !== null && <span>+{formatDelta(message.createdAt - previousAt)}</span>}
+          <span>{message.content.length} chars</span>
+          <button
+            type="button"
+            className="ml-auto flex items-center gap-1 transition-colors hover:text-foreground"
+            aria-label="Copy message as JSON"
+            onClick={() => {
+              void navigator.clipboard
+                .writeText(JSON.stringify(message, null, 2))
+                .then(() => toast.success("Message JSON copied"));
+            }}
+          >
+            <Copy className="size-3" /> JSON
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * Thread-wide rollup of the per-turn metrics: the collapsed summary is itself
+ * a one-line KPI row, so expanding is only for the breakdown.
+ */
+function ThreadStats({ messages }: { messages: ThreadMessage[] }) {
+  const turns = messages.filter(
+    (message): message is ThreadMessage & { metrics: MessageMetrics } => message.metrics !== null,
+  );
+  if (turns.length === 0) return null;
+
+  const inputTotal = sumDefined(turns.map((turn) => turn.metrics.inputTokensTotal));
+  const outputTotal = sumDefined(turns.map((turn) => turn.outputTokens));
+  const reasoningTotal = sumDefined(turns.map((turn) => turn.metrics.reasoningTokens));
+  const cacheRead = sumDefined(turns.map((turn) => turn.metrics.cacheReadTokens));
+  const cacheWrite = sumDefined(turns.map((turn) => turn.metrics.cacheWriteTokens));
+  const hitRate =
+    cacheRead !== undefined && inputTotal !== undefined && inputTotal > 0
+      ? cacheRead / inputTotal
+      : undefined;
+  const ttfts = turns
+    .map((turn) => turn.metrics.ttftMs)
+    .filter((value): value is number => value !== undefined);
+  const modelTime = sumDefined(turns.map((turn) => turn.metrics.durationMs));
+  const toolTime = sumDefined(turns.map((turn) => turn.metrics.toolMs));
+  const retries = sumDefined(turns.map((turn) => turn.metrics.retries));
+
+  // Same output-weighted rate as the per-turn metric, extended across turns.
+  let weightedOut = 0;
+  let weightedSeconds = 0;
+  for (const turn of turns) {
+    const tps = turn.metrics.outputTps;
+    if (turn.outputTokens !== null && turn.outputTokens > 0 && tps !== undefined && tps > 0) {
+      weightedOut += turn.outputTokens;
+      weightedSeconds += turn.outputTokens / tps;
+    }
+  }
+  const outputTps = weightedSeconds > 0 ? weightedOut / weightedSeconds : undefined;
+
+  const modelCounts = new Map<string, number>();
+  for (const turn of turns) {
+    if (turn.metrics.modelId) {
+      modelCounts.set(turn.metrics.modelId, (modelCounts.get(turn.metrics.modelId) ?? 0) + 1);
+    }
+  }
+
+  const kpis = [
+    inputTotal !== undefined &&
+      outputTotal !== undefined &&
+      `${formatTokens(inputTotal)} in · ${formatTokens(outputTotal)} out`,
+    hitRate !== undefined && `${formatPercent(hitRate)} cached`,
+    ttfts.length > 0 && `${formatMs(quantile(ttfts, 0.5))} TTFT`,
+    outputTps !== undefined && formatTps(outputTps),
+  ].filter((part): part is string => Boolean(part));
+
+  return (
+    <details className="group/stats rounded-lg border border-border bg-muted/30">
+      <summary className="flex cursor-pointer select-none list-none items-center gap-2 px-3 py-2 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
+        <ChartNoAxesColumn className="size-3.5 shrink-0" />
+        <span className="font-medium text-foreground">Model stats</span>
+        <span className="truncate font-mono">{kpis.join(" · ")}</span>
+        <ChevronDown className="ml-auto size-3.5 shrink-0 transition-transform group-open/stats:rotate-180" />
+      </summary>
+      <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-6 gap-y-1 border-t border-border px-3 py-2.5 text-[11px] sm:grid-cols-[auto_1fr_auto_1fr]">
+        <MetricRow
+          label="tokens in (billed)"
+          value={inputTotal !== undefined ? formatTokens(inputTotal) : undefined}
+        />
+        <MetricRow
+          label="tokens out"
+          value={outputTotal !== undefined ? formatTokens(outputTotal) : undefined}
+        />
+        <MetricRow
+          label="reasoning"
+          value={reasoningTotal !== undefined ? formatTokens(reasoningTotal) : undefined}
+        />
+        <MetricRow
+          label="cache read / write"
+          value={
+            cacheRead !== undefined || cacheWrite !== undefined
+              ? `${cacheRead !== undefined ? formatTokens(cacheRead) : "–"} / ${
+                  cacheWrite !== undefined ? formatTokens(cacheWrite) : "–"
+                }`
+              : undefined
+          }
+        />
+        <MetricRow
+          label="cache hit rate"
+          value={hitRate !== undefined ? formatPercent(hitRate) : undefined}
+        />
+        <MetricRow
+          label="TTFT p50 / p90"
+          value={
+            ttfts.length > 0
+              ? `${formatMs(quantile(ttfts, 0.5))} / ${formatMs(quantile(ttfts, 0.9))}`
+              : undefined
+          }
+        />
+        <MetricRow
+          label="output speed"
+          value={outputTps !== undefined ? formatTps(outputTps) : undefined}
+        />
+        <MetricRow
+          label="model / tool time"
+          value={
+            modelTime !== undefined
+              ? `${formatMs(modelTime)}${toolTime !== undefined ? ` / ${formatMs(toolTime)}` : ""}`
+              : undefined
+          }
+        />
+        <MetricRow label="retries" value={retries} />
+        <MetricRow
+          label="models"
+          value={
+            modelCounts.size > 0
+              ? [...modelCounts.entries()]
+                  .map(([model, count]) => `${model} ×${count}`)
+                  .join(", ")
+              : undefined
+          }
+        />
+      </dl>
+    </details>
+  );
 }

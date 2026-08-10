@@ -73,7 +73,7 @@ describe("NudgeStore", () => {
     expect(store.turnProgress(next.id)).toBeUndefined();
   });
 
-  it("round-trips per-message token usage", () => {
+  it("round-trips per-message token usage and turn metrics", () => {
     const store = new NudgeStore(":memory:");
     const session = store.startSession(HANDLE);
     store.appendMessage({ sessionId: session.id, handle: HANDLE, role: "user", content: "hi" });
@@ -84,12 +84,21 @@ describe("NudgeStore", () => {
       content: "hello",
       inputTokens: 1_234,
       outputTokens: 56,
+      metrics: '{"ttftMs":420,"modelId":"gpt-5-mini"}',
     });
-    expect(reply).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
+    expect(reply).toMatchObject({
+      inputTokens: 1_234,
+      outputTokens: 56,
+      metrics: '{"ttftMs":420,"modelId":"gpt-5-mini"}',
+    });
 
     const [user, assistant] = store.sessionMessages(session.id);
-    expect(user).toMatchObject({ inputTokens: null, outputTokens: null });
-    expect(assistant).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
+    expect(user).toMatchObject({ inputTokens: null, outputTokens: null, metrics: null });
+    expect(assistant).toMatchObject({
+      inputTokens: 1_234,
+      outputTokens: 56,
+      metrics: '{"ttftMs":420,"modelId":"gpt-5-mini"}',
+    });
   });
 
   it("limits session messages to those after a compaction point", () => {
@@ -243,12 +252,16 @@ describe("NudgeStore", () => {
 
       const store = new NudgeStore(path);
       expect(store.searchMessages("searchable")).toHaveLength(1);
-      // The token-usage migration backfills legacy rows as null.
-      expect(store.sessionMessages(1)[0]).toMatchObject({ inputTokens: null, outputTokens: null });
+      // The token-usage and metrics migrations backfill legacy rows as null.
+      expect(store.sessionMessages(1)[0]).toMatchObject({
+        inputTokens: null,
+        outputTokens: null,
+        metrics: null,
+      });
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 5 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -116,6 +116,32 @@ describe("loadConfig", () => {
     expect(config.keepRecentTokens).toBe(10_000);
     expect(config.timeZone).toBe("America/New_York");
   });
+
+  it("maps custom provider settings and the CUSTOM_API_KEY secret", () => {
+    const config = loadConfig(
+      { ...SECRETS, CUSTOM_API_KEY: "ck-test" },
+      settings({
+        "provider.selected": "custom",
+        "provider.custom.base_url": "http://localhost:11434/v1",
+        "provider.custom.model": "llama3.3:70b",
+        "provider.custom.api": "responses",
+      }),
+      boot,
+    );
+    expect(config.provider.selected).toBe("custom");
+    expect(config.provider.customBaseUrl).toBe("http://localhost:11434/v1");
+    expect(config.provider.customModel).toBe("llama3.3:70b");
+    expect(config.provider.customApi).toBe("responses");
+    expect(config.provider.customApiKey).toBe("ck-test");
+  });
+
+  it("leaves the custom provider fields unset by default", () => {
+    const config = loadConfig(SECRETS, settings(), boot);
+    expect(config.provider.customBaseUrl).toBeUndefined();
+    expect(config.provider.customModel).toBeUndefined();
+    expect(config.provider.customApi).toBe("chat-completions");
+    expect(config.provider.customApiKey).toBeUndefined();
+  });
 });
 
 describe("secret metadata", () => {

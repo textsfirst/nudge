@@ -30,6 +30,8 @@ export interface MessageRow {
   inputTokens: number | null;
   /** Model-reported completion tokens for the turn that produced this row; assistant rows only. */
   outputTokens: number | null;
+  /** JSON turn metrics (model, latency, cache tokens) for the console; assistant rows only. */
+  metrics: string | null;
   createdAt: number;
 }
 
@@ -81,7 +83,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -204,6 +206,11 @@ const MIGRATIONS: readonly Migration[] = [
     // for observing context pressure. Nullable: user/error rows never have it.
     db.exec("ALTER TABLE messages ADD COLUMN input_tokens INTEGER");
     db.exec("ALTER TABLE messages ADD COLUMN output_tokens INTEGER");
+  },
+  (db) => {
+    // Per-turn model metrics JSON (model id, TTFT, tokens/sec, cache tokens)
+    // for the console. Nullable: user/error rows never have it.
+    db.exec("ALTER TABLE messages ADD COLUMN metrics TEXT");
   },
 ];
 
@@ -329,12 +336,13 @@ export class NudgeStore {
     toolPayload?: string;
     inputTokens?: number;
     outputTokens?: number;
+    metrics?: string;
     at?: number;
   }): MessageRow {
     const at = input.at ?? Date.now();
     const result = this.#db
       .prepare(
-        "INSERT INTO messages (session_id, handle, role, content, tool_payload, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (session_id, handle, role, content, tool_payload, input_tokens, output_tokens, metrics, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         input.sessionId,
@@ -344,6 +352,7 @@ export class NudgeStore {
         input.toolPayload ?? null,
         input.inputTokens ?? null,
         input.outputTokens ?? null,
+        input.metrics ?? null,
         at,
       );
     return {
@@ -355,6 +364,7 @@ export class NudgeStore {
       toolPayload: input.toolPayload ?? null,
       inputTokens: input.inputTokens ?? null,
       outputTokens: input.outputTokens ?? null,
+      metrics: input.metrics ?? null,
       createdAt: at,
     };
   }
@@ -727,6 +737,7 @@ function toMessage(row: Row): MessageRow {
     toolPayload: nullableString(row, "tool_payload"),
     inputTokens: nullableNumber(row, "input_tokens"),
     outputTokens: nullableNumber(row, "output_tokens"),
+    metrics: nullableString(row, "metrics"),
     createdAt: requiredNumber(row, "created_at"),
   };
 }

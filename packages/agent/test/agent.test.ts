@@ -219,15 +219,34 @@ describe("NudgeAgent.reply", () => {
     expect(session.compactedThrough).toBeGreaterThan(0);
   });
 
-  it("records model-reported token usage on assistant rows", async () => {
+  it("records model-reported token usage and turn metrics on assistant rows", async () => {
     const { agent, store } = makeAgent([
-      textChunks("counted reply", { inputTokens: 1_234, outputTokens: 56 }),
+      textChunks("counted reply", {
+        inputTokens: 1_234,
+        outputTokens: 56,
+        cacheReadTokens: 1_000,
+        reasoningTokens: 8,
+      }),
     ]);
     await agent.reply(HANDLE, "hi");
     const assistant = store
       .sessionMessages(store.activeSession(HANDLE)!.id)
       .find((message) => message.role === "assistant");
     expect(assistant).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
+
+    const metrics = JSON.parse(assistant!.metrics!) as Record<string, unknown>;
+    expect(metrics).toMatchObject({
+      provider: "scripted",
+      modelId: "mock-model-id",
+      finishReason: "stop",
+      steps: 1,
+      inputTokensTotal: 1_234,
+      cacheReadTokens: 1_000,
+      reasoningTokens: 8,
+    });
+    // Timing comes from the SDK's real clock, so assert shape only.
+    expect(metrics.durationMs).toBeTypeOf("number");
+    expect(metrics.retries).toBeUndefined();
   });
 
   it("executes file tools and records the tool payload", async () => {
@@ -269,6 +288,38 @@ describe("NudgeAgent.reply", () => {
     expect(harness.store.turnProgress(session!.id)).toBeUndefined();
   });
 
+  it("texts mid-turn progress through onProgress and keeps it out of history rows", async () => {
+    const { agent, store, source } = makeAgent([
+      toolCallChunks("send_update", { text: "checking your calendar" }),
+      "flight's on the calendar",
+    ]);
+    const updates: string[] = [];
+
+    await expect(
+      agent.reply(HANDLE, "add my flight", {
+        onProgress: async (text) => void updates.push(text),
+      }),
+    ).resolves.toBe("flight's on the calendar");
+
+    expect(updates).toEqual(["checking your calendar"]);
+    expect(source.calls[0]!.tools?.map((tool) => tool.name)).toContain("send_update");
+    expect(promptMessages(source.calls[0]!)[0]?.text).toContain("send_update");
+    // The update lives in the tool trace, not as a message row.
+    const messages = store.sessionMessages(store.activeSession(HANDLE)!.id);
+    expect(messages.map((message) => [message.role, message.content])).toEqual([
+      ["user", "add my flight"],
+      ["assistant", "flight's on the calendar"],
+    ]);
+    expect(messages.at(-1)?.toolPayload).toContain("send_update");
+  });
+
+  it("omits the send_update tool and its guidance without onProgress", async () => {
+    const { agent, source } = makeAgent(["ok"]);
+    await agent.reply(HANDLE, "hi");
+    expect(source.calls[0]!.tools?.map((tool) => tool.name)).not.toContain("send_update");
+    expect(promptMessages(source.calls[0]!)[0]?.text).not.toContain("send_update");
+  });
+
   it("executes bash and records the tool payload", async () => {
     const { agent, store } = makeAgent([
       toolCallChunks("bash", { command: "echo hi from bash" }),
@@ -281,6 +332,24 @@ describe("NudgeAgent.reply", () => {
       .find((message) => message.role === "assistant");
     expect(assistant?.toolPayload).toContain('"bash"');
     expect(assistant?.toolPayload).toContain("hi from bash");
+    // Each recorded call carries its wall-clock time, so a hung command is
+    // visible in the console as "bash · 120s" instead of a mystery gap.
+    const calls = JSON.parse(assistant!.toolPayload!) as { durationMs?: number }[];
+    expect(calls[0]?.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("clips long tool output around the middle so the status tail survives", async () => {
+    const { agent, store } = makeAgent([
+      toolCallChunks("bash", { command: "seq 1 300; exit 3" }),
+      "done",
+    ]);
+
+    await expect(agent.reply(HANDLE, "count")).resolves.toBe("done");
+    const assistant = store
+      .sessionMessages(store.activeSession(HANDLE)!.id)
+      .find((message) => message.role === "assistant");
+    expect(assistant?.toolPayload).toContain("chars omitted");
+    expect(assistant?.toolPayload).toContain("Command exited with code 3");
   });
 
   it("injects memory files into the next turn's prompt", async () => {

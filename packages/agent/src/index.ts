@@ -48,10 +48,14 @@ export {
 } from "./providers/chatgpt-auth.js";
 export { isContextOverflowError, SubscriptionAuthError } from "./providers/errors.js";
 export { createModelSources, type ProviderConfig } from "./providers/factory.js";
-export { ChatGptSubscriptionSource, OpenAiApiSource } from "./providers/ai-sdk.js";
+export {
+  ChatGptSubscriptionSource,
+  CustomEndpointSource,
+  OpenAiApiSource,
+} from "./providers/ai-sdk.js";
 export { SkillsLibrary, type SkillMeta } from "./skills.js";
 export { formatLocalTime, startOfDayInZone } from "./time.js";
-export { buildTools, type ToolContext } from "./tools.js";
+export { buildSendUpdateTool, buildTools, type ToolContext } from "./tools.js";
 export {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,

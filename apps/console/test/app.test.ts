@@ -209,6 +209,14 @@ describe("console API", () => {
       content: "hi!",
       inputTokens: 1_234,
       outputTokens: 56,
+      metrics: '{"ttftMs":420,"modelId":"gpt-5-mini","cacheReadTokens":1000}',
+    });
+    store.appendMessage({
+      sessionId: session.id,
+      handle: "+15551234567",
+      role: "assistant",
+      content: "again",
+      metrics: "not json",
     });
     store.setTurnProgress(
       session.id,
@@ -219,12 +227,23 @@ describe("console API", () => {
 
     const list = await json(application, "/api/threads");
     expect(list.body.total).toBe(1);
-    expect(list.body.sessions[0].messageCount).toBe(2);
+    expect(list.body.sessions[0].messageCount).toBe(3);
 
     const detail = await json(application, `/api/threads/${session.id}`);
     expect(detail.body.messages[0].content).toBe("hello there");
-    expect(detail.body.messages[0]).toMatchObject({ inputTokens: null, outputTokens: null });
+    expect(detail.body.messages[0]).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      metrics: null,
+    });
     expect(detail.body.messages[1]).toMatchObject({ inputTokens: 1_234, outputTokens: 56 });
+    expect(detail.body.messages[1].metrics).toEqual({
+      ttftMs: 420,
+      modelId: "gpt-5-mini",
+      cacheReadTokens: 1000,
+    });
+    // Malformed metrics JSON degrades to null instead of breaking the page.
+    expect(detail.body.messages[2].metrics).toBeNull();
     expect(detail.body.progress.toolCalls).toEqual([
       { tool: "bash", input: { command: "ls" }, output: "ok" },
     ]);

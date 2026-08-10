@@ -27,6 +27,47 @@ describe("createReplyHandler", () => {
     expect(store.isWebhookProcessed("m2")).toBe(true);
   });
 
+  it("forwards mid-turn progress updates straight to send, skipping the ledger", async () => {
+    const store = new NudgeStore(":memory:");
+    const sent: string[] = [];
+    const handler = createReplyHandler({
+      agent: {
+        reply: async (_handle, _text, options) => {
+          await options?.onProgress?.("checking flights");
+          return "booked";
+        },
+      },
+      store,
+      logger: makeLogger(),
+    });
+
+    await handler(batch, async (text) => void sent.push(text), new AbortController().signal);
+
+    expect(sent).toEqual(["checking flights", "booked"]);
+    expect(store.openOutbound()).toEqual([]);
+  });
+
+  it("drops progress updates once the run is aborted", async () => {
+    const store = new NudgeStore(":memory:");
+    const controller = new AbortController();
+    const sent: string[] = [];
+    const handler = createReplyHandler({
+      agent: {
+        reply: async (_handle, _text, options) => {
+          controller.abort();
+          await options?.onProgress?.("too late");
+          throw new DOMException("aborted", "AbortError");
+        },
+      },
+      store,
+      logger: makeLogger(),
+    });
+
+    await handler(batch, async (text) => void sent.push(text), controller.signal);
+
+    expect(sent).toEqual([]);
+  });
+
   it("sends nothing and no apology when the reply was steered", async () => {
     const store = new NudgeStore(":memory:");
     const logger = makeLogger();

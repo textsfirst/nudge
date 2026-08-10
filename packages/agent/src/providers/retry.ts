@@ -22,6 +22,8 @@ export interface StreamRetryOptions {
    */
   baseDelayMs?: number;
   logger?: Logger;
+  /** Called once per retried attempt, so callers can count retries per turn. */
+  onRetry?: () => void;
 }
 
 /** Stream parts that can precede an error without the call having "produced output". */
@@ -42,6 +44,7 @@ export function withStreamRetry(model: LanguageModel, options: StreamRetryOption
             return { ...result, stream: replay(probe.buffered, probe.reader) };
           }
           await probe.reader.cancel().catch(() => undefined);
+          options.onRetry?.();
           options.logger?.warn("The model stream failed before any output; retrying the call", {
             attempt,
             attempts,
