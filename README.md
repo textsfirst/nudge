@@ -1,6 +1,6 @@
 # Nudge
 
-Nudge is a self-hosted personal assistant that lives in iMessage. The owner texts a Photon Cloud number; an LLM agent replies, remembers, searches its own history, maintains skills, and — through a markdown-defined schedule — texts first.
+Nudge is an open, highly opinionated personal agent that lives in iMessage. You run your own instance: the owner texts a Photon Cloud number; an LLM agent replies, remembers, searches its own history, maintains skills, and — through a markdown-defined schedule — texts first.
 
 There is deliberately no command system. Threads roll over silently (at local midnight and after idle gaps) with an LLM-written carryover summary, long threads compact instead of truncating, and "start over" or "remind me every morning" are just things you say in conversation.
 
@@ -9,6 +9,7 @@ There is deliberately no command system. Threads roll over silently (at local mi
 The pnpm workspace keeps the replaceable boundaries small:
 
 - `apps/server` — configuration, HTTP lifecycle, SYSTEM.md loading, the scheduler, ledger-backed outbound delivery, and the OAuth login CLI
+- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, and secrets
 - `packages/agent` — the tool-calling agent loop (Vercel AI SDK), prompt stack, thread lifecycle (rollover/compaction/carryover), the file workspace with per-path validators, and model providers
 - `packages/photon` — signed webhook handling, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
 - `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and webhook dedupe
@@ -107,6 +108,23 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 Note: Nudge can only text you proactively after you have texted it at least once — it needs one inbound message to learn the conversation's space id.
 
+## The console
+
+A local web app for everything you'd otherwise SSH in for:
+
+- **Threads** — browse every conversation, read messages (tool calls included), search all history, end the active thread, delete threads or single messages
+- **Files** — edit SYSTEM.md, SCHEDULE.md (with a live parse preview and next-run times), memory files (with budget meters), and skills, all validated by the same rules the agent's writes go through
+- **Config** — edit `nudge.config.yaml` with live schema validation
+- **Secrets** — manage `.env` write-only; values are never sent to the browser
+
+```bash
+pnpm console                          # dev: API on :3100, UI on :5174
+pnpm --filter @nudge/console build    # build the UI
+pnpm console:start                    # serve API + built UI on :3100
+```
+
+The console binds to `127.0.0.1` and has no auth of its own — it edits your secrets and prompt, so reach it remotely only through a tunnel you trust (Tailscale, `ssh -L`). `CONSOLE_PORT` and `CONSOLE_HOST` override the defaults. It reads the same SQLite file as the server (WAL + busy timeout make the two processes safe together).
+
 ## Photon transport note
 
 Photon's inbound delivery is a signed HTTP webhook; the supported cloud send path is `space.send(...)` from `spectrum-ts`. Nudge verifies raw-body signatures via `app.webhook(...)`, replies through the webhook's rehydrated space, and sends proactively by persisting each space id and rehydrating it later with `space.get(id)`. All Photon-specific code stays behind the transport interface in `packages/photon`.
@@ -133,7 +151,7 @@ Settings live in `nudge.config.yaml` (copy `nudge.config.example.yaml`); secrets
 | `data_dir` | `.data` | SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ |
 | `threads.idle_hours` | `6` | Idle gap before a thread rolls over |
 | `threads.debounce_ms` | `2500` | Burst window before replying |
-| `agent.max_tool_steps` | `8` | Agent loop step cap per turn |
+| `agent.max_tool_steps` | `64` | Runaway-loop backstop per turn (the agent winds down gracefully near it) |
 | `agent.max_history_messages` | `40` | Thread length before compaction |
 | `server.port` | `3000` | HTTP port (a `PORT` env var overrides it, e.g. Conductor's per-workspace ports) |
 | `server.log_level` | `info` | `debug`, `info`, `warn`, or `error` |
@@ -163,6 +181,7 @@ Use a single server process: the scheduler's claims, webhook dedupe, and debounc
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - OAuth tokens, API keys, and Photon secrets are never logged. `.env`, `nudge.config.yaml`, and `.data` are gitignored.
+- The console binds to localhost only, returns secret names but never values, and applies the same per-file validation and traversal guards as the agent's file tools.
 
 The ChatGPT subscription endpoint and its OAuth contract are not part of the standard public OpenAI API. The implementation follows the current first-party OAuth and account-header behavior in [openai/codex](https://github.com/openai/codex) and is isolated so upstream changes are contained.
 
@@ -170,6 +189,8 @@ The ChatGPT subscription endpoint and its OAuth contract are not part of the sta
 
 ```bash
 pnpm dev              # watch the server
+pnpm console          # watch the web console (API :3100, UI :5174)
+pnpm console:start    # serve the built console on :3100
 pnpm auth:chatgpt     # run device-code OAuth
 pnpm build            # compile all packages
 pnpm typecheck        # build, then type-check all packages

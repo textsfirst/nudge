@@ -122,4 +122,52 @@ describe("NudgeStore", () => {
     expect(store.isWebhookProcessed("m1")).toBe(true);
     store.markWebhookProcessed("m1");
   });
+
+  it("lists sessions newest-first with counts and previews", () => {
+    const store = new NudgeStore(":memory:");
+    const first = store.startSession(HANDLE, 1_000);
+    store.appendMessage({ sessionId: first.id, handle: HANDLE, role: "user", content: "hello" });
+    store.appendMessage({ sessionId: first.id, handle: HANDLE, role: "assistant", content: "hi!" });
+    store.endSession(first.id, "midnight", 2_000);
+    const second = store.startSession(HANDLE, 3_000);
+
+    const { sessions, total } = store.listSessions();
+    expect(total).toBe(2);
+    expect(sessions.map((session) => session.id)).toEqual([second.id, first.id]);
+    expect(sessions[1]?.messageCount).toBe(2);
+    expect(sessions[1]?.preview).toBe("hi!");
+    expect(sessions[0]?.messageCount).toBe(0);
+    expect(sessions[0]?.preview).toBeNull();
+
+    const paged = store.listSessions({ limit: 1, offset: 1 });
+    expect(paged.sessions.map((session) => session.id)).toEqual([first.id]);
+    expect(paged.total).toBe(2);
+  });
+
+  it("deletes messages and whole sessions, pruning the search index", () => {
+    const store = new NudgeStore(":memory:");
+    const session = store.startSession(HANDLE, 1_000);
+    const kept = store.appendMessage({
+      sessionId: session.id,
+      handle: HANDLE,
+      role: "user",
+      content: "keep the dentist note",
+    });
+    const dropped = store.appendMessage({
+      sessionId: session.id,
+      handle: HANDLE,
+      role: "assistant",
+      content: "delete this embarrassing reply",
+    });
+
+    expect(store.deleteMessage(dropped.id)).toBe(true);
+    expect(store.deleteMessage(dropped.id)).toBe(false);
+    expect(store.sessionMessages(session.id).map((message) => message.id)).toEqual([kept.id]);
+    expect(store.searchMessages("embarrassing")).toHaveLength(0);
+
+    expect(store.deleteSession(session.id)).toBe(true);
+    expect(store.sessionById(session.id)).toBeUndefined();
+    expect(store.searchMessages("dentist")).toHaveLength(0);
+    expect(store.listSessions().total).toBe(0);
+  });
 });

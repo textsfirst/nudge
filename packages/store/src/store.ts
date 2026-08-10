@@ -28,6 +28,12 @@ export interface MessageRow {
   createdAt: number;
 }
 
+/** A session with the aggregates the console's thread list shows. */
+export interface SessionSummaryRow extends SessionRow {
+  messageCount: number;
+  preview: string | null;
+}
+
 export interface SpaceRow {
   handle: string;
   spaceId: string;
@@ -133,6 +139,9 @@ export class NudgeStore {
     this.#db = new DatabaseSync(path);
     this.#db.exec("PRAGMA journal_mode = WAL");
     this.#db.exec("PRAGMA foreign_keys = ON");
+    // The console opens the same file from its own process; wait out short
+    // write locks instead of failing immediately.
+    this.#db.exec("PRAGMA busy_timeout = 5000");
     this.#db.exec(SCHEMA);
   }
 
@@ -178,6 +187,51 @@ export class NudgeStore {
     this.#db
       .prepare("UPDATE sessions SET summary = ?, compacted_through = ? WHERE id = ?")
       .run(summary, throughMessageId, id);
+  }
+
+  /**
+   * Sessions newest-first with the aggregates the console's thread list
+   * shows. Console-facing; the agent never sees this.
+   */
+  listSessions(options?: { limit?: number; offset?: number }): {
+    sessions: SessionSummaryRow[];
+    total: number;
+  } {
+    const limit = options?.limit ?? 50;
+    const offset = options?.offset ?? 0;
+    const totalRow = this.#db.prepare("SELECT COUNT(*) AS n FROM sessions").get();
+    const sessions = this.#db
+      .prepare(
+        `SELECT sessions.*,
+           (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.id) AS message_count,
+           (SELECT content FROM messages WHERE messages.session_id = sessions.id
+              ORDER BY messages.id DESC LIMIT 1) AS preview
+         FROM sessions ORDER BY sessions.id DESC LIMIT ? OFFSET ?`,
+      )
+      .all(limit, offset)
+      .map((row) => ({
+        ...toSession(row),
+        messageCount: Number(row.message_count),
+        preview: row.preview === null ? null : String(row.preview),
+      }));
+    return { sessions, total: Number(totalRow?.n ?? 0) };
+  }
+
+  sessionById(id: number): SessionRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM sessions WHERE id = ?").get(id);
+    return row ? toSession(row) : undefined;
+  }
+
+  /** Delete a session and all its messages (the FTS trigger prunes the index). */
+  deleteSession(id: number): boolean {
+    this.#db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
+    const result = this.#db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    return result.changes > 0;
+  }
+
+  deleteMessage(id: number): boolean {
+    const result = this.#db.prepare("DELETE FROM messages WHERE id = ?").run(id);
+    return result.changes > 0;
   }
 
   // -- messages ------------------------------------------------------------

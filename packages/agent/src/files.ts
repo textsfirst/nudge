@@ -62,7 +62,7 @@ export class FileWorkspace {
     }
     const outcome = applyEdits(readFileSync(check.abs, "utf8"), edits);
     if (!outcome.ok) return outcome.error;
-    const problem = validate(check.rel, outcome.result);
+    const problem = validateDataFile(check.rel, outcome.result);
     if (problem) return `Error: not saved. ${problem}`;
 
     writeFileSync(check.abs, outcome.result);
@@ -77,7 +77,7 @@ export class FileWorkspace {
     if (READ_ONLY.has(check.rel)) {
       return `Error: ${check.rel} is owner/system-maintained and read-only to you.`;
     }
-    const problem = validate(check.rel, content);
+    const problem = validateDataFile(check.rel, content);
     if (problem) return `Error: not saved. ${problem}`;
 
     mkdirSync(dirname(check.abs), { recursive: true });
@@ -141,8 +141,11 @@ function isHidden(rel: string): boolean {
   return HIDDEN_PREFIXES.some((prefix) => base.startsWith(prefix));
 }
 
-/** Per-path write validation. Returns a problem description, or undefined. */
-function validate(rel: string, content: string): string | undefined {
+/**
+ * Per-path write validation. Returns a problem description, or undefined.
+ * Exported for the console, whose owner-facing editor enforces the same rules.
+ */
+export function validateDataFile(rel: string, content: string): string | undefined {
   if (rel === "SCHEDULE.md") {
     const { errors } = parseSchedule(content);
     if (errors.length > 0) {

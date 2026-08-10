@@ -1,8 +1,16 @@
 import { join } from "node:path";
 import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
 import type { MessageRow, NudgeStore, SessionRow } from "@nudge/store";
-import { stepCountIs, streamText, type ModelMessage, type StepResult, type ToolSet } from "ai";
+import {
+  stepCountIs,
+  streamText,
+  type LanguageModel,
+  type ModelMessage,
+  type StepResult,
+  type ToolSet,
+} from "ai";
 import { FileWorkspace } from "./files.js";
+import { createLoopGuard } from "./loop.js";
 import { MemoryFiles } from "./memory.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
@@ -22,6 +30,7 @@ export interface NudgeAgentOptions {
   systemFile: () => string | undefined;
   idleRolloverMs?: number;
   compactAfterMessages?: number;
+  /** Backstop against runaway tool loops (default 64), not a per-task budget — see loop.ts. */
   maxToolSteps?: number;
   /** Firecrawl credentials; when absent the web tools are omitted entirely. */
   web?: FirecrawlOptions;
@@ -61,7 +70,7 @@ export class NudgeAgent {
     });
     this.#idleRolloverMs = options.idleRolloverMs ?? 6 * 60 * 60 * 1000;
     this.#compactAfterMessages = options.compactAfterMessages ?? 40;
-    this.#maxToolSteps = options.maxToolSteps ?? 8;
+    this.#maxToolSteps = options.maxToolSteps ?? 64;
   }
 
   /**
@@ -327,12 +336,20 @@ export class NudgeAgent {
       if (params.stepSink) params.stepSink.length = 0;
       try {
         const model = await source.languageModel();
+        // Stateful (once-per-streak warning), so one guard per attempt.
+        const guard = params.tools
+          ? createLoopGuard({ maxToolSteps: this.#maxToolSteps, logger: this.#options.logger })
+          : undefined;
         const result = streamText({
           model,
           system: params.system,
           messages: params.messages,
-          ...(params.tools
-            ? { tools: params.tools, stopWhen: stepCountIs(this.#maxToolSteps) }
+          ...(params.tools && guard
+            ? {
+                tools: params.tools,
+                stopWhen: [stepCountIs(this.#maxToolSteps), guard.stopCondition],
+                prepareStep: guard.prepareStep,
+              }
             : {}),
           ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
           ...(params.stepSink
@@ -345,7 +362,7 @@ export class NudgeAgent {
           providerOptions: { openai: { ...this.#options.modelOptions, store: false } },
         });
         // Resolving .text consumes the complete SSE response (all tool steps included).
-        const text = await result.text;
+        let text = await result.text;
         // streamText swallows stream errors into an empty result rather than
         // rejecting; surface an abort explicitly so callers can tell a steered
         // turn from a model failure.
@@ -353,6 +370,15 @@ export class NudgeAgent {
           throw new DOMException("The turn was aborted mid-generation", "AbortError");
         }
         const payload = params.tools ? serializeSteps(await result.steps) : undefined;
+        // No text after tool calls means a stop condition cut the loop before
+        // the model wrote its reply. Give it one tool-less call to report
+        // status, so the owner gets a message instead of an error.
+        if (!text.trim() && payload) {
+          text = await this.#wrapUpCutOffTurn(model, params, payload);
+          if (params.abortSignal?.aborted) {
+            throw new DOMException("The turn was aborted mid-generation", "AbortError");
+          }
+        }
         return { text, ...(payload ? { toolPayload: payload } : {}) };
       } catch (error) {
         const next = sources[index + 1];
@@ -368,6 +394,40 @@ export class NudgeAgent {
       }
     }
     throw new Error("No model source produced a response");
+  }
+
+  async #wrapUpCutOffTurn(
+    model: LanguageModel,
+    params: { system: string; messages: ModelMessage[]; abortSignal?: AbortSignal },
+    toolPayload: string,
+  ): Promise<string> {
+    this.#options.logger.warn("The tool loop was cut off before a reply; asking for a wrap-up");
+    const trace =
+      toolPayload.length > 4_000 ? `${toolPayload.slice(0, 4_000)}…` : toolPayload;
+    const result = streamText({
+      model,
+      system: params.system,
+      messages: [
+        ...params.messages,
+        {
+          role: "user",
+          content:
+            "[System note: your tool loop was stopped before you wrote a reply. Tool calls " +
+            `already made this turn: ${trace}. No tools are available now — reply to the ` +
+            "owner with what you accomplished and what remains.]",
+        },
+      ],
+      ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+      providerOptions: { openai: { ...this.#options.modelOptions, store: false } },
+    });
+    const text = (await result.text).trim();
+    // The wrap-up must never leave the owner with nothing: a cut-off turn that
+    // also fails to summarize itself falls back to a fixed status message.
+    return (
+      text ||
+      "I hit my step limit mid-task and had to stop before finishing. " +
+        "Ask me to continue and I'll pick up where I left off."
+    );
   }
 
   #serialized<T>(handle: string, work: () => Promise<T>): Promise<T> {

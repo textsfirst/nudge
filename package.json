@@ -10,6 +10,8 @@
     "dev": "pnpm --filter @nudge/server dev",
     "start": "pnpm --filter @nudge/server start",
     "auth:chatgpt": "pnpm --filter @nudge/server auth:chatgpt",
+    "console": "pnpm --filter @nudge/console dev",
+    "console:start": "pnpm --filter @nudge/console start",
     "build": "pnpm -r build",
     "typecheck": "pnpm build && pnpm -r typecheck",
     "test": "pnpm -r test",
