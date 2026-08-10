@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { loadConfig, parseSettings } from "../src/config.js";
+import { loadConfig, parseSettings, SECRET_SPECS } from "../src/config.js";
 
 const SECRETS = {
   SPECTRUM_PROJECT_ID: "project-id",
@@ -12,6 +13,7 @@ describe("parseSettings", () => {
     const settings = parseSettings('owner_handle: "+15551234567"');
     expect(settings.provider.selected).toBe("chatgpt-subscription");
     expect(settings.provider.chatgpt.auth_file).toBe(".data/chatgpt-auth.json");
+    expect(settings.provider.openai.fallback_enabled).toBe(false);
     expect(settings.tools.bash_enabled).toBe(true);
     expect(settings.threads.debounce_ms).toBe(2_500);
     expect(settings.agent.max_tool_steps).toBe(64);
@@ -130,5 +132,15 @@ describe("loadConfig", () => {
     expect(config.port).toBe(8080);
     expect(config.logLevel).toBe("debug");
     expect(config.timeZone).toBe("America/New_York");
+  });
+});
+
+describe("secret metadata", () => {
+  it("keeps .env.example aligned with the validated secret list", () => {
+    const example = readFileSync(new URL("../../../.env.example", import.meta.url), "utf8");
+    const documentedKeys = [...example.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map(
+      (match) => match[1],
+    );
+    expect(documentedKeys).toEqual(SECRET_SPECS.map((secret) => secret.key));
   });
 });

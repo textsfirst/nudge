@@ -111,6 +111,22 @@ describe("Scheduler", () => {
     expect(runTask).toHaveBeenCalledOnce();
   });
 
+  it("does not re-arm a completed one-shot when its prompt is edited", async () => {
+    const { scheduler, schedulePath, runTask, setNow } = harness(
+      "## Passport\nwhen: 2026-08-10 09:00 once\nRenew the passport.",
+    );
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledOnce();
+
+    writeFileSync(
+      schedulePath,
+      "## Passport\nwhen: 2026-08-10 09:00 once\nRenew the passport and take a photo.",
+    );
+    setNow(Date.UTC(2026, 7, 10, 14, 0, 0));
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledOnce();
+  });
+
   it("stays quiet when the task returns [SILENT]", async () => {
     const { scheduler, sent, setNow } = harness(
       "## Check\nwhen: every day at 13:00\nAnything?",
@@ -171,5 +187,30 @@ describe("DeliveryService", () => {
       logger,
     );
     await expect(delivery.deliver("+19990000000", "hello", "nudge")).resolves.toBe(false);
+  });
+
+  it("marks repeatedly failing sends terminal after three attempts", async () => {
+    const store = new NudgeStore(":memory:");
+    store.rememberSpace(OWNER, "space-1", "imessage");
+    const failingLogger = { ...logger, error: vi.fn() };
+    const delivery = new DeliveryService(
+      store,
+      {
+        sendToSpace: async () => {
+          throw new Error("transport down");
+        },
+      },
+      failingLogger,
+    );
+
+    await expect(delivery.deliver(OWNER, "hello", "nudge")).resolves.toBe(false);
+    await delivery.recover();
+    await delivery.recover();
+
+    expect(store.openOutbound()).toEqual([]);
+    expect(failingLogger.error).toHaveBeenLastCalledWith(
+      "Outbound send failed and exhausted its retry limit",
+      expect.objectContaining({ attempt: 3 }),
+    );
   });
 });

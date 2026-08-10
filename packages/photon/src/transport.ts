@@ -1,8 +1,4 @@
-import {
-  Spectrum,
-  type AnyPlatformDef,
-  type PlatformProviderConfig,
-} from "@spectrum-ts/core";
+import { Spectrum } from "@spectrum-ts/core";
 import { imessage } from "@spectrum-ts/imessage";
 import { splitMessage } from "./chunk.js";
 import {
@@ -67,7 +63,7 @@ export async function createPhotonTransport(
   // spectrum-ts 12.7's public iMessage definition loses its config type through
   // an Omit intersection. The documented zero-argument call is correct at runtime.
   const provider = (
-    imessage.config as unknown as () => PlatformProviderConfig<AnyPlatformDef>
+    imessage.config as unknown as () => ReturnType<typeof imessage.config>
   )();
   const spectrum = await Spectrum({
     projectId: config.projectId,
@@ -113,9 +109,10 @@ export async function createPhotonTransport(
       return spectrum.webhook({ body: request.body, headers }, async (space, message) => {
         const sender = message.sender?.id;
         if (message.content.type !== "text" || !sender) {
-          config.logger.debug("Ignoring a non-text Photon message", {
+          config.logger.warn("Ignoring a Photon message with an unsupported payload", {
             messageId: message.id,
             contentType: message.content.type,
+            senderPresent: Boolean(sender),
           });
           return;
         }
@@ -136,11 +133,11 @@ export async function createPhotonTransport(
     },
 
     async sendToSpace(spaceId, text) {
-      const instance = (spectrum as unknown as Record<string, unknown>).imessage as
-        | { space: { get(id: string): Promise<SendableSpace> } }
-        | undefined;
-      if (!instance?.space?.get) {
-        throw new Error("The spectrum iMessage instance does not expose space.get");
+      const instance: unknown = Reflect.get(spectrum, "imessage");
+      if (!hasSpaceGetter(instance)) {
+        throw new Error(
+          "The Spectrum iMessage instance does not expose space.get; check the installed spectrum-ts version",
+        );
       }
       const space = await instance.space.get(spaceId);
       await sendAll(space, text);
@@ -153,4 +150,17 @@ export async function createPhotonTransport(
       await spectrum.stop();
     },
   };
+}
+
+function hasSpaceGetter(value: unknown): value is {
+  space: { get(id: string): Promise<SendableSpace> };
+} {
+  if (typeof value !== "object" || value === null || !("space" in value)) return false;
+  const space = value.space;
+  return (
+    typeof space === "object" &&
+    space !== null &&
+    "get" in space &&
+    typeof space.get === "function"
+  );
 }

@@ -1,5 +1,6 @@
 export {
   NudgeStore,
+  type MaintenanceResult,
   type MessageRole,
   type MessageRow,
   type OutboundKind,

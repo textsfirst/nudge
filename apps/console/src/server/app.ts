@@ -1,7 +1,8 @@
-import { statSync } from "node:fs";
+import { statSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { ChatGptAuthManager } from "@nudge/agent";
 import { parseSchedule, nextRun } from "@nudge/schedule";
-import { parseSettings, CONFIG_FILE } from "@nudge/server/config";
-import { writeFileSync } from "node:fs";
+import { parseSettings, CONFIG_FILE, type Settings } from "@nudge/server/config";
 import { Elysia } from "elysia";
 import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./connections.js";
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
@@ -29,6 +30,18 @@ export function createConsoleApp(
       .get("/api/status", async () => {
         const snapshot = context.settings();
         const port = snapshot.settings?.server.port ?? 3000;
+        const server = await probe(`http://127.0.0.1:${port}/healthz`);
+        const missingSecrets = listSecrets(context.envPath)
+          .filter((secret) => secret.required && !secret.set)
+          .map((secret) => secret.key);
+        const authError = snapshot.settings
+          ? await subscriptionAuthError(context.root, snapshot.settings)
+          : null;
+        const localStartupError =
+          snapshot.error ??
+          (missingSecrets.length > 0
+            ? `Missing required secrets: ${missingSecrets.join(", ")}`
+            : authError);
         return {
           workspaceRoot: context.root,
           dataDir: context.dataDir(snapshot.settings),
@@ -36,7 +49,9 @@ export function createConsoleApp(
           configError: snapshot.error ?? null,
           ownerHandle: snapshot.settings?.owner_handle ?? null,
           serverPort: port,
-          serverUp: await probe(`http://127.0.0.1:${port}/healthz`),
+          serverUp: server.reachable,
+          serverHealthy: server.healthy,
+          serverError: server.error ?? (!server.reachable ? localStartupError : null),
           dbExists: context.dbExists(),
         };
       })
@@ -267,11 +282,39 @@ function parseToolPayload(payload: string | null): unknown[] | null {
   }
 }
 
-async function probe(url: string): Promise<boolean> {
+async function probe(url: string): Promise<{
+  reachable: boolean;
+  healthy: boolean;
+  error: string | null;
+}> {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
-    return response.ok;
+    const body = (await response.json().catch(() => null)) as
+      | { provider?: { error?: unknown } }
+      | null;
+    return {
+      reachable: true,
+      healthy: response.ok,
+      error:
+        typeof body?.provider?.error === "string"
+          ? body.provider.error
+          : response.ok
+            ? null
+            : `Health check failed with HTTP ${response.status}`,
+    };
   } catch {
-    return false;
+    return { reachable: false, healthy: false, error: null };
+  }
+}
+
+async function subscriptionAuthError(root: string, settings: Settings): Promise<string | null> {
+  if (settings.provider.selected !== "chatgpt-subscription") return null;
+  try {
+    await new ChatGptAuthManager({
+      authFile: resolve(root, settings.provider.chatgpt.auth_file),
+    }).validateStored();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
   }
 }

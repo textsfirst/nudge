@@ -58,8 +58,14 @@ export function Layout() {
         </nav>
         <div className="flex items-center justify-between border-t border-border px-2 pt-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <StatusDot ok={status.data?.serverUp ?? false} />
-            {status.data?.serverUp ? "Server up" : "Server down"}
+            <StatusDot
+              ok={(status.data?.serverUp && status.data?.serverHealthy) ?? false}
+            />
+            {status.data?.serverUp && status.data?.serverHealthy
+              ? "Server up"
+              : status.data?.serverUp
+                ? "Server unhealthy"
+                : "Server down"}
           </div>
           <button
             type="button"

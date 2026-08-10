@@ -23,7 +23,7 @@
   },
   "scripts": {
     "dev": "tsx watch --conditions=development src/index.ts",
-    "start": "node dist/index.js",
+    "start": "pnpm --filter @nudge/server... build && node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

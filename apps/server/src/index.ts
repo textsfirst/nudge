@@ -1,7 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { createModelSources, DATA_README, NudgeAgent, syncBundledContent } from "@nudge/agent";
+import {
+  ChatGptAuthManager,
+  createModelSources,
+  DATA_README,
+  NudgeAgent,
+  syncBundledContent,
+} from "@nudge/agent";
 import { createPhotonTransport } from "@nudge/photon";
 import { NudgeStore } from "@nudge/store";
 import { loadConfig } from "./config.js";
@@ -10,15 +16,23 @@ import { loadWorkspaceEnvironment } from "./env.js";
 import { buildGwsBashEnv, readGoogleAccounts } from "./google.js";
 import { buildConnectionProbes, ConnectionHealthMonitor } from "./health.js";
 import { createHttpApp } from "./http.js";
+import type { ProviderHealth } from "./http.js";
 import { createLogger } from "./logger.js";
 import { createReplyHandler } from "./reply.js";
 import { Scheduler } from "./scheduler.js";
 import { createSystemFileReader } from "./system-file.js";
 
-function ensureDataReadme(dataDir: string): void {
+function ensureDataReadme(dataDir: string, logger: ReturnType<typeof createLogger>): void {
   mkdirSync(dataDir, { recursive: true });
   const path = join(dataDir, "README.md");
-  if (!existsSync(path) || readFileSync(path, "utf8") !== DATA_README) {
+  if (!existsSync(path)) {
+    writeFileSync(path, DATA_README);
+    return;
+  }
+  if (readFileSync(path, "utf8") !== DATA_README) {
+    logger.warn("Refreshing the system-managed data README; local edits are not preserved", {
+      path,
+    });
     writeFileSync(path, DATA_README);
   }
 }
@@ -27,9 +41,33 @@ async function main(): Promise<void> {
   loadWorkspaceEnvironment();
   const config = loadConfig();
   const logger = createLogger(config.logLevel);
-  ensureDataReadme(config.dataDir);
+  ensureDataReadme(config.dataDir, logger);
   syncBundledContent({ dataDir: config.dataDir, logger });
   const store = new NudgeStore(config.dbPath);
+  const providerHealth: ProviderHealth = { ok: true, degraded: false, error: null };
+  if (config.provider.selected === "chatgpt-subscription") {
+    const fallbackEnabled = Boolean(
+      config.provider.openAiFallbackEnabled && config.provider.openAiApiKey,
+    );
+    if (fallbackEnabled) {
+      logger.warn("OpenAI API fallback is enabled; subscription auth failures may use API credits");
+    }
+    try {
+      await new ChatGptAuthManager({
+        authFile: config.provider.chatGptAuthFile,
+      }).credentials();
+    } catch (error) {
+      providerHealth.ok = fallbackEnabled;
+      providerHealth.degraded = fallbackEnabled;
+      providerHealth.error = error instanceof Error ? error.message : String(error);
+      logger.error(
+        fallbackEnabled
+          ? "ChatGPT subscription auth failed; API fallback will be used"
+          : "ChatGPT subscription auth failed; messages cannot be answered until it is fixed",
+        { error: providerHealth.error },
+      );
+    }
+  }
   const sources = createModelSources(config.provider);
   const agent = new NudgeAgent({
     sources,
@@ -75,13 +113,14 @@ async function main(): Promise<void> {
     logger,
   });
 
-  const server = createServer(createHttpApp(transport, logger));
+  const server = createServer(createHttpApp(transport, logger, providerHealth));
   server.listen(config.port, () => {
     logger.info("Nudge is listening", {
       port: config.port,
       sources: sources.map((source) => source.id),
       webhookPath: "/webhooks/photon",
       timeZone: config.timeZone,
+      providerHealth,
     });
   });
 

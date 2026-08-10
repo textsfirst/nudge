@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { NudgeStore } from "../src/store.js";
 
@@ -121,6 +125,98 @@ describe("NudgeStore", () => {
     store.markWebhookProcessed("m1");
     expect(store.isWebhookProcessed("m1")).toBe(true);
     store.markWebhookProcessed("m1");
+  });
+
+  it("bounds webhook and outbound bookkeeping", () => {
+    const store = new NudgeStore(":memory:");
+    store.markWebhookProcessed("old", 1_000);
+    store.markWebhookProcessed("recent", 9_500);
+    const sent = store.enqueueOutbound(HANDLE, "sent", "reply", 1_000);
+    store.markOutbound(sent, "sent", 1_500);
+    store.enqueueOutbound(HANDLE, "expired", "nudge", 1_000);
+    store.enqueueOutbound(HANDLE, "fresh", "nudge", 9_500);
+
+    expect(
+      store.maintain({
+        now: 10_000,
+        webhookRetentionMs: 1_000,
+        outboundRetentionMs: 1_000,
+        outboundMaxAgeMs: 1_000,
+      }),
+    ).toEqual({ expiredOutbound: 1, prunedOutbound: 1, prunedWebhooks: 1 });
+    expect(store.isWebhookProcessed("old")).toBe(false);
+    expect(store.isWebhookProcessed("recent")).toBe(true);
+    expect(store.openOutbound(1_000, 3, 10_000).map((entry) => entry.body)).toEqual(["fresh"]);
+  });
+
+  it("migrates and prunes schedule state", () => {
+    const store = new NudgeStore(":memory:");
+    store.ensureScheduleBaseline("legacy", 1_000);
+    store.finishScheduleRun("legacy", 2_000, true);
+    store.ensureScheduleBaseline("orphan", 1_000);
+
+    store.migrateScheduleState("legacy", "stable");
+    expect(store.scheduleState("stable")).toMatchObject({ lastRunAt: 2_000, completed: true });
+    expect(store.scheduleState("legacy")).toMatchObject({ lastRunAt: null, completed: false });
+    expect(store.pruneScheduleState(["stable"])).toBe(1);
+  });
+
+  it("adopts a pre-versioned database and rebuilds FTS for existing messages", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nudge-store-migration-"));
+    const path = join(dir, "legacy.db");
+    try {
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`
+        CREATE TABLE sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          handle TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          last_activity_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          end_reason TEXT,
+          summary TEXT,
+          carryover TEXT,
+          compacted_through INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES sessions(id),
+          handle TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          tool_payload TEXT,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions (handle, started_at, last_activity_at)
+          VALUES ('${HANDLE}', 1, 1);
+        INSERT INTO messages (session_id, handle, role, content, created_at)
+          VALUES (1, '${HANDLE}', 'user', 'legacy searchable message', 1);
+      `);
+      legacy.close();
+
+      const store = new NudgeStore(path);
+      expect(store.searchMessages("searchable")).toHaveLength(1);
+      store.close();
+
+      const upgraded = new DatabaseSync(path);
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+      upgraded.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a database created by a newer schema", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nudge-store-future-"));
+    const path = join(dir, "future.db");
+    try {
+      const future = new DatabaseSync(path);
+      future.exec("PRAGMA user_version = 999");
+      future.close();
+      expect(() => new NudgeStore(path)).toThrow(/newer than this Nudge build supports/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("lists sessions newest-first with counts and previews", () => {

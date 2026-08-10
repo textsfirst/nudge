@@ -17,6 +17,8 @@ The pnpm workspace keeps the replaceable boundaries small:
 
 ### Files are the API
 
+The agent's world is a real filesystem on a real box, deliberately. Models are RL-trained on exactly this loop — list, read, grep, edit, run — so a directory of plain files is the interface their competence transfers to, not a compromise. This is a hard boundary for the design: anything else the system needs (persistence, sync, backups) sits behind the filesystem, invisible to the model, and never replaces it as the agent's interface.
+
 The core tools are file operations scoped to `data_dir`: `list_files`, `read_file` (paged — long files return a `Use offset=N to continue` footer), `edit_file` (exact-match in-place edits), and `write_file` (whole-file replace) — the latter two share per-file validation. Genuine computation comes from `search_history` (FTS5), `bash` (runs with `data_dir` as its working directory — a default, not a sandbox; disable with `tools.bash_enabled: false`), and optional `web_search`/`web_extract` (Firecrawl). Everything else — schedule, memory, skills — is a markdown file convention documented in a system-written `data_dir/README.md` that the agent reads on demand. New capabilities cost a convention, not a tool schema in every prompt. Control signals are in-band tokens: `[SILENT]` (don't reply) and `[NEW_THREAD]` (reset the thread).
 
 Writes are validated per path and rejected with diagnostics the model can act on: SCHEDULE.md must parse, MEMORY.md/USER.md have hard character budgets, `skills/*/SKILL.md` needs frontmatter, and SYSTEM.md plus the README are read-only to the agent. Secrets (`chatgpt-auth.json`) and runtime state (`nudge.db`) are invisible to it.
@@ -40,7 +42,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
   Remind me to renew my passport.
   ```
 
-  The `when:` grammar is parsed by code, never interpreted by the model at runtime: `every day at 7:30`, `weekdays at 7:30`, `weekends at 9:00`, `every monday at 18:00`, `every 2 hours`, `every 30 minutes`, `YYYY-MM-DD HH:MM once`, or `cron: 30 7 * * 1-5`. Times are `timezone` local. The agent edits this file itself when you ask for reminders; you can also hand-edit it — parse problems get texted to you rather than silently ignored.
+  The `when:` grammar is parsed by code, never interpreted by the model at runtime: `every day at 7:30`, `weekdays at 7:30`, `weekends at 9:00`, `every monday at 18:00`, `every 2 hours`, `every 30 minutes`, `YYYY-MM-DD HH:MM once`, or `cron: 30 7 * * 1-5`. Times are `timezone` local. Entry names are unique persistent identities, so editing a completed one-shot does not re-arm it; rename it to create a new entry. The agent edits this file itself when you ask for reminders; you can also hand-edit it — parse problems get texted to you rather than silently ignored.
 - **MEMORY.md and USER.md** — the agent's bounded curated memory (2,200 / 1,375 character budgets): notes to self and facts about you. Injected into every prompt; over-budget writes are rejected so the agent consolidates instead of hoarding.
 - **skills/** — the agent's procedural memory: `skills/<name>/SKILL.md` with agentskills.io-style frontmatter plus optional support files. The agent creates and improves these autonomously after solving hard problems; everything is plain markdown you can audit, edit, or delete.
 - **README.md** — system-written manual documenting all of the above formats for the agent (and for you).
@@ -51,6 +53,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 - A text arriving while a reply is still being generated steers it: the in-flight model call aborts, everything sent while busy folds into one follow-up turn (full history included), and no stale reply goes out. If the aborted turn had already run tools, a note recording those calls lands in history so the next turn doesn't redo them.
 - Every outbound message is journaled in a ledger before sending. On restart, sends that never started go out as-is; ones interrupted mid-send are retried with a visible "♻️ Recovered reply" marker, bounded to 3 attempts within 24 hours.
 - Scheduled entries claim crash-safely and never back-fill occurrences from before they existed; a one-shot that came due while the server was down fires late, once.
+- SQLite upgrades run as ordered transactional migrations, including a one-time FTS rebuild for pre-versioned databases. Webhook dedupe and terminal delivery records are pruned on a bounded schedule; conversation history remains owner-controlled in the console.
 
 ## Requirements
 
@@ -70,7 +73,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
    cp .env.example .env
    ```
 
-   Settings live in `nudge.config.yaml`; `.env` holds only secrets. There is no example file to copy — the first start of the server (or console) writes `nudge.config.yaml` with defaults and doc comments, and later versions append any new settings to it in place.
+   Settings live in `nudge.config.yaml`; `.env` holds only secrets. There is no settings example file to copy. The first start of the server (or console) writes `nudge.config.yaml` with defaults and doc comments, and later versions append any new settings to it in place.
 
 2. Put the credentials from the [Photon dashboard](https://app.photon.codes) in `.env`:
 
@@ -90,7 +93,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 3. For the default ChatGPT subscription provider, authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser.
 
-   To use only an API key instead: `provider.selected: openai-api` in `nudge.config.yaml` plus `OPENAI_API_KEY` in `.env`. With the subscription provider, a configured `OPENAI_API_KEY` + `provider.openai.fallback_enabled: true` is used only when subscription auth fails — ordinary model or network errors never silently spend API credits.
+   To use only an API key instead: `provider.selected: openai-api` in `nudge.config.yaml` plus `OPENAI_API_KEY` in `.env`. API fallback is off by default. With the subscription provider, a configured `OPENAI_API_KEY` + `provider.openai.fallback_enabled: true` is used only when subscription auth fails; startup and logs call out when it can spend API credits.
 
 4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
 
@@ -117,7 +120,7 @@ A local web app for everything you'd otherwise SSH in for:
 ```bash
 pnpm console                          # dev: API on :3100, UI on :5174
 pnpm --filter @nudge/console build    # build the UI
-pnpm console:start                    # serve API + built UI on :3100
+pnpm console:start                    # rebuild, then serve API + UI on :3100
 ```
 
 Google sign-in redirects back to the exact console address in your browser, so register that address (e.g. `http://localhost:3100/api/connections/google/callback` — and the `:5174` variant if you use the dev server) in your OAuth client; the wizard shows the exact string to copy.
@@ -155,7 +158,7 @@ Settings live in `nudge.config.yaml`; secrets live in `.env`. Both are gitignore
 | `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the subscription endpoint |
 | `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | OAuth credential file |
 | `provider.openai.model` | `gpt-5-mini` | Standard API model |
-| `provider.openai.fallback_enabled` | `true` | API-key fallback for subscription auth failures |
+| `provider.openai.fallback_enabled` | `false` | API-key fallback for subscription auth failures |
 | `model.reasoning_effort` | model default | `none` … `max` reasoning level |
 | `model.fast_mode` | `false` | Priority service tier for faster output |
 | `tools.bash_enabled` | `true` | Set `false` to remove the bash tool |
@@ -204,8 +207,9 @@ The ChatGPT subscription endpoint and its OAuth contract are not part of the sta
 
 ```bash
 pnpm dev              # watch the server
+pnpm start            # rebuild the server and dependencies, then run it
 pnpm console          # watch the web console (API :3100, UI :5174)
-pnpm console:start    # serve the built console on :3100
+pnpm console:start    # rebuild the console and dependencies, then serve it on :3100
 pnpm build            # compile all packages
 pnpm typecheck        # build, then type-check all packages
 pnpm test             # run unit tests

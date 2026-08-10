@@ -51,6 +51,9 @@ describe("console API", () => {
     expect(status).toBe(200);
     expect(body.configValid).toBe(true);
     expect(body.ownerHandle).toBe("+15551234567");
+    expect(body.serverUp).toBe(false);
+    expect(body.serverHealthy).toBe(false);
+    expect(body.serverError).toContain("Missing required secrets");
   });
 
   it("round-trips config edits and rejects invalid YAML with diagnostics", async () => {

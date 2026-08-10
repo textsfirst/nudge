@@ -1,4 +1,4 @@
-import type { Logger } from "@nudge/agent";
+import { SubscriptionAuthError, type Logger } from "@nudge/agent";
 import type { InboundBatch } from "@nudge/photon";
 import type { NudgeStore } from "@nudge/store";
 
@@ -48,7 +48,11 @@ export function createReplyHandler(deps: {
         error: error instanceof Error ? error.message : String(error),
       });
       try {
-        await send(APOLOGY);
+        await send(
+          error instanceof SubscriptionAuthError
+            ? `My ChatGPT sign-in needs attention. ${error.message}`
+            : APOLOGY,
+        );
       } catch {
         logger.error("Even the apology failed to send", { messageIds: batch.messageIds });
       }

@@ -103,11 +103,18 @@ export class Scheduler {
     this.#entries = entries;
     const now = this.#now();
     for (const entry of entries) {
+      store.migrateScheduleState(entry.legacyId, entry.id);
       store.ensureScheduleBaseline(entry.id, now);
     }
+    // A partially malformed file may omit entries only temporarily, so prune
+    // orphaned state only after a completely valid parse.
+    const prunedState = errors.length === 0
+      ? store.pruneScheduleState(entries.map((entry) => entry.id))
+      : 0;
     logger.info("Loaded schedule", {
       entries: entries.map((entry) => entry.name),
       errors: errors.length,
+      prunedState,
     });
 
     if (errors.length > 0 && hash !== this.#notifiedErrorHash) {

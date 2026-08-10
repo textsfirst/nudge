@@ -59,7 +59,16 @@ export interface OutboundRow {
   updatedAt: number;
 }
 
-const SCHEMA = `
+export interface MaintenanceResult {
+  expiredOutbound: number;
+  prunedOutbound: number;
+  prunedWebhooks: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CURRENT_SCHEMA_VERSION = 1;
+
+const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   handle TEXT NOT NULL,
@@ -135,6 +144,23 @@ CREATE TABLE IF NOT EXISTS connection_health (
 );
 `;
 
+type Migration = (db: DatabaseSync) => void;
+
+/**
+ * Ordered, append-only database migrations. `PRAGMA user_version` is advanced
+ * only after each migration succeeds, so a failed upgrade is rolled back and
+ * retried cleanly on the next open.
+ */
+const MIGRATIONS: readonly Migration[] = [
+  (db) => {
+    db.exec(INITIAL_SCHEMA);
+    // Existing databases from before schema versioning can already contain
+    // messages. FTS external-content tables do not backfill those rows when
+    // first created, so rebuild once while adopting version 1.
+    db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')");
+  },
+];
+
 export class NudgeStore {
   readonly #db: DatabaseSync;
 
@@ -148,7 +174,12 @@ export class NudgeStore {
     // The console opens the same file from its own process; wait out short
     // write locks instead of failing immediately.
     this.#db.exec("PRAGMA busy_timeout = 5000");
-    this.#db.exec(SCHEMA);
+    try {
+      migrate(this.#db);
+    } catch (error) {
+      this.#db.close();
+      throw error;
+    }
   }
 
   close(): void {
@@ -217,10 +248,10 @@ export class NudgeStore {
       .all(limit, offset)
       .map((row) => ({
         ...toSession(row),
-        messageCount: Number(row.message_count),
-        preview: row.preview === null ? null : String(row.preview),
+        messageCount: requiredNumber(row, "message_count"),
+        preview: nullableString(row, "preview"),
       }));
-    return { sessions, total: Number(totalRow?.n ?? 0) };
+    return { sessions, total: totalRow ? requiredNumber(totalRow, "n") : 0 };
   }
 
   sessionById(id: number): SessionRow | undefined {
@@ -309,10 +340,10 @@ export class NudgeStore {
     const row = this.#db.prepare("SELECT * FROM spaces WHERE handle = ?").get(handle);
     return row
       ? {
-          handle: String(row.handle),
-          spaceId: String(row.space_id),
-          platform: String(row.platform),
-          updatedAt: Number(row.updated_at),
+          handle: requiredString(row, "handle"),
+          spaceId: requiredString(row, "space_id"),
+          platform: requiredString(row, "platform"),
+          updatedAt: requiredNumber(row, "updated_at"),
         }
       : undefined;
   }
@@ -326,9 +357,9 @@ export class NudgeStore {
     }
     return {
       entryId,
-      lastRunAt: row.last_run_at === null ? null : Number(row.last_run_at),
-      claimedAt: row.claimed_at === null ? null : Number(row.claimed_at),
-      completed: Number(row.completed) === 1,
+      lastRunAt: nullableNumber(row, "last_run_at"),
+      claimedAt: nullableNumber(row, "claimed_at"),
+      completed: requiredNumber(row, "completed") === 1,
     };
   }
 
@@ -380,12 +411,15 @@ export class NudgeStore {
     return Number(result.lastInsertRowid);
   }
 
-  markOutbound(id: number, status: OutboundStatus, at = Date.now()): void {
+  markOutbound(id: number, status: OutboundStatus, at = Date.now()): number {
     this.#db
       .prepare(
         "UPDATE outbound_ledger SET status = ?, updated_at = ?, attempts = attempts + ? WHERE id = ?",
       )
       .run(status, at, status === "sending" ? 1 : 0, id);
+    const row = this.#db.prepare("SELECT attempts FROM outbound_ledger WHERE id = ?").get(id);
+    if (!row) throw new Error(`No outbound ledger entry ${id}`);
+    return requiredNumber(row, "attempts");
   }
 
   openOutbound(maxAgeMs = 24 * 60 * 60 * 1000, maxAttempts = 3, now = Date.now()): OutboundRow[] {
@@ -404,7 +438,7 @@ export class NudgeStore {
   /** Last recorded state for a connection id, or undefined if never recorded. */
   connectionHealthy(id: string): boolean | undefined {
     const row = this.#db.prepare("SELECT healthy FROM connection_health WHERE id = ?").get(id);
-    return row ? Number(row.healthy) === 1 : undefined;
+    return row ? requiredNumber(row, "healthy") === 1 : undefined;
   }
 
   setConnectionHealthy(id: string, healthy: boolean, at = Date.now()): void {
@@ -414,6 +448,85 @@ export class NudgeStore {
          ON CONFLICT(id) DO UPDATE SET healthy = excluded.healthy, updated_at = excluded.updated_at`,
       )
       .run(id, healthy ? 1 : 0, at);
+  }
+
+  // -- maintenance ---------------------------------------------------------
+
+  /**
+   * Bound operational bookkeeping without deleting conversation history.
+   * Open sends outside the retry contract become terminal failures, webhook
+   * ids are retained for 30 days, and terminal ledger rows for 90 days.
+   */
+  maintain(options: {
+    now?: number;
+    webhookRetentionMs?: number;
+    outboundRetentionMs?: number;
+    outboundMaxAgeMs?: number;
+    outboundMaxAttempts?: number;
+  } = {}): MaintenanceResult {
+    const now = options.now ?? Date.now();
+    const webhookRetentionMs = options.webhookRetentionMs ?? 30 * DAY_MS;
+    const outboundRetentionMs = options.outboundRetentionMs ?? 90 * DAY_MS;
+    const outboundMaxAgeMs = options.outboundMaxAgeMs ?? DAY_MS;
+    const outboundMaxAttempts = options.outboundMaxAttempts ?? 3;
+
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const expiredOutbound = Number(
+        this.#db
+          .prepare(
+            `UPDATE outbound_ledger SET status = 'failed', updated_at = ?
+             WHERE status IN ('pending', 'sending')
+               AND (created_at <= ? OR attempts >= ?)`,
+          )
+          .run(now, now - outboundMaxAgeMs, outboundMaxAttempts).changes,
+      );
+      const prunedOutbound = Number(
+        this.#db
+          .prepare(
+            `DELETE FROM outbound_ledger
+             WHERE status IN ('sent', 'failed') AND updated_at <= ?`,
+          )
+          .run(now - outboundRetentionMs).changes,
+      );
+      const prunedWebhooks = Number(
+        this.#db
+          .prepare("DELETE FROM processed_webhooks WHERE processed_at <= ?")
+          .run(now - webhookRetentionMs).changes,
+      );
+      this.#db.exec("COMMIT");
+      return { expiredOutbound, prunedOutbound, prunedWebhooks };
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Remove state for schedule entries that no longer exist after a valid reload. */
+  pruneScheduleState(activeEntryIds: readonly string[]): number {
+    if (activeEntryIds.length === 0) {
+      return Number(this.#db.prepare("DELETE FROM schedule_state").run().changes);
+    }
+    const placeholders = activeEntryIds.map(() => "?").join(", ");
+    return Number(
+      this.#db
+        .prepare(`DELETE FROM schedule_state WHERE entry_id NOT IN (${placeholders})`)
+        .run(...activeEntryIds).changes,
+    );
+  }
+
+  /** Carry state forward when a schedule id scheme changes. */
+  migrateScheduleState(fromEntryId: string, toEntryId: string): void {
+    if (fromEntryId === toEntryId) return;
+    this.#db
+      .prepare(
+        `INSERT OR IGNORE INTO schedule_state
+           (entry_id, last_run_at, claimed_at, completed)
+         SELECT ?, last_run_at, claimed_at, completed
+         FROM schedule_state WHERE entry_id = ?`,
+      )
+      .run(toEntryId, fromEntryId);
+    this.#db.prepare("DELETE FROM schedule_state WHERE entry_id = ?").run(fromEntryId);
   }
 
   // -- webhook dedupe ------------------------------------------------------
@@ -434,41 +547,103 @@ export class NudgeStore {
 
 type Row = Record<string, unknown>;
 
+function migrate(db: DatabaseSync): void {
+  const row = db.prepare("PRAGMA user_version").get();
+  const current = requiredNumber(row ?? {}, "user_version");
+  if (!Number.isInteger(current) || current < 0) {
+    throw new Error(`Invalid SQLite schema version ${current}`);
+  }
+  if (current > CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `Database schema version ${current} is newer than this Nudge build supports ` +
+        `(${CURRENT_SCHEMA_VERSION}). Upgrade Nudge before opening it.`,
+    );
+  }
+
+  for (let version = current + 1; version <= CURRENT_SCHEMA_VERSION; version += 1) {
+    const migration = MIGRATIONS[version - 1];
+    if (!migration) throw new Error(`Missing SQLite migration ${version}`);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      migration(db);
+      db.exec(`PRAGMA user_version = ${version}`);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw new Error(`SQLite migration ${version} failed`, { cause: error });
+    }
+  }
+}
+
 function toSession(row: Row): SessionRow {
   return {
-    id: Number(row.id),
-    handle: String(row.handle),
-    startedAt: Number(row.started_at),
-    lastActivityAt: Number(row.last_activity_at),
-    endedAt: row.ended_at === null ? null : Number(row.ended_at),
-    endReason: row.end_reason === null ? null : String(row.end_reason),
-    summary: row.summary === null ? null : String(row.summary),
-    carryover: row.carryover === null ? null : String(row.carryover),
-    compactedThrough: Number(row.compacted_through),
+    id: requiredNumber(row, "id"),
+    handle: requiredString(row, "handle"),
+    startedAt: requiredNumber(row, "started_at"),
+    lastActivityAt: requiredNumber(row, "last_activity_at"),
+    endedAt: nullableNumber(row, "ended_at"),
+    endReason: nullableString(row, "end_reason"),
+    summary: nullableString(row, "summary"),
+    carryover: nullableString(row, "carryover"),
+    compactedThrough: requiredNumber(row, "compacted_through"),
   };
 }
 
 function toMessage(row: Row): MessageRow {
   return {
-    id: Number(row.id),
-    sessionId: Number(row.session_id),
-    handle: String(row.handle),
-    role: String(row.role) as MessageRole,
-    content: String(row.content),
-    toolPayload: row.tool_payload === null ? null : String(row.tool_payload),
-    createdAt: Number(row.created_at),
+    id: requiredNumber(row, "id"),
+    sessionId: requiredNumber(row, "session_id"),
+    handle: requiredString(row, "handle"),
+    role: requiredString(row, "role") as MessageRole,
+    content: requiredString(row, "content"),
+    toolPayload: nullableString(row, "tool_payload"),
+    createdAt: requiredNumber(row, "created_at"),
   };
 }
 
 function toOutbound(row: Row): OutboundRow {
   return {
-    id: Number(row.id),
-    handle: String(row.handle),
-    body: String(row.body),
-    kind: String(row.kind) as OutboundKind,
-    status: String(row.status) as OutboundStatus,
-    attempts: Number(row.attempts),
-    createdAt: Number(row.created_at),
-    updatedAt: Number(row.updated_at),
+    id: requiredNumber(row, "id"),
+    handle: requiredString(row, "handle"),
+    body: requiredString(row, "body"),
+    kind: requiredString(row, "kind") as OutboundKind,
+    status: requiredString(row, "status") as OutboundStatus,
+    attempts: requiredNumber(row, "attempts"),
+    createdAt: requiredNumber(row, "created_at"),
+    updatedAt: requiredNumber(row, "updated_at"),
   };
+}
+
+function requiredNumber(row: Row, key: string): number {
+  const value = row[key];
+  if (typeof value !== "number" && typeof value !== "bigint") {
+    throw invalidColumn(key, "number", value);
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw invalidColumn(key, "finite number", value);
+  return number;
+}
+
+function requiredString(row: Row, key: string): string {
+  const value = row[key];
+  if (typeof value !== "string") throw invalidColumn(key, "string", value);
+  return value;
+}
+
+function nullableNumber(row: Row, key: string): number | null {
+  if (!(key in row)) throw invalidColumn(key, "number or null", undefined);
+  return row[key] === null ? null : requiredNumber(row, key);
+}
+
+function nullableString(row: Row, key: string): string | null {
+  if (!(key in row)) throw invalidColumn(key, "string or null", undefined);
+  return row[key] === null ? null : requiredString(row, key);
+}
+
+function invalidColumn(key: string, expected: string, value: unknown): Error {
+  return new Error(
+    `Invalid database column ${key}: expected ${expected}, got ${
+      value === undefined ? "missing" : typeof value
+    }. The database may be corrupt or incompletely migrated.`,
+  );
 }

@@ -29,7 +29,9 @@ Timing grammar (exact — nothing else parses; times are the owner's local time)
     cron: 30 7 * * 1-5
 
 Resolve relative times ("tomorrow morning") yourself before writing; the file
-only takes concrete times. Invalid writes are rejected with diagnostics.
+only takes concrete times. Entry names are unique persistent identities: edit
+an entry in place to preserve its run state, or rename it when intentionally
+creating a new one. Invalid writes are rejected with diagnostics.
 
 ## MEMORY.md and USER.md — curated memory
 
