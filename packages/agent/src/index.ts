@@ -54,9 +54,12 @@ export {
 } from "./mcp-config.js";
 export { MemoryFiles } from "./memory.js";
 export {
+  buildExecutionPrompt,
   buildSystemPrompt,
   DEFAULT_SYSTEM_FILE,
   TOOL_GUIDANCE,
+  type AgentRosterEntry,
+  type ExecutionPromptInput,
   type GoogleAccountRef,
   type PromptStackInput,
 } from "./prompt.js";
@@ -89,7 +92,14 @@ export {
   type SkillMeta,
 } from "./skills.js";
 export { formatLocalTime, startOfDayInZone } from "./time.js";
-export { buildSendFileTool, buildSendUpdateTool, buildTools, type ToolContext } from "./tools.js";
+export {
+  buildDispatchTool,
+  buildSendFileTool,
+  buildSendUpdateTool,
+  buildTools,
+  type DispatchRequest,
+  type ToolContext,
+} from "./tools.js";
 export {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,

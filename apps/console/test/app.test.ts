@@ -47,6 +47,92 @@ async function json(app: ConsoleApp, path: string, init?: RequestInit): Promise<
 }
 
 describe("console API", () => {
+  it("serves agent visibility: roster stats, activity feed, costs, schedule state", async () => {
+    const application = app();
+    const store = new NudgeStore(join(root!, ".data", "nudge.db"));
+    const owner = "+15550001111";
+    const agent = store.createAgent({
+      handle: owner,
+      name: "email",
+      kind: "standing",
+      description: "owner's gmail",
+      at: 1_000,
+    });
+    const worker = store.startSession(owner, 1_000, undefined, agent.id);
+    store.appendMessage({
+      sessionId: worker.id,
+      handle: owner,
+      role: "user",
+      content: "[Task from the assistant]\ntriage the inbox",
+      at: 1_000,
+    });
+    store.appendMessage({
+      sessionId: worker.id,
+      handle: owner,
+      role: "assistant",
+      content: "Nothing urgent.",
+      inputTokens: 500,
+      outputTokens: 60,
+      at: 2_000,
+    });
+    const thread = store.startSession(owner, 3_000);
+    store.appendMessage({
+      sessionId: thread.id,
+      handle: owner,
+      role: "user",
+      content: '[Report from background agent "email". Not owner input.]\nNothing urgent.',
+      at: 3_000,
+    });
+    store.appendMessage({
+      sessionId: thread.id,
+      handle: owner,
+      role: "assistant",
+      content: "[SILENT]",
+      inputTokens: 200,
+      outputTokens: 5,
+      at: Date.now(),
+    });
+    store.recordScheduleCheck("ping-1", { hash: "aaa" }, 4_000);
+    store.recordScheduleCheck("ping-1", { hash: "bbb", changed: true, woke: true }, 5_000);
+    store.close();
+
+    const agents = await json(application, "/api/agents");
+    expect(agents.status).toBe(200);
+    expect(agents.body.agents).toHaveLength(1);
+    expect(agents.body.agents[0]).toMatchObject({
+      name: "email",
+      kind: "standing",
+      sessionId: worker.id,
+      messageCount: 2,
+      inputTokens: 500,
+      outputTokens: 60,
+    });
+
+    const activity = await json(application, "/api/activity");
+    expect(activity.status).toBe(200);
+    const types = activity.body.events.map((event: { type: string }) => event.type);
+    expect(types).toContain("dispatch");
+    expect(types).toContain("report");
+    const report = activity.body.events.find((event: { type: string }) => event.type === "report");
+    expect(report).toMatchObject({ agentName: "email", outcome: "silent" });
+    expect(report.text).toBe("Nothing urgent.");
+    const dispatch = activity.body.events.find(
+      (event: { type: string }) => event.type === "dispatch",
+    );
+    expect(dispatch).toMatchObject({ agentName: "email", scheduled: false, text: "triage the inbox" });
+
+    const costs = await json(application, "/api/costs?days=90");
+    expect(costs.status).toBe(200);
+    expect(costs.body.watcher).toEqual({ checksRun: 2, wakes: 1, avoided: 1 });
+    const kinds = costs.body.usage.map((row: { kind: string }) => row.kind);
+    expect(kinds).toContain("report");
+
+    const state = await json(application, "/api/schedule/state");
+    expect(state.status).toBe(200);
+    expect(state.body.states).toHaveLength(1);
+    expect(state.body.states[0]).toMatchObject({ entryId: "ping-1", checksRun: 2, wakes: 1 });
+  });
+
   it("reports status from the workspace, flagging the unset owner handle", async () => {
     const application = app();
     const before = await json(application, "/api/status");

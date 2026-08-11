@@ -16,6 +16,8 @@ import {
   saveFile,
   useFileContent,
   useInvalidate,
+  useScheduleState,
+  type ScheduleEntryState,
   type SchedulePreview,
 } from "@/lib/api";
 
@@ -32,6 +34,8 @@ const SCHEDULE_PATH = "SCHEDULE.md";
 interface RawEntry {
   name: string;
   when: string | null;
+  agent: string | null;
+  check: string | null;
   prompt: string;
   /** The exact section text, heading included — the conflict-check baseline. */
   section: string;
@@ -39,6 +43,7 @@ interface RawEntry {
 
 export function SchedulePage() {
   const { data, error, isLoading } = useFileContent(SCHEDULE_PATH);
+  const { data: stateData } = useScheduleState();
   const invalidate = useInvalidate();
   const [preview, setPreview] = useState<SchedulePreview | null>(null);
   const [dialog, setDialog] = useState<{ editing: RawEntry | null } | null>(null);
@@ -131,11 +136,16 @@ export function SchedulePage() {
         {entries.map((entry) => {
           const parsed = byName(entry.name);
           const problem = errorFor(entry.name);
+          const state = parsed
+            ? stateData?.states.find((candidate) => candidate.entryId === parsed.id)
+            : undefined;
           return (
             <Card key={entry.name} className={problem ? "border-destructive/40" : undefined}>
               <CardHeader className="flex-row items-center justify-between space-y-0">
                 <CardTitle className="flex items-center gap-2">
                   {entry.name}
+                  {entry.check && <Badge>watcher</Badge>}
+                  {entry.agent && <Badge variant="outline">agent: {entry.agent}</Badge>}
                   {problem && <Badge variant="destructive">inactive</Badge>}
                 </CardTitle>
                 <div className="flex items-center gap-1">
@@ -186,6 +196,12 @@ export function SchedulePage() {
                       : "never (already fired)"}
                   </p>
                 )}
+                {entry.check && (
+                  <p className="truncate font-mono text-xs text-muted-foreground">
+                    check: {entry.check}
+                  </p>
+                )}
+                {state && <EntryHealth entry={entry} state={state} />}
                 <p className="line-clamp-3 whitespace-pre-wrap text-sm">{entry.prompt}</p>
               </CardContent>
             </Card>
@@ -244,6 +260,41 @@ function messageOf(problem: unknown): string {
   return problem instanceof Error ? problem.message : String(problem);
 }
 
+/**
+ * Run/check health for one entry. For watchers this is the dead-or-flapping
+ * view: a persistent error means the check is broken; a wake ratio near 1
+ * means its output isn't normalized and every poll looks like a change.
+ */
+function EntryHealth({ entry, state }: { entry: RawEntry; state: ScheduleEntryState }) {
+  const time = (at: number) =>
+    new Date(at).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  return (
+    <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+      <p>
+        {state.lastRunAt ? `last ran ${time(state.lastRunAt)}` : "never ran"}
+        {entry.check && state.checksRun > 0 && (
+          <>
+            {" "}
+            · {state.checksRun} checks, {state.wakes} woke the agent
+            {state.wakes > 0 && state.checksRun >= 10 && state.wakes / state.checksRun > 0.5 && (
+              <span className="text-destructive"> (flapping? normalize the check output)</span>
+            )}
+          </>
+        )}
+        {entry.check && state.lastChangeAt && ` · last change ${time(state.lastChangeAt)}`}
+      </p>
+      {state.lastCheckError && (
+        <p className="text-destructive">check failing: {state.lastCheckError}</p>
+      )}
+    </div>
+  );
+}
+
 // -- section surgery on the markdown ----------------------------------------
 
 const HEADING = /^##\s+(.+?)\s*$/;
@@ -258,11 +309,22 @@ function parseSections(content: string): RawEntry[] {
   for (const range of sectionRanges(content)) {
     const lines = range.lines;
     const whenLine = lines.find((line) => /^when\s*:/i.test(line.trim()));
+    const agentLine = lines.find((line) => /^agent\s*:/i.test(line.trim()));
+    const checkLine = lines.find((line) => /^check\s*:/i.test(line.trim()));
     entries.push({
       name: range.name,
       when: whenLine ? whenLine.trim().replace(/^when\s*:/i, "").trim() : null,
+      agent: agentLine ? agentLine.trim().replace(/^agent\s*:/i, "").trim() || null : null,
+      check: checkLine ? checkLine.trim().replace(/^check\s*:/i, "").trim() || null : null,
       prompt: lines
-        .filter((line) => line !== whenLine && line.trim() !== "" && !HEADING.test(line))
+        .filter(
+          (line) =>
+            line !== whenLine &&
+            line !== agentLine &&
+            line !== checkLine &&
+            line.trim() !== "" &&
+            !HEADING.test(line),
+        )
         .join("\n")
         .trim(),
       section: range.text,
@@ -367,6 +429,8 @@ function EntryDialog({
   const [cron, setCron] = useState("");
   const [custom, setCustom] = useState(editing?.when ?? "");
   const [prompt, setPrompt] = useState(editing?.prompt ?? "");
+  const [agentName, setAgentName] = useState(editing?.agent ?? "");
+  const [checkCmd, setCheckCmd] = useState(editing?.check ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -397,7 +461,10 @@ function EntryDialog({
       setError(`An entry named “${trimmedName}” already exists.`);
       return;
     }
-    const section = `## ${trimmedName}\nwhen: ${whenText()}\n${prompt.trim()}\n`;
+    const control = [`## ${trimmedName}`, `when: ${whenText()}`];
+    if (agentName.trim()) control.push(`agent: ${agentName.trim()}`);
+    if (checkCmd.trim()) control.push(`check: ${checkCmd.trim()}`);
+    const section = `${control.join("\n")}\n${prompt.trim()}\n`;
     setBusy(true);
     // The section is validated by the real parser before anything is written.
     previewSchedule(section)
@@ -522,6 +589,30 @@ function EntryDialog({
                 <Input type="time" value={time} onChange={(event) => setTime(event.target.value)} />
               </div>
             )}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">
+                Background agent (optional) — a standing agent runs this with its memory
+              </span>
+              <Input
+                value={agentName}
+                onChange={(event) => setAgentName(event.target.value)}
+                placeholder="email"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">
+                Check command (optional) — wakes the agent only when output changes
+              </span>
+              <Input
+                value={checkCmd}
+                onChange={(event) => setCheckCmd(event.target.value)}
+                placeholder="curl -sf … | jq -r '.[].id' | sort"
+                className="font-mono"
+                spellCheck={false}
+              />
+            </div>
           </div>
           <div className="flex flex-col gap-1">
             <span className="text-xs text-muted-foreground">Prompt — what the agent should do</span>

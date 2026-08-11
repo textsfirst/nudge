@@ -4,6 +4,10 @@ import { DatabaseSync } from "node:sqlite";
 
 /** `error` rows are console-facing diagnostics; the agent excludes them from model context. */
 export type MessageRole = "user" | "assistant" | "error";
+/** Standing agents persist across tasks; temp agents flip to `done` after one report. */
+export type AgentKind = "temp" | "standing";
+/** `archived` standing agents left the roster but revive on dispatch; `done` temps never do. */
+export type AgentStatus = "active" | "archived" | "done";
 export type OutboundKind = "reply" | "nudge";
 export type OutboundStatus = "pending" | "sending" | "sent" | "failed";
 export type AttachmentKind = "image" | "voice" | "file";
@@ -13,6 +17,8 @@ export type AttachmentStatus = "stored" | "failed";
 export interface SessionRow {
   id: number;
   handle: string;
+  /** Set on execution-agent threads; null for owner conversations. */
+  agentId: number | null;
   startedAt: number;
   lastActivityAt: number;
   endedAt: number | null;
@@ -20,6 +26,23 @@ export interface SessionRow {
   summary: string | null;
   carryover: string | null;
   compactedThrough: number;
+}
+
+/**
+ * An execution agent: a background worker the interaction loop dispatches
+ * tasks to. Its conversation is an ordinary session carrying `agent_id`,
+ * which is the agent's whole persistent memory — there is no separate log.
+ */
+export interface AgentRow {
+  id: number;
+  handle: string;
+  name: string;
+  kind: AgentKind;
+  /** One line for the roster: what this agent is for. */
+  description: string;
+  status: AgentStatus;
+  createdAt: number;
+  lastActiveAt: number;
 }
 
 export interface MessageRow {
@@ -73,6 +96,43 @@ export interface SessionSummaryRow extends SessionRow {
   preview: string | null;
 }
 
+/** An agent with the aggregates the console's roster shows. */
+export interface AgentStatsRow extends AgentRow {
+  /** The agent's open session, if it ever ran. */
+  sessionId: number | null;
+  messageCount: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** A dispatched brief, for the console's activity feed. */
+export interface AgentBriefRow {
+  messageId: number;
+  agentId: number;
+  agentName: string;
+  content: string;
+  createdAt: number;
+}
+
+/** A report turn in the owner thread, with the curation outcome that followed. */
+export interface AgentReportRow {
+  messageId: number;
+  sessionId: number;
+  content: string;
+  createdAt: number;
+  /** The assistant reply that curated this report; null while still pending. */
+  outcome: string | null;
+}
+
+/** One day's token usage for one turn kind, for the console's cost view. */
+export interface TokenUsageRow {
+  day: string;
+  kind: "conversation" | "execution" | "report";
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface SpaceRow {
   handle: string;
   spaceId: string;
@@ -85,6 +145,17 @@ export interface ScheduleStateRow {
   lastRunAt: number | null;
   claimedAt: number | null;
   completed: boolean;
+  /** Hash of the last check's normalized output; null before the baseline run. */
+  lastCheckHash: string | null;
+  lastCheckAt: number | null;
+  /** When the check output last differed from the previous run. */
+  lastChangeAt: number | null;
+  /** Total check executions — with `wakes`, the flapping signal (wake ratio). */
+  checksRun: number;
+  /** Firings that actually woke the agent (output changed or check failed). */
+  wakes: number;
+  /** The last check failure's message; null after any success. */
+  lastCheckError: string | null;
 }
 
 export interface OutboundRow {
@@ -117,7 +188,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 9;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -276,6 +347,35 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
     `);
   },
+  (db) => {
+    // Execution agents: background workers the interaction loop dispatches
+    // tasks to. Their conversations are ordinary sessions carrying agent_id,
+    // so history, FTS, compaction, and the console all come for free.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        handle TEXT NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        last_active_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agents_roster ON agents(handle, status, last_active_at);
+    `);
+    db.exec("ALTER TABLE sessions ADD COLUMN agent_id INTEGER REFERENCES agents(id)");
+  },
+  (db) => {
+    // Watcher bookkeeping for entries with a check: gate, doubling as the
+    // console's health data (wake ratio = flapping, last_error = dead watcher).
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_hash TEXT");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_at INTEGER");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_change_at INTEGER");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN checks_run INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN wakes INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_error TEXT");
+  },
 ];
 
 export class NudgeStore {
@@ -305,19 +405,30 @@ export class NudgeStore {
 
   // -- sessions ------------------------------------------------------------
 
+  /** The open owner conversation. Execution-agent sessions never match. */
   activeSession(handle: string): SessionRow | undefined {
     const row = this.#db
-      .prepare("SELECT * FROM sessions WHERE handle = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .prepare(
+        "SELECT * FROM sessions WHERE handle = ? AND agent_id IS NULL AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+      )
       .get(handle);
     return row ? toSession(row) : undefined;
   }
 
-  startSession(handle: string, at = Date.now(), carryover?: string): SessionRow {
+  /** An execution agent's open session — its whole persistent memory. */
+  activeAgentSession(agentId: number): SessionRow | undefined {
+    const row = this.#db
+      .prepare("SELECT * FROM sessions WHERE agent_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .get(agentId);
+    return row ? toSession(row) : undefined;
+  }
+
+  startSession(handle: string, at = Date.now(), carryover?: string, agentId?: number): SessionRow {
     const result = this.#db
       .prepare(
-        "INSERT INTO sessions (handle, started_at, last_activity_at, carryover) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (handle, started_at, last_activity_at, carryover, agent_id) VALUES (?, ?, ?, ?, ?)",
       )
-      .run(handle, at, at, carryover ?? null);
+      .run(handle, at, at, carryover ?? null, agentId ?? null);
     const session = this.#db
       .prepare("SELECT * FROM sessions WHERE id = ?")
       .get(Number(result.lastInsertRowid));
@@ -394,6 +505,217 @@ export class NudgeStore {
     this.#db.prepare("DELETE FROM attachments WHERE message_id = ?").run(id);
     const result = this.#db.prepare("DELETE FROM messages WHERE id = ?").run(id);
     return result.changes > 0;
+  }
+
+  // -- agents --------------------------------------------------------------
+
+  createAgent(input: {
+    handle: string;
+    name: string;
+    kind: AgentKind;
+    description: string;
+    at?: number;
+  }): AgentRow {
+    const at = input.at ?? Date.now();
+    const result = this.#db
+      .prepare(
+        "INSERT INTO agents (handle, name, kind, description, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(input.handle, input.name, input.kind, input.description, at, at);
+    return {
+      id: Number(result.lastInsertRowid),
+      handle: input.handle,
+      name: input.name,
+      kind: input.kind,
+      description: input.description,
+      status: "active",
+      createdAt: at,
+      lastActiveAt: at,
+    };
+  }
+
+  agentById(id: number): AgentRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+    return row ? toAgent(row) : undefined;
+  }
+
+  /**
+   * The dispatch target for a name: the live agent if one exists, else the
+   * most recently active archived standing agent (revival candidate). Done
+   * temps never match — a reused temp name creates a fresh agent.
+   */
+  findAgentByName(handle: string, name: string): AgentRow | undefined {
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM agents
+         WHERE handle = ? AND name = ? COLLATE NOCASE AND status IN ('active', 'archived')
+         ORDER BY (status = 'active') DESC, last_active_at DESC LIMIT 1`,
+      )
+      .get(handle, name);
+    return row ? toAgent(row) : undefined;
+  }
+
+  /** Active agents, most recently active first — the roster, capped by `limit`. */
+  listAgents(handle: string, options?: { limit?: number }): AgentRow[] {
+    return this.#db
+      .prepare(
+        "SELECT * FROM agents WHERE handle = ? AND status = 'active' ORDER BY last_active_at DESC LIMIT ?",
+      )
+      .all(handle, options?.limit ?? 50)
+      .map(toAgent);
+  }
+
+  touchAgent(id: number, at = Date.now()): void {
+    this.#db.prepare("UPDATE agents SET last_active_at = ? WHERE id = ?").run(at, id);
+  }
+
+  setAgentStatus(id: number, status: AgentStatus, at = Date.now()): void {
+    this.#db
+      .prepare("UPDATE agents SET status = ?, last_active_at = ? WHERE id = ?")
+      .run(status, at, id);
+  }
+
+  /**
+   * Every agent with its usage aggregates, most recently active first.
+   * Console-facing; the agent itself only ever sees the capped roster.
+   */
+  listAgentsWithStats(): AgentStatsRow[] {
+    return this.#db
+      .prepare(
+        `SELECT agents.*,
+           (SELECT id FROM sessions WHERE sessions.agent_id = agents.id AND ended_at IS NULL
+              ORDER BY id DESC LIMIT 1) AS session_id,
+           (SELECT COUNT(*) FROM messages JOIN sessions ON messages.session_id = sessions.id
+              WHERE sessions.agent_id = agents.id) AS message_count,
+           (SELECT COALESCE(SUM(messages.input_tokens), 0) FROM messages
+              JOIN sessions ON messages.session_id = sessions.id
+              WHERE sessions.agent_id = agents.id) AS input_tokens,
+           (SELECT COALESCE(SUM(messages.output_tokens), 0) FROM messages
+              JOIN sessions ON messages.session_id = sessions.id
+              WHERE sessions.agent_id = agents.id) AS output_tokens
+         FROM agents ORDER BY last_active_at DESC`,
+      )
+      .all()
+      .map((row) => ({
+        ...toAgent(row),
+        sessionId: nullableNumber(row, "session_id"),
+        messageCount: requiredNumber(row, "message_count"),
+        inputTokens: requiredNumber(row, "input_tokens"),
+        outputTokens: requiredNumber(row, "output_tokens"),
+      }));
+  }
+
+  /**
+   * Dispatched briefs, newest first — every user row in an agent session is
+   * one (briefs are the only user input those sessions receive).
+   */
+  listAgentBriefs(limit = 50): AgentBriefRow[] {
+    return this.#db
+      .prepare(
+        `SELECT messages.id AS message_id, messages.content, messages.created_at,
+                agents.id AS agent_id, agents.name AS agent_name
+         FROM messages
+         JOIN sessions ON messages.session_id = sessions.id
+         JOIN agents ON sessions.agent_id = agents.id
+         WHERE messages.role = 'user'
+         ORDER BY messages.id DESC LIMIT ?`,
+      )
+      .all(limit)
+      .map((row) => ({
+        messageId: requiredNumber(row, "message_id"),
+        agentId: requiredNumber(row, "agent_id"),
+        agentName: requiredString(row, "agent_name"),
+        content: requiredString(row, "content"),
+        createdAt: requiredNumber(row, "created_at"),
+      }));
+  }
+
+  /**
+   * Report turns in owner threads, newest first, each with the assistant
+   * reply that curated it. Identified by the report tag the runtime writes —
+   * derived, not bookkept, which read-only visibility can afford.
+   */
+  listAgentReports(limit = 50): AgentReportRow[] {
+    return this.#db
+      .prepare(
+        `SELECT reports.id AS message_id, reports.session_id, reports.content,
+                reports.created_at,
+           (SELECT content FROM messages
+             WHERE session_id = reports.session_id AND id > reports.id AND role = 'assistant'
+             ORDER BY id LIMIT 1) AS outcome
+         FROM messages AS reports
+         WHERE reports.role = 'user' AND reports.content LIKE '[Report from background agent%'
+         ORDER BY reports.id DESC LIMIT ?`,
+      )
+      .all(limit)
+      .map((row) => ({
+        messageId: requiredNumber(row, "message_id"),
+        sessionId: requiredNumber(row, "session_id"),
+        content: requiredString(row, "content"),
+        createdAt: requiredNumber(row, "created_at"),
+        outcome: nullableString(row, "outcome"),
+      }));
+  }
+
+  /**
+   * Assistant-turn token usage per local day and turn kind. `report` turns
+   * are owner-thread replies whose preceding row is a tagged agent report.
+   */
+  tokenUsageByDay(sinceMs: number, now = Date.now()): TokenUsageRow[] {
+    return this.#db
+      .prepare(
+        `SELECT day, kind, COUNT(*) AS turns,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens
+         FROM (
+           SELECT date(messages.created_at / 1000, 'unixepoch', 'localtime') AS day,
+             CASE
+               WHEN sessions.agent_id IS NOT NULL THEN 'execution'
+               WHEN (SELECT content FROM messages AS prior
+                     WHERE prior.session_id = messages.session_id AND prior.id < messages.id
+                     ORDER BY prior.id DESC LIMIT 1)
+                    LIKE '[Report from background agent%' THEN 'report'
+               ELSE 'conversation'
+             END AS kind,
+             messages.input_tokens, messages.output_tokens
+           FROM messages
+           JOIN sessions ON messages.session_id = sessions.id
+           WHERE messages.role = 'assistant' AND messages.created_at >= ?
+             AND messages.created_at <= ?
+         )
+         GROUP BY day, kind ORDER BY day, kind`,
+      )
+      .all(sinceMs, now)
+      .map((row) => ({
+        day: requiredString(row, "day"),
+        kind: requiredString(row, "kind") as TokenUsageRow["kind"],
+        turns: requiredNumber(row, "turns"),
+        inputTokens: requiredNumber(row, "input_tokens"),
+        outputTokens: requiredNumber(row, "output_tokens"),
+      }));
+  }
+
+  /** Every entry's run/check state, for the console's schedule health view. */
+  listScheduleState(): ScheduleStateRow[] {
+    return this.#db
+      .prepare("SELECT entry_id FROM schedule_state ORDER BY entry_id")
+      .all()
+      .map((row) => this.scheduleState(requiredString(row, "entry_id")));
+  }
+
+  /**
+   * Roster hygiene: standing agents dormant past the threshold leave the
+   * roster. History stays; dispatching the same name revives the agent.
+   */
+  archiveDormantAgents(handle: string, dormantMs: number, now = Date.now()): number {
+    return Number(
+      this.#db
+        .prepare(
+          `UPDATE agents SET status = 'archived'
+           WHERE handle = ? AND status = 'active' AND kind = 'standing' AND last_active_at < ?`,
+        )
+        .run(handle, now - dormantMs).changes,
+    );
   }
 
   // -- messages ------------------------------------------------------------
@@ -639,14 +961,65 @@ export class NudgeStore {
   scheduleState(entryId: string): ScheduleStateRow {
     const row = this.#db.prepare("SELECT * FROM schedule_state WHERE entry_id = ?").get(entryId);
     if (!row) {
-      return { entryId, lastRunAt: null, claimedAt: null, completed: false };
+      return {
+        entryId,
+        lastRunAt: null,
+        claimedAt: null,
+        completed: false,
+        lastCheckHash: null,
+        lastCheckAt: null,
+        lastChangeAt: null,
+        checksRun: 0,
+        wakes: 0,
+        lastCheckError: null,
+      };
     }
     return {
       entryId,
       lastRunAt: nullableNumber(row, "last_run_at"),
       claimedAt: nullableNumber(row, "claimed_at"),
       completed: requiredNumber(row, "completed") === 1,
+      lastCheckHash: nullableString(row, "last_check_hash"),
+      lastCheckAt: nullableNumber(row, "last_check_at"),
+      lastChangeAt: nullableNumber(row, "last_change_at"),
+      checksRun: requiredNumber(row, "checks_run"),
+      wakes: requiredNumber(row, "wakes"),
+      lastCheckError: nullableString(row, "last_check_error"),
     };
+  }
+
+  /**
+   * Record one watcher check execution. `changed` marks the output as
+   * differing from the previous hash (advancing the change timestamp), and
+   * `error` marks a failed command — hash untouched, so recovery compares
+   * against the last good output.
+   */
+  recordScheduleCheck(
+    entryId: string,
+    result: { hash?: string; changed?: boolean; error?: string; woke?: boolean },
+    at = Date.now(),
+  ): void {
+    this.#db.prepare("INSERT OR IGNORE INTO schedule_state (entry_id) VALUES (?)").run(entryId);
+    this.#db
+      .prepare(
+        `UPDATE schedule_state SET
+           checks_run = checks_run + 1,
+           wakes = wakes + ?,
+           last_check_at = ?,
+           last_check_hash = COALESCE(?, last_check_hash),
+           last_change_at = CASE WHEN ? THEN ? ELSE last_change_at END,
+           last_check_error = ?
+         WHERE entry_id = ?`,
+      )
+      .run(
+        result.woke ? 1 : 0,
+        at,
+        result.hash ?? null,
+        result.changed ? 1 : 0,
+        at,
+        result.error ?? null,
+        entryId,
+      );
   }
 
   /**
@@ -906,6 +1279,7 @@ function toSession(row: Row): SessionRow {
   return {
     id: requiredNumber(row, "id"),
     handle: requiredString(row, "handle"),
+    agentId: nullableNumber(row, "agent_id"),
     startedAt: requiredNumber(row, "started_at"),
     lastActivityAt: requiredNumber(row, "last_activity_at"),
     endedAt: nullableNumber(row, "ended_at"),
@@ -913,6 +1287,19 @@ function toSession(row: Row): SessionRow {
     summary: nullableString(row, "summary"),
     carryover: nullableString(row, "carryover"),
     compactedThrough: requiredNumber(row, "compacted_through"),
+  };
+}
+
+function toAgent(row: Row): AgentRow {
+  return {
+    id: requiredNumber(row, "id"),
+    handle: requiredString(row, "handle"),
+    name: requiredString(row, "name"),
+    kind: requiredString(row, "kind") as AgentKind,
+    description: requiredString(row, "description"),
+    status: requiredString(row, "status") as AgentStatus,
+    createdAt: requiredNumber(row, "created_at"),
+    lastActiveAt: requiredNumber(row, "last_active_at"),
   };
 }
 

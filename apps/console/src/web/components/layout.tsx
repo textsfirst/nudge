@@ -1,6 +1,9 @@
 import {
+  Activity,
+  Bot,
   Cable,
   CalendarClock,
+  Coins,
   FileText,
   KeyRound,
   LayoutDashboard,
@@ -18,7 +21,10 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/threads", label: "Threads", icon: MessagesSquare },
+  { to: "/agents", label: "Agents", icon: Bot },
+  { to: "/activity", label: "Activity", icon: Activity },
   { to: "/schedule", label: "Schedule", icon: CalendarClock },
+  { to: "/costs", label: "Costs", icon: Coins },
   { to: "/skills", label: "Skills", icon: Sparkles },
   { to: "/files", label: "Files", icon: FileText },
   { to: "/connections", label: "Connections", icon: Cable },

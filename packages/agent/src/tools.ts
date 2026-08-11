@@ -17,15 +17,25 @@ export interface ToolContext {
 }
 
 /**
+ * Appended to the heavy tools' descriptions on the interaction path only —
+ * a neutral cost note in view at the moment the model picks a tool. Never
+ * shown to execution agents, which have no dispatch tool to reach for.
+ */
+const DISPATCH_NOTE =
+  " Long or multi-step runs of this survive owner interruptions better inside a dispatched agent.";
+
+/**
  * The whole tool surface: three generic file operations over the data
  * directory (files are the API — schedule, memory, skills are all file
  * conventions documented in README.md) plus genuine computation: full-text
  * history search and, when Firecrawl is configured, web search/extract.
+ * `dispatchNote` marks the interaction-agent build of the set.
  */
-export function buildTools(context: ToolContext): ToolSet {
+export function buildTools(context: ToolContext, opts: { dispatchNote?: boolean } = {}): ToolSet {
+  const note = opts.dispatchNote ? DISPATCH_NOTE : "";
   return {
-    ...(context.web ? webTools(context.web) : {}),
-    ...(context.bash ? bashTool(context.bash) : {}),
+    ...(context.web ? webTools(context.web, note) : {}),
+    ...(context.bash ? bashTool(context.bash, note) : {}),
     list_files: tool({
       description: `List every file in your data directory (up to ${MAX_LIST_ENTRIES} entries).`,
       inputSchema: z.object({}),
@@ -126,6 +136,60 @@ export function buildSendUpdateTool(send: (text: string) => Promise<void>): Tool
   };
 }
 
+/** What the dispatch_agent tool hands the agent runtime. */
+export interface DispatchRequest {
+  name: string;
+  mode?: "temp" | "standing" | undefined;
+  description?: string | undefined;
+  brief: string;
+}
+
+/** Dispatches allowed per turn — parallel errands yes, agent storms no. */
+const DISPATCH_CAP = 5;
+
+/**
+ * The delegation tool, built per turn around the runtime's dispatch closure
+ * (it needs the turn's handle). Best-effort like send_update: failures come
+ * back as result strings the model can read, never errors that sink the turn.
+ */
+export function buildDispatchTool(
+  dispatch: (request: DispatchRequest) => Promise<string>,
+): ToolSet {
+  let dispatched = 0;
+  return {
+    dispatch_agent: tool({
+      description:
+        "Hand a task to a background agent that keeps working after your turn ends and reports " +
+        "back to you later as a tagged message. Reuse a roster agent's name to route follow-ups " +
+        "to it (its own history comes with it); a new name creates an agent — mode standing for " +
+        "recurring domains, temp (the default) for one-off tasks. The brief is all it knows: " +
+        "include the goal, context it can't see, constraints, and what done looks like.",
+      inputSchema: z.object({
+        name: z.string().min(1).max(60).describe("agent name, e.g. 'email' or 'find-receipt'"),
+        mode: z.enum(["temp", "standing"]).optional().describe("only read when creating; default temp"),
+        description: z
+          .string()
+          .max(200)
+          .optional()
+          .describe("one roster line saying what the agent is for; only read when creating"),
+        brief: z.string().min(1).describe("the complete task handoff"),
+      }),
+      execute: async (request) => {
+        if (dispatched >= DISPATCH_CAP) {
+          return "skipped: dispatch limit reached for this turn — do the rest yourself or wait for reports";
+        }
+        try {
+          const result = await dispatch(request);
+          dispatched += 1;
+          return result;
+        } catch (error) {
+          return `failed to dispatch: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    }),
+  };
+}
+
 /** File sends allowed per turn. */
 const FILE_SEND_CAP = 2;
 /** Attachments above this are rejected before they hit the wire. */
@@ -196,10 +260,13 @@ export function buildSendFileTool(
   };
 }
 
-function bashTool(bash: { cwd: string; env?: Record<string, string> | undefined }): ToolSet {
+function bashTool(
+  bash: { cwd: string; env?: Record<string, string> | undefined },
+  note = "",
+): ToolSet {
   return {
     bash: tool({
-      description: `Run a bash command; it executes in your data directory. Use it for file operations (ls, grep, wc, find) and quick computation. Returns stdout+stderr, capped at the last ${DEFAULT_MAX_LINES} lines / ${DEFAULT_MAX_BYTES / 1024}KB — when capped, the full output is saved to a temp file named in the footer. Commands time out after ${DEFAULT_BASH_TIMEOUT_SECONDS}s unless you pass timeout (seconds).`,
+      description: `Run a bash command; it executes in your data directory. Use it for file operations (ls, grep, wc, find) and quick computation. Returns stdout+stderr, capped at the last ${DEFAULT_MAX_LINES} lines / ${DEFAULT_MAX_BYTES / 1024}KB — when capped, the full output is saved to a temp file named in the footer. Commands time out after ${DEFAULT_BASH_TIMEOUT_SECONDS}s unless you pass timeout (seconds).${note}`,
       inputSchema: z.object({
         command: z.string().min(1),
         timeout: z.number().finite().positive().max(MAX_BASH_TIMEOUT_SECONDS).optional(),
@@ -219,11 +286,10 @@ const SEARCH_LIMIT_DEFAULT = 5;
 const EXTRACT_URL_MAX = 3;
 const EXTRACT_CHAR_DEFAULT = 12_000;
 
-function webTools(web: FirecrawlClient): ToolSet {
+function webTools(web: FirecrawlClient, note = ""): ToolSet {
   return {
     web_search: tool({
-      description:
-        'Search the web. Returns titles, URLs, and descriptions. Operators like site:example.com, -term, and "exact phrase" pass through. Use web_extract to read a result.',
+      description: `Search the web. Returns titles, URLs, and descriptions. Operators like site:example.com, -term, and "exact phrase" pass through. Use web_extract to read a result.${note}`,
       inputSchema: z.object({
         query: z.string().min(1),
         limit: z.number().int().min(1).max(10).optional(),

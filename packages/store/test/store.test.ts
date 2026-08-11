@@ -23,6 +23,104 @@ describe("NudgeStore", () => {
     expect(store.activeSession(HANDLE)).toBeUndefined();
   });
 
+  it("tracks watcher check health on schedule state", () => {
+    const store = new NudgeStore(":memory:");
+    const blank = store.scheduleState("watch-1");
+    expect(blank).toMatchObject({ lastCheckHash: null, checksRun: 0, wakes: 0 });
+
+    // Baseline: hash recorded, nobody woken.
+    store.recordScheduleCheck("watch-1", { hash: "aaa" }, 1_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckHash: "aaa",
+      lastCheckAt: 1_000,
+      lastChangeAt: null,
+      checksRun: 1,
+      wakes: 0,
+      lastCheckError: null,
+    });
+
+    // A change wakes and moves the change timestamp.
+    store.recordScheduleCheck("watch-1", { hash: "bbb", changed: true, woke: true }, 2_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckHash: "bbb",
+      lastChangeAt: 2_000,
+      checksRun: 2,
+      wakes: 1,
+    });
+
+    // A failure keeps the last good hash and records the error…
+    store.recordScheduleCheck("watch-1", { error: "exit 6: dns", woke: true }, 3_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckHash: "bbb",
+      lastCheckError: "exit 6: dns",
+      checksRun: 3,
+      wakes: 2,
+    });
+
+    // …and the next success clears it.
+    store.recordScheduleCheck("watch-1", { hash: "bbb" }, 4_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckError: null,
+      checksRun: 4,
+      wakes: 2,
+    });
+  });
+
+  it("creates, finds, and archives execution agents", () => {
+    const store = new NudgeStore(":memory:");
+    const email = store.createAgent({
+      handle: HANDLE,
+      name: "email",
+      kind: "standing",
+      description: "owner's gmail",
+      at: 1_000,
+    });
+    expect(store.agentById(email.id)).toMatchObject({ name: "email", status: "active" });
+    expect(store.findAgentByName(HANDLE, "EMAIL")?.id).toBe(email.id);
+
+    const temp = store.createAgent({
+      handle: HANDLE,
+      name: "find-receipt",
+      kind: "temp",
+      description: "hunting a receipt",
+      at: 2_000,
+    });
+    expect(store.listAgents(HANDLE).map((agent) => agent.name)).toEqual([
+      "find-receipt",
+      "email",
+    ]);
+
+    // A done temp never matches dispatch lookup; the name is free again.
+    store.setAgentStatus(temp.id, "done", 3_000);
+    expect(store.findAgentByName(HANDLE, "find-receipt")).toBeUndefined();
+    expect(store.listAgents(HANDLE).map((agent) => agent.name)).toEqual(["email"]);
+
+    // Dormant standing agents leave the roster but stay dispatchable.
+    const swept = store.archiveDormantAgents(HANDLE, 1_000, 10_000);
+    expect(swept).toBe(1);
+    expect(store.listAgents(HANDLE)).toEqual([]);
+    expect(store.findAgentByName(HANDLE, "email")?.status).toBe("archived");
+  });
+
+  it("keeps execution-agent sessions out of the owner conversation", () => {
+    const store = new NudgeStore(":memory:");
+    const agent = store.createAgent({
+      handle: HANDLE,
+      name: "email",
+      kind: "standing",
+      description: "",
+      at: 1_000,
+    });
+    const owner = store.startSession(HANDLE, 1_000);
+    const worker = store.startSession(HANDLE, 2_000, undefined, agent.id);
+
+    expect(worker.agentId).toBe(agent.id);
+    expect(owner.agentId).toBeNull();
+    expect(store.activeSession(HANDLE)?.id).toBe(owner.id);
+    expect(store.activeAgentSession(agent.id)?.id).toBe(worker.id);
+    expect(store.sessionById(worker.id)?.agentId).toBe(agent.id);
+  });
+
   it("stores messages and finds them with full-text search", () => {
     const store = new NudgeStore(":memory:");
     const session = store.startSession(HANDLE);
@@ -273,7 +371,7 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 7 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

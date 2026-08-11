@@ -21,6 +21,9 @@ export function windDownSteps(maxToolSteps: number): number {
 /** Tool steps with nothing texted to the owner before the silence nudge fires. */
 export const PROGRESS_NUDGE_STEPS = 4;
 
+/** Heavy tool steps without a dispatch before the delegation observation fires. */
+export const DELEGATION_NUDGE_STEPS = 6;
+
 /** No-progress repeats before the model is warned it looks stuck. */
 export const STALL_WARN_STEPS = 3;
 
@@ -57,9 +60,12 @@ export function createLoopGuard(options: {
   maxToolSteps: number;
   logger: Logger;
   progressTool?: boolean;
+  /** Set when dispatch_agent is in the set: enables the delegation observation. */
+  dispatchTool?: boolean;
 }): LoopGuard {
   const windDownAt = options.maxToolSteps - windDownSteps(options.maxToolSteps);
   let warnedSignature: string | undefined;
+  let nudgedDelegation = false;
 
   const prepareStep: PrepareStepFunction<ToolSet> = ({ stepNumber, messages, steps }) => {
     const notes: ModelMessage[] = [];
@@ -70,6 +76,24 @@ export function createLoopGuard(options: {
           "[System note: several tool steps in and the owner has heard nothing yet. If " +
           "finishing takes more than another moment, use send_update now to text one short " +
           "line about what you're doing.]",
+      });
+    }
+    // An observation, not an order: it surfaces exactly when the delegation
+    // tradeoff has tipped, and fires once per turn.
+    if (
+      options.dispatchTool &&
+      !nudgedDelegation &&
+      !dispatchedAgent(steps) &&
+      heavySteps(steps) >= DELEGATION_NUDGE_STEPS
+    ) {
+      nudgedDelegation = true;
+      notes.push({
+        role: "user",
+        content:
+          "[System note: this turn has grown into multi-step work. The owner can't reach you " +
+          "until it's done, and a new text from them aborts it, losing unfinished work. If more " +
+          "than a step or two remains, consider handing the rest to dispatch_agent and replying " +
+          "to the owner now.]",
       });
     }
     if (windDownAt >= 1 && stepNumber === windDownAt) {
@@ -116,6 +140,18 @@ export function createLoopGuard(options: {
 /** Whether any step so far texted the owner via send_update. */
 function textedOwner(steps: Array<StepResult<ToolSet>>): boolean {
   return steps.some((step) => step.toolCalls.some((call) => call.toolName === "send_update"));
+}
+
+/** Whether any step so far handed work to a background agent. */
+function dispatchedAgent(steps: Array<StepResult<ToolSet>>): boolean {
+  return steps.some((step) => step.toolCalls.some((call) => call.toolName === "dispatch_agent"));
+}
+
+/** Steps that did real work — tool calls beyond progress texts. */
+function heavySteps(steps: Array<StepResult<ToolSet>>): number {
+  return steps.filter((step) =>
+    step.toolCalls.some((call) => call.toolName !== "send_update"),
+  ).length;
 }
 
 /**

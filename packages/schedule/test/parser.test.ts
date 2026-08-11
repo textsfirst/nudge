@@ -38,6 +38,62 @@ Say happy Wednesday.
     expect(entries[0]?.prompt).toBe("Summarize anything I asked you to track.");
   });
 
+  it("parses a check line as a watcher gate, requiring an agent", () => {
+    const { entries, errors } = parseSchedule(`## Visa slots
+when: every 30 minutes
+agent: visa-watch
+check: curl -sf https://example.org | grep -c open
+Report newly opened slots.
+
+## Orphan check
+when: every 2 hours
+check: echo hi
+No agent here.
+
+## Empty check
+when: every 2 hours
+agent: x
+check:
+Prompt.
+`);
+    expect(errors).toEqual([
+      '"Orphan check": a "check:" line requires an "agent:" line — only a standing agent has the memory a watcher builds on',
+      '"Empty check": the "check:" line has no command',
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: "Visa slots",
+      agent: "visa-watch",
+      check: "curl -sf https://example.org | grep -c open",
+      prompt: "Report newly opened slots.",
+    });
+  });
+
+  it("parses an optional agent line and keeps it out of the prompt", () => {
+    const { entries, errors } = parseSchedule(`## Inbox sweep
+when: every 30 minutes
+agent: email
+Check for urgent mail and report anything the owner must see.
+
+## Plain reminder
+when: every day at 9:00
+Say good morning.
+
+## Broken
+when: every day at 10:00
+agent:
+Do something.
+`);
+    expect(errors).toEqual(['"Broken": the "agent:" line names no agent']);
+    expect(entries.map((entry) => [entry.name, entry.agent])).toEqual([
+      ["Inbox sweep", "email"],
+      ["Plain reminder", null],
+    ]);
+    expect(entries[0]?.prompt).toBe(
+      "Check for urgent mail and report anything the owner must see.",
+    );
+  });
+
   it("keeps entry ids stable when timing or prompt change", () => {
     const one = parseSchedule("## A\nwhen: every day at 9:00\nHello").entries[0];
     const same = parseSchedule("## A\nwhen: every day at 9:00\nHello").entries[0];

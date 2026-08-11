@@ -27,7 +27,7 @@ import { buildMcpBashEnv } from "./mcp/env.js";
 import { buildSkillsBashEnv } from "./skills/env.js";
 import { seedMcpSkill } from "./mcp/skill.js";
 import { createReplyHandler } from "./reply.js";
-import { Scheduler } from "./scheduler.js";
+import { buildCheckRunner, Scheduler } from "./scheduler.js";
 import { createSystemFileReader } from "./system-file.js";
 
 function ensureDataReadme(dataDir: string, logger: ReturnType<typeof createLogger>): void {
@@ -84,6 +84,17 @@ async function main(): Promise<void> {
     }
   }
   const sources = createModelSources(config.provider);
+  // Shared by the agent's bash tool and the scheduler's watcher checks, so a
+  // check: command sees the same gws/mcp/skills CLIs and secrets the agent does.
+  const bashEnv = {
+    ...buildGwsBashEnv({
+      dataDir: config.dataDir,
+      defaultAccount: config.google.defaultAccount,
+      gwsPath: config.google.gwsPath,
+    }),
+    ...buildMcpBashEnv({ dataDir: config.dataDir }),
+    ...buildSkillsBashEnv({ dataDir: config.dataDir }),
+  };
   const agent = new NudgeAgent({
     sources,
     store,
@@ -108,15 +119,7 @@ async function main(): Promise<void> {
     },
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,
-    bashEnv: {
-      ...buildGwsBashEnv({
-        dataDir: config.dataDir,
-        defaultAccount: config.google.defaultAccount,
-        gwsPath: config.google.gwsPath,
-      }),
-      ...buildMcpBashEnv({ dataDir: config.dataDir }),
-      ...buildSkillsBashEnv({ dataDir: config.dataDir }),
-    },
+    bashEnv,
     googleAccounts: () =>
       readGoogleAccounts(config.dataDir).map(({ label, email }) => ({ label, email })),
     mcpServers: () => {
@@ -189,6 +192,11 @@ async function main(): Promise<void> {
   });
 
   const delivery = new DeliveryService(store, transport, logger);
+  // Execution-agent reports run a fresh interaction turn whose reply, when
+  // not [SILENT], reaches the owner through the ledger like any nudge.
+  agent.setReportDelivery(async (handle, text) => {
+    await delivery.deliver(handle, text, "nudge");
+  });
   const scheduler = new Scheduler({
     schedulePath: config.schedulePath,
     ownerHandle: config.ownerHandle,
@@ -197,6 +205,7 @@ async function main(): Promise<void> {
     agent,
     delivery,
     logger,
+    runCheck: buildCheckRunner({ cwd: config.dataDir, env: bashEnv }),
   });
 
   const server = createServer(createHttpApp(transport, logger, providerHealth));
