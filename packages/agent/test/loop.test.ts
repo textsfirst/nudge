@@ -30,6 +30,25 @@ describe("agent loop limits", () => {
     ]);
   });
 
+  it("observes when a turn grows into multi-step work without a dispatch", async () => {
+    const commands = ["a", "b", "c", "d", "e", "f"].map((suffix) =>
+      toolCallChunks("bash", { command: `echo ${suffix}` }),
+    );
+    const { agent, source } = makeAgent([...commands, "done"]);
+
+    await expect(agent.reply(HANDLE, "big job")).resolves.toBe("done");
+
+    const seventhCall = promptMessages(source.calls[6]!);
+    const note = seventhCall.filter((message) => message.role === "user").at(-1);
+    expect(note?.text).toContain("grown into multi-step work");
+    expect(note?.text).toContain("dispatch_agent");
+    // The observation fires once, not on every later step.
+    const laterNotes = promptMessages(source.calls.at(-1)!).filter((message) =>
+      message.text.includes("grown into multi-step work"),
+    );
+    expect(laterNotes).toHaveLength(1);
+  });
+
   it("gives a bigger cap a proportionally longer wind-down runway", () => {
     expect(windDownSteps(4)).toBe(3);
     expect(windDownSteps(64)).toBe(4);

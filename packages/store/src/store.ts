@@ -4,6 +4,10 @@ import { DatabaseSync } from "node:sqlite";
 
 /** `error` rows are console-facing diagnostics; the agent excludes them from model context. */
 export type MessageRole = "user" | "assistant" | "error";
+/** Standing agents persist across tasks; temp agents flip to `done` after one report. */
+export type AgentKind = "temp" | "standing";
+/** `archived` standing agents left the roster but revive on dispatch; `done` temps never do. */
+export type AgentStatus = "active" | "archived" | "done";
 export type OutboundKind = "reply" | "nudge";
 export type OutboundStatus = "pending" | "sending" | "sent" | "failed";
 export type AttachmentKind = "image" | "voice" | "file";
@@ -13,6 +17,8 @@ export type AttachmentStatus = "stored" | "failed";
 export interface SessionRow {
   id: number;
   handle: string;
+  /** Set on execution-agent threads; null for owner conversations. */
+  agentId: number | null;
   startedAt: number;
   lastActivityAt: number;
   endedAt: number | null;
@@ -20,6 +26,23 @@ export interface SessionRow {
   summary: string | null;
   carryover: string | null;
   compactedThrough: number;
+}
+
+/**
+ * An execution agent: a background worker the interaction loop dispatches
+ * tasks to. Its conversation is an ordinary session carrying `agent_id`,
+ * which is the agent's whole persistent memory — there is no separate log.
+ */
+export interface AgentRow {
+  id: number;
+  handle: string;
+  name: string;
+  kind: AgentKind;
+  /** One line for the roster: what this agent is for. */
+  description: string;
+  status: AgentStatus;
+  createdAt: number;
+  lastActiveAt: number;
 }
 
 export interface MessageRow {
@@ -117,7 +140,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -276,6 +299,25 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
     `);
   },
+  (db) => {
+    // Execution agents: background workers the interaction loop dispatches
+    // tasks to. Their conversations are ordinary sessions carrying agent_id,
+    // so history, FTS, compaction, and the console all come for free.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        handle TEXT NOT NULL,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        last_active_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_agents_roster ON agents(handle, status, last_active_at);
+    `);
+    db.exec("ALTER TABLE sessions ADD COLUMN agent_id INTEGER REFERENCES agents(id)");
+  },
 ];
 
 export class NudgeStore {
@@ -305,19 +347,30 @@ export class NudgeStore {
 
   // -- sessions ------------------------------------------------------------
 
+  /** The open owner conversation. Execution-agent sessions never match. */
   activeSession(handle: string): SessionRow | undefined {
     const row = this.#db
-      .prepare("SELECT * FROM sessions WHERE handle = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .prepare(
+        "SELECT * FROM sessions WHERE handle = ? AND agent_id IS NULL AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+      )
       .get(handle);
     return row ? toSession(row) : undefined;
   }
 
-  startSession(handle: string, at = Date.now(), carryover?: string): SessionRow {
+  /** An execution agent's open session — its whole persistent memory. */
+  activeAgentSession(agentId: number): SessionRow | undefined {
+    const row = this.#db
+      .prepare("SELECT * FROM sessions WHERE agent_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
+      .get(agentId);
+    return row ? toSession(row) : undefined;
+  }
+
+  startSession(handle: string, at = Date.now(), carryover?: string, agentId?: number): SessionRow {
     const result = this.#db
       .prepare(
-        "INSERT INTO sessions (handle, started_at, last_activity_at, carryover) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (handle, started_at, last_activity_at, carryover, agent_id) VALUES (?, ?, ?, ?, ?)",
       )
-      .run(handle, at, at, carryover ?? null);
+      .run(handle, at, at, carryover ?? null, agentId ?? null);
     const session = this.#db
       .prepare("SELECT * FROM sessions WHERE id = ?")
       .get(Number(result.lastInsertRowid));
@@ -394,6 +447,89 @@ export class NudgeStore {
     this.#db.prepare("DELETE FROM attachments WHERE message_id = ?").run(id);
     const result = this.#db.prepare("DELETE FROM messages WHERE id = ?").run(id);
     return result.changes > 0;
+  }
+
+  // -- agents --------------------------------------------------------------
+
+  createAgent(input: {
+    handle: string;
+    name: string;
+    kind: AgentKind;
+    description: string;
+    at?: number;
+  }): AgentRow {
+    const at = input.at ?? Date.now();
+    const result = this.#db
+      .prepare(
+        "INSERT INTO agents (handle, name, kind, description, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(input.handle, input.name, input.kind, input.description, at, at);
+    return {
+      id: Number(result.lastInsertRowid),
+      handle: input.handle,
+      name: input.name,
+      kind: input.kind,
+      description: input.description,
+      status: "active",
+      createdAt: at,
+      lastActiveAt: at,
+    };
+  }
+
+  agentById(id: number): AgentRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+    return row ? toAgent(row) : undefined;
+  }
+
+  /**
+   * The dispatch target for a name: the live agent if one exists, else the
+   * most recently active archived standing agent (revival candidate). Done
+   * temps never match — a reused temp name creates a fresh agent.
+   */
+  findAgentByName(handle: string, name: string): AgentRow | undefined {
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM agents
+         WHERE handle = ? AND name = ? COLLATE NOCASE AND status IN ('active', 'archived')
+         ORDER BY (status = 'active') DESC, last_active_at DESC LIMIT 1`,
+      )
+      .get(handle, name);
+    return row ? toAgent(row) : undefined;
+  }
+
+  /** Active agents, most recently active first — the roster, capped by `limit`. */
+  listAgents(handle: string, options?: { limit?: number }): AgentRow[] {
+    return this.#db
+      .prepare(
+        "SELECT * FROM agents WHERE handle = ? AND status = 'active' ORDER BY last_active_at DESC LIMIT ?",
+      )
+      .all(handle, options?.limit ?? 50)
+      .map(toAgent);
+  }
+
+  touchAgent(id: number, at = Date.now()): void {
+    this.#db.prepare("UPDATE agents SET last_active_at = ? WHERE id = ?").run(at, id);
+  }
+
+  setAgentStatus(id: number, status: AgentStatus, at = Date.now()): void {
+    this.#db
+      .prepare("UPDATE agents SET status = ?, last_active_at = ? WHERE id = ?")
+      .run(status, at, id);
+  }
+
+  /**
+   * Roster hygiene: standing agents dormant past the threshold leave the
+   * roster. History stays; dispatching the same name revives the agent.
+   */
+  archiveDormantAgents(handle: string, dormantMs: number, now = Date.now()): number {
+    return Number(
+      this.#db
+        .prepare(
+          `UPDATE agents SET status = 'archived'
+           WHERE handle = ? AND status = 'active' AND kind = 'standing' AND last_active_at < ?`,
+        )
+        .run(handle, now - dormantMs).changes,
+    );
   }
 
   // -- messages ------------------------------------------------------------
@@ -906,6 +1042,7 @@ function toSession(row: Row): SessionRow {
   return {
     id: requiredNumber(row, "id"),
     handle: requiredString(row, "handle"),
+    agentId: nullableNumber(row, "agent_id"),
     startedAt: requiredNumber(row, "started_at"),
     lastActivityAt: requiredNumber(row, "last_activity_at"),
     endedAt: nullableNumber(row, "ended_at"),
@@ -913,6 +1050,19 @@ function toSession(row: Row): SessionRow {
     summary: nullableString(row, "summary"),
     carryover: nullableString(row, "carryover"),
     compactedThrough: requiredNumber(row, "compacted_through"),
+  };
+}
+
+function toAgent(row: Row): AgentRow {
+  return {
+    id: requiredNumber(row, "id"),
+    handle: requiredString(row, "handle"),
+    name: requiredString(row, "name"),
+    kind: requiredString(row, "kind") as AgentKind,
+    description: requiredString(row, "description"),
+    status: requiredString(row, "status") as AgentStatus,
+    createdAt: requiredNumber(row, "created_at"),
+    lastActiveAt: requiredNumber(row, "last_active_at"),
   };
 }
 

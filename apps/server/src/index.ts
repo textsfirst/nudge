@@ -187,6 +187,11 @@ async function main(): Promise<void> {
   });
 
   const delivery = new DeliveryService(store, transport, logger);
+  // Execution-agent reports run a fresh interaction turn whose reply, when
+  // not [SILENT], reaches the owner through the ledger like any nudge.
+  agent.setReportDelivery(async (handle, text) => {
+    await delivery.deliver(handle, text, "nudge");
+  });
   const scheduler = new Scheduler({
     schedulePath: config.schedulePath,
     ownerHandle: config.ownerHandle,
