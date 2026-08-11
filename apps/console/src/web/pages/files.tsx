@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarClock, FilePlus2, Lock, Save, Trash2 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { Editor } from "@/components/editor";
 import { Page } from "@/components/layout";
@@ -30,8 +31,9 @@ const CORE_ORDER = ["SYSTEM.md", "SCHEDULE.md", "MEMORY.md", "USER.md", "README.
 
 const SKILL_TEMPLATE = `---
 name: NAME
-description: One line shown in the agent's prompt.
-version: 1
+description: What this does and when to use it, shown in the agent's prompt.
+metadata:
+  version: "1"
 ---
 
 When to use, steps, pitfalls, verification.
@@ -208,6 +210,11 @@ function FileEditor({ path, onDeleted }: { path: string; onDeleted: () => void }
   );
 }
 
+/**
+ * Read-only feedback while hand-editing SCHEDULE.md: parsed entries with
+ * next-run times and per-entry errors, live against the draft. Structured
+ * management (add/edit/delete) lives on the Schedule page.
+ */
 function SchedulePreviewPanel({ content }: { content: string }) {
   const [preview, setPreview] = useState<SchedulePreview | null>(null);
   useEffect(() => {
@@ -217,17 +224,26 @@ function SchedulePreviewPanel({ content }: { content: string }) {
     return () => clearTimeout(timer);
   }, [content]);
 
+  // Parser errors carry the entry name: `"Name": message`. Broken entries do
+  // not appear in `entries`, so they get their own cards.
+  const broken = (preview?.errors ?? []).map((error) => {
+    const match = /^"([^"]+)":\s*([\s\S]*)$/.exec(error);
+    return match ? { name: match[1], message: match[2] } : { name: undefined, message: error };
+  });
+
   return (
     <aside className="flex flex-col gap-2 text-sm">
       <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
         <CalendarClock className="size-3.5" /> Parsed schedule
       </p>
-      {preview?.errors.map((error) => (
+      {broken.map((entry, index) => (
         <div
-          key={error}
-          className="rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive"
+          key={`${entry.name ?? "?"}-${index}`}
+          className="rounded-md border border-destructive/40 bg-destructive/5 p-2.5"
         >
-          {error}
+          <p className="font-medium">{entry.name ?? "Unparsable entry"}</p>
+          <p className="mt-1 text-xs text-destructive">{entry.message}</p>
+          <p className="mt-1 text-xs text-muted-foreground">Inactive until fixed.</p>
         </div>
       ))}
       {preview?.entries.map((entry) => (
@@ -251,6 +267,13 @@ function SchedulePreviewPanel({ content }: { content: string }) {
       {preview && preview.entries.length === 0 && preview.errors.length === 0 && (
         <p className="text-xs text-muted-foreground">No entries.</p>
       )}
+      <p className="text-xs text-muted-foreground">
+        Manage entries on the{" "}
+        <Link to="/schedule" className="text-primary underline-offset-2 hover:underline">
+          Schedule page
+        </Link>
+        .
+      </p>
     </aside>
   );
 }

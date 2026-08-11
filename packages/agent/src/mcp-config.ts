@@ -109,6 +109,27 @@ export function listEnabledMcpServers(dataDir: string): McpServerRef[] {
 
 const ENV_REF_PATTERN = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
 
+/** Every distinct ${VAR} a server entry references, in order of appearance. */
+export function collectEnvRefs(server: McpServerConfig): string[] {
+  const values =
+    server.transport === "http"
+      ? [server.url, ...Object.values(server.headers ?? {})]
+      : [
+          server.command,
+          ...server.args,
+          ...Object.values(server.env ?? {}),
+          ...(server.cwd === undefined ? [] : [server.cwd]),
+        ];
+  const names: string[] = [];
+  for (const value of values) {
+    for (const match of value.matchAll(ENV_REF_PATTERN)) {
+      const name = match[1];
+      if (name !== undefined && !names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
 /**
  * Resolve "${VAR}" references from the process environment. A miss reports
  * the variable's name so the failure can tell the owner exactly what to add.

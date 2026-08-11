@@ -60,18 +60,29 @@ by rewriting the file with only what matters.
 
 ## skills/<name>/SKILL.md — procedural memory
 
-Reusable how-to documents. Frontmatter is required:
+Reusable how-to documents in the Agent Skills format (agentskills.io / the
+skills.sh ecosystem). Frontmatter is required:
 
     ---
     name: <same-as-directory>
-    description: one line, shown in your prompt
-    version: 1
+    description: what it does and when to use it, shown in your prompt
+    metadata:
+      version: "1"
     ---
 
     Body: when to use, steps, pitfalls, verification.
 
-Keep SKILL.md lean; put bulk in support files next to it (references/, examples/)
-and read them only when needed. Directory names: lowercase slugs.
+Names are 1-64 lowercase letters/digits with single hyphens and must match the
+directory. Optional frontmatter: license, compatibility, metadata (string map).
+Keep SKILL.md lean; put bulk in support files next to it (scripts/, references/,
+assets/) and read them only when needed.
+
+The `skills` CLI in bash manages installs from the skills.sh ecosystem:
+`skills ls`, `skills add <owner/repo[/name]>` (public GitHub repos),
+`skills check`, `skills update <name>`, `skills restore <name>` (shipped
+skills), `skills rm <name>`. Ask the owner before installing anything new —
+a skill's instructions become part of your behavior. skills-lock.json is the
+CLI's provenance record; never edit it by hand.
 
 Some skills ship with Nudge and receive updates on upgrade. Once you (or the
 owner) edit a shipped skill, that copy is yours — it stops receiving updates.

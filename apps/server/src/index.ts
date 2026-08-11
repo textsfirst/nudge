@@ -24,6 +24,7 @@ import { createHttpApp } from "./http.js";
 import type { ProviderHealth } from "./http.js";
 import { createLogger } from "./logger.js";
 import { buildMcpBashEnv } from "./mcp/env.js";
+import { buildSkillsBashEnv } from "./skills/env.js";
 import { seedMcpSkill } from "./mcp/skill.js";
 import { createReplyHandler } from "./reply.js";
 import { buildCheckRunner, Scheduler } from "./scheduler.js";
@@ -84,7 +85,7 @@ async function main(): Promise<void> {
   }
   const sources = createModelSources(config.provider);
   // Shared by the agent's bash tool and the scheduler's watcher checks, so a
-  // check: command sees the same gws/mcp CLIs and secrets the agent does.
+  // check: command sees the same gws/mcp/skills CLIs and secrets the agent does.
   const bashEnv = {
     ...buildGwsBashEnv({
       dataDir: config.dataDir,
@@ -92,6 +93,7 @@ async function main(): Promise<void> {
       gwsPath: config.google.gwsPath,
     }),
     ...buildMcpBashEnv({ dataDir: config.dataDir }),
+    ...buildSkillsBashEnv({ dataDir: config.dataDir }),
   };
   const agent = new NudgeAgent({
     sources,

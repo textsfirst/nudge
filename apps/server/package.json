@@ -19,6 +19,16 @@
       "types": "./dist/google.d.ts",
       "development": "./src/google.ts",
       "default": "./dist/google.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/client.d.ts",
+      "development": "./src/mcp/client.ts",
+      "default": "./dist/mcp/client.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/index.d.ts",
+      "development": "./src/skills/index.ts",
+      "default": "./dist/skills/index.js"
     }
   },
   "scripts": {

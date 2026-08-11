@@ -178,8 +178,12 @@ function hashFile(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-/** Order-independent content hash over every file in the directory. */
-function hashDir(dir: string): string {
+/**
+ * Order-independent content hash over every file in the directory. Exported
+ * because skill provenance (bundle manifest, skills-lock.json) compares these
+ * hashes — every producer must hash identically.
+ */
+export function hashDir(dir: string): string {
   const hash = createHash("sha256");
   for (const rel of walk(dir, "").sort()) {
     hash.update(rel);

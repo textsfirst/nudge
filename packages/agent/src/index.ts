@@ -16,6 +16,7 @@ export {
   type BashOptions,
 } from "./bash.js";
 export {
+  hashDir,
   syncBundledContent,
   type SyncBundledOptions,
   type SyncBundledResult,
@@ -40,6 +41,7 @@ export { DATA_README } from "./data-readme.js";
 export { applyEdits, type EditOutcome, type FileEdit } from "./edits.js";
 export { FileWorkspace, MAX_LIST_ENTRIES, MEMORY_LIMITS, validateDataFile } from "./files.js";
 export {
+  collectEnvRefs,
   interpolateEnvRefs,
   listEnabledMcpServers,
   MCP_CONFIG_PATH,
@@ -79,7 +81,16 @@ export {
   CustomEndpointSource,
   OpenAiApiSource,
 } from "./providers/ai-sdk.js";
-export { SkillsLibrary, type SkillMeta } from "./skills.js";
+export {
+  parseSkillFrontmatter,
+  SKILL_DESCRIPTION_MAX,
+  SKILL_NAME_MAX,
+  SKILL_NAME_PATTERN,
+  SkillsLibrary,
+  validateSkillMd,
+  type SkillFrontmatter,
+  type SkillMeta,
+} from "./skills.js";
 export { formatLocalTime, startOfDayInZone } from "./time.js";
 export {
   buildDispatchTool,

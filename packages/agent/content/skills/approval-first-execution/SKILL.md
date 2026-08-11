@@ -1,7 +1,8 @@
 ---
 name: approval-first-execution
 description: Drafts-until-approved loop for anything with real-world consequences
-version: 1
+metadata:
+  version: "1"
 ---
 
 # Approval-First Execution

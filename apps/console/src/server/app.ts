@@ -14,6 +14,16 @@ import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./conne
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
 import { deleteEnvValue, listSecrets, setEnvValue } from "./env-file.js";
 import { deleteDataFile, listDataFiles, readDataFile, writeDataFile } from "./files.js";
+import { deleteMcpServer, mcpOverview, testMcpServer, upsertMcpServer } from "./mcp.js";
+import {
+  checkSkillUpdates,
+  installSkill,
+  removeSkill,
+  restoreBundledSkill,
+  skillsOverview,
+  SkillsUserError,
+  updateSkill,
+} from "@nudge/server/skills";
 
 /**
  * Attachment types the browser may render at the console origin. Nothing here
@@ -172,6 +182,88 @@ export function createConsoleApp(
           return { error: result.error };
         }
         return result.value;
+      })
+
+      // -- MCP servers (typed surface over DATA_DIR/mcp/servers.json) -------
+      .get("/api/mcp", () => mcpOverview(context.dataDir(), context.envPath))
+      .put("/api/mcp/servers/:name", ({ params, body, set }) => {
+        const record = (body ?? {}) as Record<string, unknown>;
+        const result = upsertMcpServer(
+          context.dataDir(),
+          context.envPath,
+          params.name,
+          record.server,
+          typeof record.baseHash === "string" ? record.baseHash : null,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return result.value;
+      })
+      .delete("/api/mcp/servers/:name", ({ params, set }) => {
+        const result = deleteMcpServer(context.dataDir(), params.name);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { ok: true };
+      })
+      .post("/api/mcp/servers/:name/test", async ({ params, set }) => {
+        const result = await testMcpServer(context.dataDir(), context.envPath, params.name);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return result.value;
+      })
+
+      // -- skills (Agent Skills format; registry installs via skills.sh) ----
+      .get("/api/skills", () => skillsOverview(context.dataDir()))
+      .post("/api/skills/install", async ({ body, set }) => {
+        const source = (body as Record<string, unknown>)?.source;
+        if (typeof source !== "string" || source.trim() === "") {
+          set.status = 422;
+          return { error: "Provide a source like owner/repo or owner/repo/skill-name." };
+        }
+        try {
+          return await installSkill({ dataDir: context.dataDir(), source: source.trim() });
+        } catch (error) {
+          if (!(error instanceof SkillsUserError)) throw error;
+          set.status = 422;
+          return { error: error.message };
+        }
+      })
+      .post("/api/skills/check", () => checkSkillUpdates(context.dataDir()))
+      .post("/api/skills/:name/update", async ({ params, body, set }) => {
+        try {
+          return await updateSkill({
+            dataDir: context.dataDir(),
+            name: params.name,
+            force: Boolean((body as Record<string, unknown>)?.force),
+          });
+        } catch (error) {
+          if (!(error instanceof SkillsUserError)) throw error;
+          set.status = error.message.includes("customized locally") ? 409 : 422;
+          return { error: error.message };
+        }
+      })
+      .post("/api/skills/:name/restore", ({ params, set }) => {
+        try {
+          restoreBundledSkill(context.dataDir(), params.name);
+          return { ok: true };
+        } catch (error) {
+          if (!(error instanceof SkillsUserError)) throw error;
+          set.status = 404;
+          return { error: error.message };
+        }
+      })
+      .delete("/api/skills/:name", ({ params, set }) => {
+        if (!removeSkill(context.dataDir(), params.name)) {
+          set.status = 404;
+          return { error: `No skill "${params.name}".` };
+        }
+        return { ok: true };
       })
 
       // -- connections (Google accounts for gws + ChatGPT subscription) -----

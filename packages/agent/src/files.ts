@@ -3,6 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { parseSchedule } from "@nudge/schedule";
 import { applyEdits, type FileEdit } from "./edits.js";
 import { MCP_CONFIG_PATH, parseMcpConfig } from "./mcp-config.js";
+import { validateSkillMd } from "./skills.js";
 import { DEFAULT_MAX_BYTES, splitLines, truncateHead } from "./truncate.js";
 
 /** Character budgets for the curated memory files (Hermes-style bounds). */
@@ -163,6 +164,10 @@ function isHidden(rel: string): boolean {
  * Exported for the console, whose owner-facing editor enforces the same rules.
  */
 export function validateDataFile(rel: string, content: string): string | undefined {
+  if (rel === "skills-lock.json") {
+    return "skills-lock.json is managed by the skills CLI — use `skills add/update/rm` instead.";
+  }
+
   if (rel === "SCHEDULE.md") {
     const { errors } = parseSchedule(content);
     if (errors.length > 0) {
@@ -189,16 +194,11 @@ export function validateDataFile(rel: string, content: string): string | undefin
 
   const parts = rel.split(sep);
   if (parts[0] === "skills" && parts.at(-1) === "SKILL.md") {
-    if (parts.length !== 3) {
+    if (parts.length !== 3 || parts[1] === undefined) {
       return `skills are laid out as skills/<name>/SKILL.md, got "${rel}".`;
     }
-    const frontmatter = /^---\n([\s\S]*?)\n---/.exec(content)?.[1];
-    if (!frontmatter || !/^name\s*:\s*\S/m.test(frontmatter) || !/^description\s*:\s*\S/m.test(frontmatter)) {
-      return (
-        `SKILL.md needs YAML frontmatter with at least "name:" and "description:" ` +
-        `(see README.md).`
-      );
-    }
+    const problem = validateSkillMd(parts[1], content);
+    if (problem) return `${rel} rejected — ${problem} (format is in README.md).`;
   }
   return undefined;
 }
