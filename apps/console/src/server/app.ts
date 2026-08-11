@@ -14,6 +14,7 @@ import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./conne
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
 import { deleteEnvValue, listSecrets, setEnvValue } from "./env-file.js";
 import { deleteDataFile, listDataFiles, readDataFile, writeDataFile } from "./files.js";
+import { deleteMcpServer, mcpOverview, testMcpServer, upsertMcpServer } from "./mcp.js";
 
 /**
  * Attachment types the browser may render at the console origin. Nothing here
@@ -167,6 +168,40 @@ export function createConsoleApp(
       })
       .delete("/api/files/content", ({ query, set }) => {
         const result = deleteDataFile(context.dataDir(), String(query.path ?? ""));
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return result.value;
+      })
+
+      // -- MCP servers (typed surface over DATA_DIR/mcp/servers.json) -------
+      .get("/api/mcp", () => mcpOverview(context.dataDir(), context.envPath))
+      .put("/api/mcp/servers/:name", ({ params, body, set }) => {
+        const record = (body ?? {}) as Record<string, unknown>;
+        const result = upsertMcpServer(
+          context.dataDir(),
+          context.envPath,
+          params.name,
+          record.server,
+          typeof record.baseHash === "string" ? record.baseHash : null,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return result.value;
+      })
+      .delete("/api/mcp/servers/:name", ({ params, set }) => {
+        const result = deleteMcpServer(context.dataDir(), params.name);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { ok: true };
+      })
+      .post("/api/mcp/servers/:name/test", async ({ params, set }) => {
+        const result = await testMcpServer(context.dataDir(), context.envPath, params.name);
         if (!result.ok) {
           set.status = result.status;
           return { error: result.error };

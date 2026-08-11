@@ -241,6 +241,39 @@ export interface ChatGptFlow {
   error?: string;
 }
 
+export type McpServerConfig =
+  | { transport: "http"; url: string; headers?: Record<string, string>; enabled: boolean }
+  | {
+      transport: "stdio";
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+      enabled: boolean;
+    };
+
+export interface McpServerView {
+  name: string;
+  config: McpServerConfig;
+  /** Hash of the stored entry; sent back as baseHash to detect concurrent edits. */
+  hash: string;
+  envRefs: { name: string; set: boolean }[];
+}
+
+export interface McpOverview {
+  path: string;
+  exists: boolean;
+  error: string | null;
+  servers: McpServerView[];
+}
+
+export interface McpTestResult {
+  ok: boolean;
+  error?: string;
+  tools?: { name: string; description: string }[];
+  truncated?: boolean;
+}
+
 export interface SearchHit {
   id: number;
   sessionId: number;
@@ -314,7 +347,22 @@ export const useConnections = () =>
     refetchInterval: 60_000,
   });
 
+export const useMcp = () =>
+  useQuery({ queryKey: ["mcp"], queryFn: () => request<McpOverview>("/api/mcp") });
+
 // -- mutations --------------------------------------------------------------
+
+export const saveMcpServer = (name: string, server: McpServerConfig, baseHash: string | null) =>
+  request<McpServerView>(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify({ server, baseHash }),
+  });
+
+export const deleteMcpServer = (name: string) =>
+  request<{ ok: boolean }>(`/api/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" });
+
+export const testMcpServer = (name: string) =>
+  request<McpTestResult>(`/api/mcp/servers/${encodeURIComponent(name)}/test`, { method: "POST" });
 
 export const saveGoogleClient = (input: { json?: string; client_id?: string; client_secret?: string }) =>
   request<{ clientId: string }>("/api/connections/google/client", {

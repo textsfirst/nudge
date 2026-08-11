@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Confirm } from "@/components/ui/confirm";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Input, Textarea } from "@/components/ui/input";
+import { McpSection } from "@/pages/connections-mcp";
 import {
   ApiError,
   disconnectGoogle,
@@ -56,10 +57,11 @@ export function ConnectionsPage() {
   return (
     <Page
       title="Connections"
-      description="Model provider sign-in and the Google accounts the agent can use through the gws CLI."
+      description="Model provider sign-in, the Google accounts the agent can use through the gws CLI, and its MCP servers."
     >
       <ChatGptCard chatgpt={data.chatgpt} />
       <GoogleSection google={data.google} openWizard={(preset) => setWizard(preset ?? {})} />
+      <McpSection />
       {wizard && (
         <GoogleWizard
           google={data.google}
