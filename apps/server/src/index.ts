@@ -2,11 +2,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import {
+  buildImageCaptioner,
   ChatGptAuthManager,
   createModelSources,
   DATA_README,
+  MediaIngest,
   NudgeAgent,
+  supportsVision,
   syncBundledContent,
+  TranscriptionClient,
 } from "@nudge/agent";
 import { createPhotonTransport } from "@nudge/photon";
 import { NudgeStore } from "@nudge/store";
@@ -94,6 +98,10 @@ async function main(): Promise<void> {
       modelOptions: config.compactionModelOptions,
     },
     maxToolSteps: config.maxToolSteps,
+    multimodal: {
+      vision: config.multimodal.enabled ? config.multimodal.vision : "off",
+      maxImagesPerPrompt: config.multimodal.maxImagesPerPrompt,
+    },
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,
     bashEnv: buildGwsBashEnv({
@@ -106,6 +114,37 @@ async function main(): Promise<void> {
     modelOptions: config.modelOptions,
   });
 
+  // Captions need a vision-capable path: the effective flag mirrors the
+  // agent's own auto/on/off resolution over the same sources.
+  const visionEnabled =
+    config.multimodal.enabled &&
+    (config.multimodal.vision === "on" ||
+      (config.multimodal.vision === "auto" &&
+        sources.every((source) => supportsVision(source.modelId))));
+  const mediaIngest = config.multimodal.enabled
+    ? new MediaIngest({
+        store,
+        dataDir: config.dataDir,
+        logger,
+        maxAttachmentBytes: config.multimodal.maxAttachmentBytes,
+        ...(config.multimodal.transcription
+          ? { transcription: new TranscriptionClient(config.multimodal.transcription) }
+          : {}),
+        ...(visionEnabled
+          ? {
+              caption: buildImageCaptioner({
+                sources,
+                ...(config.multimodal.captionModel
+                  ? { model: config.multimodal.captionModel }
+                  : {}),
+                logger,
+              }),
+            }
+          : {}),
+        ...(config.multimodal.ffmpegPath ? { ffmpegPath: config.multimodal.ffmpegPath } : {}),
+      })
+    : undefined;
+
   const transport = await createPhotonTransport({
     ...config.spectrum,
     ownerHandle: config.ownerHandle,
@@ -117,7 +156,12 @@ async function main(): Promise<void> {
     logger,
     isDuplicate: (messageId) => store.isWebhookProcessed(messageId),
     rememberSpace: (handle, spaceId, platform) => store.rememberSpace(handle, spaceId, platform),
-    onBatch: createReplyHandler({ agent, store, logger }),
+    onBatch: createReplyHandler({
+      agent,
+      store,
+      logger,
+      ...(mediaIngest ? { media: mediaIngest } : {}),
+    }),
   });
 
   const delivery = new DeliveryService(store, transport, logger);

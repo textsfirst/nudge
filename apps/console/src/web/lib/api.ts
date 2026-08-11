@@ -158,6 +158,19 @@ export interface ToolCallRecord {
   durationMs?: number;
 }
 
+export interface MessageAttachment {
+  id: number;
+  kind: "image" | "voice" | "file";
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  status: "stored" | "failed";
+  transcript: string | null;
+  caption: string | null;
+  /** False when the transfer failed — there are no bytes to fetch. */
+  hasContent: boolean;
+}
+
 export interface ThreadMessage {
   id: number;
   role: "user" | "assistant" | "error";
@@ -169,6 +182,7 @@ export interface ThreadMessage {
   outputTokens: number | null;
   /** Turn metrics; null on user/error rows and pre-upgrade history. */
   metrics: MessageMetrics | null;
+  attachments: MessageAttachment[];
 }
 
 /** The in-flight turn's live tool-step trace; null when no turn is running. */

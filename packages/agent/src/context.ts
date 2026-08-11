@@ -45,6 +45,25 @@ export function contextWindowFor(modelId: string): number {
 }
 
 /**
+ * Flat token charge per image in the prompt. OpenAI's high-detail cost for a
+ * ~1024² photo is ~765 tokens; estimates here must err high.
+ */
+export const IMAGE_TOKENS = 1_000;
+
+/**
+ * Models known to accept image input, by model-id prefix. Unknown ids are
+ * assumed text-only — sending image parts to a model that rejects them fails
+ * the whole turn, while the reverse merely loses vision (captions still
+ * carry the content). The `vision: "on"` setting overrides for custom
+ * endpoints serving models this registry does not know.
+ */
+const VISION_MODELS: ReadonlyArray<RegExp> = [/^gpt-4\.1/, /^gpt-5/, /^o[134]/, /^gpt-4o/];
+
+export function supportsVision(modelId: string): boolean {
+  return VISION_MODELS.some((pattern) => pattern.test(modelId));
+}
+
+/**
  * Approximate token count: ~4 ASCII characters per token, and a full token
  * per non-ASCII character — CJK really is ~1 token per character, and
  * overcounting accented text is the safe direction.
@@ -60,7 +79,9 @@ export function estimateTokens(text: string): number {
 }
 
 export function estimateMessageTokens(row: MessageRow): number {
-  return estimateTokens(row.content) + MESSAGE_OVERHEAD_TOKENS;
+  // Media never inflates row.content (projections are short text); images the
+  // model may be shown are charged flat, per the linked-attachment aggregate.
+  return estimateTokens(row.content) + MESSAGE_OVERHEAD_TOKENS + IMAGE_TOKENS * row.imageCount;
 }
 
 export interface CompactionBudget {

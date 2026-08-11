@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Copy,
   OctagonMinus,
+  Paperclip,
   Scissors,
   Trash2,
   TriangleAlert,
@@ -24,6 +25,7 @@ import {
   endThread,
   useInvalidate,
   useThread,
+  type MessageAttachment,
   type MessageMetrics,
   type ThreadMessage,
 } from "@/lib/api";
@@ -258,6 +260,57 @@ function interruptionLead(content: string): string | null {
   return match ? match[1]! : null;
 }
 
+function formatSize(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+    : `${Math.max(1, Math.round(bytes / 1024))}KB`;
+}
+
+/** Inbound media under its message: thumbnails, a voice player, file chips. */
+function AttachmentItem({ attachment }: { attachment: MessageAttachment }) {
+  const url = `/api/attachments/${attachment.id}/content`;
+  if (attachment.status === "failed" || !attachment.hasContent) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-lg border border-dashed px-2.5 py-1.5 text-xs text-muted-foreground">
+        <TriangleAlert className="size-3" />
+        {attachment.name} — never arrived
+      </div>
+    );
+  }
+  if (attachment.kind === "image") {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" title={attachment.caption ?? attachment.name}>
+        <img
+          src={url}
+          alt={attachment.caption ?? attachment.name}
+          loading="lazy"
+          className="max-h-48 max-w-[240px] rounded-xl border object-cover"
+        />
+      </a>
+    );
+  }
+  if (attachment.kind === "voice") {
+    return (
+      <div className="flex flex-col gap-1">
+        {/* biome-ignore lint/a11y/useMediaCaption: the transcript is rendered below */}
+        <audio controls preload="none" src={url} className="h-9 max-w-[240px]" />
+      </div>
+    );
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      className="flex items-center gap-1.5 rounded-lg border bg-muted/50 px-2.5 py-1.5 text-xs hover:bg-muted"
+    >
+      <Paperclip className="size-3" />
+      {attachment.name}
+      <span className="text-muted-foreground">{formatSize(attachment.sizeBytes)}</span>
+    </a>
+  );
+}
+
 function MessageItem({
   message,
   compacted,
@@ -280,6 +333,13 @@ function MessageItem({
     >
       {message.toolCalls && message.toolCalls.length > 0 && (
         <ToolSteps calls={message.toolCalls} />
+      )}
+      {message.attachments.length > 0 && (
+        <div className={cn("flex flex-wrap gap-1.5", mine ? "justify-end" : "justify-start")}>
+          {message.attachments.map((attachment) => (
+            <AttachmentItem key={attachment.id} attachment={attachment} />
+          ))}
+        </div>
       )}
       {mine ? (
         <div className="max-w-[75%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-primary px-3.5 py-2 text-sm text-primary-foreground">

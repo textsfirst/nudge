@@ -52,6 +52,11 @@ export const SECRET_SPECS = [
     required: false,
     description: "Enables the web_search / web_extract tools",
   },
+  {
+    key: "TRANSCRIPTION_API_KEY",
+    required: false,
+    description: "Speech-to-text API key for voice memos (falls back to OPENAI_API_KEY)",
+  },
 ] as const;
 
 type SecretValues = {
@@ -158,6 +163,28 @@ export function loadConfig(
         ? { reasoningEffort: settings.model.reasoning_effort }
         : {}),
       ...(settings.model.fast_mode ? { serviceTier: "priority" as const } : {}),
+    },
+    multimodal: {
+      enabled: settings.multimodal.enabled,
+      vision: settings.multimodal.vision,
+      maxAttachmentBytes: Math.round(settings.multimodal.max_attachment_mb * 1024 * 1024),
+      maxImagesPerPrompt: settings.multimodal.max_images_per_prompt,
+      ...(settings.multimodal.transcription_enabled &&
+      (secrets.TRANSCRIPTION_API_KEY || secrets.OPENAI_API_KEY)
+        ? {
+            transcription: {
+              apiKey: (secrets.TRANSCRIPTION_API_KEY ?? secrets.OPENAI_API_KEY) as string,
+              model: settings.multimodal.transcription_model,
+              ...(settings.multimodal.transcription_base_url
+                ? { baseUrl: settings.multimodal.transcription_base_url }
+                : {}),
+            },
+          }
+        : {}),
+      ...(settings.multimodal.caption_model
+        ? { captionModel: settings.multimodal.caption_model }
+        : {}),
+      ...(settings.multimodal.ffmpeg_path ? { ffmpegPath: settings.multimodal.ffmpeg_path } : {}),
     },
     compactionModel: settings.agent.compaction_model,
     compactionModelOptions: {

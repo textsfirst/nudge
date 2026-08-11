@@ -1,4 +1,14 @@
-export { NudgeAgent, type NudgeAgentOptions } from "./agent.js";
+export { NudgeAgent, type NudgeAgentOptions, type ReplyInput } from "./agent.js";
+export { buildImageCaptioner, type ImageCaptionerOptions } from "./captions.js";
+export {
+  MediaIngest,
+  type IncomingMedia,
+  type IngestResult,
+  type MediaConverters,
+  type MediaIngestOptions,
+  type MediaRef,
+} from "./media.js";
+export { TranscriptionClient, type TranscriptionOptions } from "./transcribe.js";
 export {
   DEFAULT_BASH_TIMEOUT_SECONDS,
   executeBash,
@@ -18,8 +28,10 @@ export {
   DEFAULT_KEEP_RECENT_TOKENS,
   estimateMessageTokens,
   estimateTokens,
+  IMAGE_TOKENS,
   planCompaction,
   RESERVE_TOKENS,
+  supportsVision,
   usableWindow,
   type CompactionBudget,
   type CompactionPlan,
@@ -55,7 +67,7 @@ export {
 } from "./providers/ai-sdk.js";
 export { SkillsLibrary, type SkillMeta } from "./skills.js";
 export { formatLocalTime, startOfDayInZone } from "./time.js";
-export { buildSendUpdateTool, buildTools, type ToolContext } from "./tools.js";
+export { buildSendFileTool, buildSendUpdateTool, buildTools, type ToolContext } from "./tools.js";
 export {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,

@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChatGptAuthManager } from "@nudge/agent";
 import { parseSchedule, nextRun } from "@nudge/schedule";
@@ -13,6 +14,26 @@ import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./conne
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
 import { deleteEnvValue, listSecrets, setEnvValue } from "./env-file.js";
 import { deleteDataFile, listDataFiles, readDataFile, writeDataFile } from "./files.js";
+
+/**
+ * Attachment types the browser may render at the console origin. Nothing here
+ * can carry script (no svg, no html); audio/wav is the served voice format.
+ */
+const INLINE_SAFE_MIME = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "application/pdf",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/x-caf",
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+]);
 
 /**
  * The console API. Everything is owner-facing and assumes a localhost bind —
@@ -216,6 +237,7 @@ export function createConsoleApp(
           set.status = 404;
           return { error: `No thread ${params.id}.` };
         }
+        const attachmentsByMessage = context.store().attachmentsForSession(id);
         const messages = context.store().sessionMessages(id).map((message) => ({
           id: message.id,
           role: message.role,
@@ -225,6 +247,18 @@ export function createConsoleApp(
           inputTokens: message.inputTokens,
           outputTokens: message.outputTokens,
           metrics: parseMetrics(message.metrics),
+          attachments: (attachmentsByMessage.get(message.id) ?? []).map((attachment) => ({
+            id: attachment.id,
+            kind: attachment.kind,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes,
+            status: attachment.status,
+            transcript: attachment.transcript,
+            caption: attachment.caption,
+            /** False when the transfer failed — nothing to serve. */
+            hasContent: attachment.path !== null || attachment.altPath !== null,
+          })),
         }));
         // A live tool-step trace exists only while a turn is in flight. Traces
         // that stopped updating (e.g. the server died mid-turn) are ignored.
@@ -241,6 +275,43 @@ export function createConsoleApp(
               }
             : null,
         };
+      })
+      // Bytes for a stored attachment. The served path comes from the
+      // database row, never the request — no traversal surface. Voice serves
+      // the browser-playable wav conversion; HEIC serves its jpeg.
+      .get("/api/attachments/:id/content", ({ params, set }) => {
+        const row = context.store().attachmentById(Number(params.id));
+        const relative = row ? (row.altPath ?? row.path) : null;
+        if (!row || !relative) {
+          set.status = 404;
+          return { error: `No stored attachment ${params.id}.` };
+        }
+        const absolute = resolve(context.dataDir(), relative);
+        if (!existsSync(absolute)) {
+          set.status = 404;
+          return { error: `The stored file for attachment ${params.id} is missing.` };
+        }
+        const mimeType = row.altPath
+          ? row.kind === "voice"
+            ? "audio/wav"
+            : "image/jpeg"
+          : row.mimeType.toLowerCase();
+        // The stored MIME comes from the message sender. Only render types
+        // that cannot execute script at the console origin; everything else
+        // (svg, html, …) downloads as an opaque file.
+        const inline = INLINE_SAFE_MIME.has(mimeType);
+        // Header values must be Latin-1 and quote-free; the original name
+        // rides along RFC 5987-encoded for browsers that use it.
+        const asciiName =
+          row.name.replace(/["\\\r\n]/g, "").replace(/[^ -~]/g, "_") || "attachment";
+        set.headers["content-type"] = inline ? mimeType : "application/octet-stream";
+        set.headers["content-disposition"] =
+          `${inline ? "inline" : "attachment"}; filename="${asciiName}"; ` +
+          `filename*=UTF-8''${encodeURIComponent(row.name)}`;
+        set.headers["x-content-type-options"] = "nosniff";
+        // Hash-named files never change in place.
+        set.headers["cache-control"] = "private, max-age=31536000, immutable";
+        return new Uint8Array(readFileSync(absolute));
       })
       .post("/api/threads/:id/end", ({ params, set }) => {
         const id = Number(params.id);

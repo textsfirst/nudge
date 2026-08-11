@@ -87,6 +87,9 @@ describe("SETTINGS_FORM", () => {
       "tools.firecrawl_url": "http://localhost:3002",
       "google.default_account": "personal",
       "google.gws_path": "/opt/homebrew/bin/gws",
+      "multimodal.transcription_base_url": "https://api.openai.com/v1",
+      "multimodal.caption_model": "gpt-5-mini",
+      "multimodal.ffmpeg_path": "/opt/homebrew/bin/ffmpeg",
     });
     const flatten = (value: unknown, prefix = "", out: string[] = []): string[] => {
       if (value !== null && typeof value === "object") {

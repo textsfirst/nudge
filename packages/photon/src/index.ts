@@ -3,6 +3,7 @@ export {
   InboundProcessor,
   type InboundBatch,
   type InboundLogger,
+  type InboundMedia,
   type InboundProcessorOptions,
   type InboundTextMessage,
 } from "./inbound.js";
@@ -14,6 +15,7 @@ export {
 } from "./typing.js";
 export {
   createPhotonTransport,
+  type AttachmentSendOptions,
   type BatchControls,
   type PhotonTransport,
   type PhotonTransportConfig,

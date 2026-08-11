@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
-import type { MessageRow, NudgeStore, SessionRow } from "@nudge/store";
+import type { AttachmentRow, MessageRow, NudgeStore, SessionRow } from "@nudge/store";
 import {
   stepCountIs,
   streamText,
@@ -16,11 +17,13 @@ import {
   contextWindowFor,
   estimateTokens,
   planCompaction,
+  supportsVision,
   usableWindow,
   type CompactionBudget,
 } from "./context.js";
 import { FileWorkspace } from "./files.js";
 import { createLoopGuard } from "./loop.js";
+import type { MediaRef } from "./media.js";
 import { MemoryFiles } from "./memory.js";
 import { isContextOverflowError, SubscriptionAuthError } from "./providers/errors.js";
 import { truncateTail } from "./truncate.js";
@@ -28,7 +31,7 @@ import { withStreamRetry, type StreamRetryOptions } from "./providers/retry.js";
 import { buildSystemPrompt, type GoogleAccountRef } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
 import { startOfDayInZone } from "./time.js";
-import { buildSendUpdateTool, buildTools } from "./tools.js";
+import { buildSendFileTool, buildSendUpdateTool, buildTools } from "./tools.js";
 import type { Logger, ModelSource } from "./types.js";
 import { FirecrawlClient, type FirecrawlOptions } from "./web.js";
 
@@ -63,6 +66,18 @@ export interface NudgeAgentOptions {
   };
   /** Backstop against runaway tool loops (default 256), not a per-task budget — see loop.ts. */
   maxToolSteps?: number;
+  /** Whether and how much inbound photos reach the model as image parts. */
+  multimodal?: {
+    /**
+     * "auto" shows images only when every source's model is in the vision
+     * registry (sources fall back mid-turn, so all must accept image parts);
+     * "on" forces them for custom endpoints the registry doesn't know.
+     * Text projections carry the content either way.
+     */
+    vision?: "auto" | "on" | "off";
+    /** Newest images beyond this stay text-only in the prompt (default 6). */
+    maxImagesPerPrompt?: number;
+  };
   /** Firecrawl credentials; when absent the web tools are omitted entirely. */
   web?: FirecrawlOptions;
   /** Defaults to true; false removes the bash tool from the set. */
@@ -79,6 +94,12 @@ export interface NudgeAgentOptions {
   /** Tuning for the early-stream-error retry (mainly for tests) — see providers/retry.ts. */
   streamRetry?: Pick<StreamRetryOptions, "attempts" | "baseDelayMs">;
   now?: () => number;
+}
+
+/** An inbound turn: the text (media projections included) plus its media refs. */
+export interface ReplyInput {
+  text: string;
+  media?: MediaRef[];
 }
 
 const SILENT_PATTERN = /^\s*(\[SILENT\]|NO_REPLY)\s*$/;
@@ -177,10 +198,13 @@ export class NudgeAgent {
   readonly #options: NudgeAgentOptions;
   readonly #memory: MemoryFiles;
   readonly #skills: SkillsLibrary;
+  readonly #workspace: FileWorkspace;
   readonly #tools: ToolSet;
   readonly #idleRolloverMs: number;
   readonly #budget: CompactionBudget;
   readonly #maxToolSteps: number;
+  readonly #vision: boolean;
+  readonly #maxImagesPerPrompt: number;
   readonly #queues = new Map<string, Promise<unknown>>();
   readonly #systemFileCache = new Map<number, string | undefined>();
   readonly #compactionFailures = new Map<number, number>();
@@ -192,8 +216,9 @@ export class NudgeAgent {
     this.#options = options;
     this.#memory = new MemoryFiles(options.dataDir);
     this.#skills = new SkillsLibrary(join(options.dataDir, "skills"));
+    this.#workspace = new FileWorkspace(options.dataDir);
     this.#tools = buildTools({
-      workspace: new FileWorkspace(options.dataDir),
+      workspace: this.#workspace,
       store: options.store,
       ...(options.web ? { web: new FirecrawlClient(options.web) } : {}),
       ...(options.bashEnabled !== false
@@ -210,6 +235,13 @@ export class NudgeAgent {
       keepRecentTokens: options.compaction?.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS,
     };
     this.#maxToolSteps = options.maxToolSteps ?? 256;
+    const vision = options.multimodal?.vision ?? "auto";
+    // Auto follows the smallest-capability rule the window budget uses: any
+    // source can end up answering mid-turn, so all must accept image parts.
+    this.#vision =
+      vision === "on" ||
+      (vision === "auto" && options.sources.every((source) => supportsVision(source.modelId)));
+    this.#maxImagesPerPrompt = options.multimodal?.maxImagesPerPrompt ?? 6;
   }
 
   /**
@@ -242,25 +274,41 @@ export class NudgeAgent {
    */
   reply(
     handle: string,
-    text: string,
+    input: string | ReplyInput,
     options: {
       abortSignal?: AbortSignal;
       onProgress?: (text: string) => Promise<void>;
+      /** Enables the send_file tool: deliver a data-directory file to the owner. */
+      onSendFile?: (data: Buffer, options: { name: string; mimeType: string }) => Promise<void>;
       onReaction?: (emoji: string) => void;
       onSilent?: () => void;
       onReplyReady?: (text: string) => Promise<void>;
     } = {},
   ): Promise<string | null> {
+    const { text, media = [] } = typeof input === "string" ? { text: input } : input;
     return this.#serialized(handle, async () => {
       const now = this.#now();
-      const session = await this.#resolveSession(handle, now, options.abortSignal);
-      this.#options.store.appendMessage({
+      // Deliberately not steerable: a steering abort during a rollover's
+      // carryover summary would otherwise throw before the user row (and its
+      // media links) are persisted — losing the very message steering assumes
+      // is already in history. The abort takes effect right after, at the
+      // first abortable step below.
+      const session = await this.#resolveSession(handle, now);
+      const userRow = this.#options.store.appendMessage({
         sessionId: session.id,
         handle,
         role: "user",
         content: text,
         at: now,
       });
+      // Media rows were persisted unlinked during ingest — the message id did
+      // not exist yet. Tie them to the turn so history replay can find them.
+      if (media.length > 0) {
+        this.#options.store.linkAttachments(
+          media.map((ref) => ref.attachmentId),
+          userRow.id,
+        );
+      }
 
       // Pre-flight safety net: history grows without a compaction check via
       // runTask appends and interruption notes, and thresholds can change
@@ -276,18 +324,21 @@ export class NudgeAgent {
       // The console polls this trace to show the turn live; cleared when the
       // turn settles either way (the finished turn's messages replace it).
       this.#options.store.setTurnProgress(session.id, handle, "[]", this.#now());
-      // Built once per turn, not per attempt: the tool's dedupe/cap state must
+      // Built once per turn, not per attempt: the tools' dedupe/cap state must
       // survive the overflow retry so a resend doesn't repeat sent updates.
-      const tools = options.onProgress
-        ? { ...this.#tools, ...buildSendUpdateTool(options.onProgress) }
-        : this.#tools;
+      const tools = {
+        ...this.#tools,
+        ...(options.onProgress ? buildSendUpdateTool(options.onProgress) : {}),
+        ...(options.onSendFile ? buildSendFileTool(this.#workspace, options.onSendFile) : {}),
+      };
       // History is re-read per attempt so a fold in between is picked up.
       const attempt = () =>
         this.#generate({
           system: this.#systemPromptFor(session, now, {
             progress: options.onProgress !== undefined,
+            fileSend: options.onSendFile !== undefined,
           }),
-          messages: toModelMessages(this.#history(session)),
+          messages: this.#modelMessages(session),
           tools,
           ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
           stepSink: steps,
@@ -446,11 +497,7 @@ export class NudgeAgent {
     return this.#options.now?.() ?? Date.now();
   }
 
-  async #resolveSession(
-    handle: string,
-    now: number,
-    abortSignal?: AbortSignal,
-  ): Promise<SessionRow> {
+  async #resolveSession(handle: string, now: number): Promise<SessionRow> {
     const active = this.#options.store.activeSession(handle);
     if (active) {
       const reason = this.#rolloverReason(active, now);
@@ -459,9 +506,8 @@ export class NudgeAgent {
       }
       let carryover: string | undefined;
       try {
-        carryover = await this.#summarizeSession(active, abortSignal);
+        carryover = await this.#summarizeSession(active);
       } catch (error) {
-        abortSignal?.throwIfAborted();
         this.#options.logger.warn("Carryover summary failed; starting the thread without one", {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -499,10 +545,28 @@ export class NudgeAgent {
     return store.sessionMessages(session.id, compactedThrough);
   }
 
+  /**
+   * History as model messages, with recent photos attached as image parts when
+   * vision is on. Folded rows never get here (`#history` starts past the fold
+   * cursor), so an image ages out of the prompt with its row — its caption in
+   * the summary is what remains.
+   */
+  #modelMessages(session: SessionRow): ModelMessage[] {
+    return toModelMessages(this.#history(session), {
+      attachments: this.#vision
+        ? this.#options.store.attachmentsForSession(session.id)
+        : new Map(),
+      dataDir: this.#options.dataDir,
+      vision: this.#vision,
+      maxImages: this.#maxImagesPerPrompt,
+      logger: this.#options.logger,
+    });
+  }
+
   #systemPromptFor(
     session: SessionRow,
     now: number,
-    opts: { progress?: boolean } = {},
+    opts: { progress?: boolean; fileSend?: boolean } = {},
   ): string {
     if (!this.#systemFileCache.has(session.id)) {
       this.#systemFileCache.set(session.id, this.#options.systemFile());
@@ -521,6 +585,7 @@ export class NudgeAgent {
       webEnabled: Boolean(this.#options.web),
       bashEnabled: this.#options.bashEnabled !== false,
       ...(opts.progress ? { progressEnabled: true } : {}),
+      ...(opts.fileSend ? { fileSendEnabled: true } : {}),
       googleAccounts: this.#googleAccounts(),
     });
   }
@@ -992,11 +1057,93 @@ function serializeMetrics(metrics: TurnMetrics | undefined): string | undefined 
   return Object.keys(rest).length > 0 ? JSON.stringify(rest) : undefined;
 }
 
+interface ModelMessageOptions {
+  /** Linked attachments by message id — the session's full set, fetched once. */
+  attachments: Map<number, AttachmentRow[]>;
+  dataDir: string;
+  vision: boolean;
+  /** Newest-first cap on image parts across the whole prompt. */
+  maxImages: number;
+  logger: Logger;
+}
+
+const TEXT_ONLY_OPTIONS: ModelMessageOptions = {
+  attachments: new Map(),
+  dataDir: "",
+  vision: false,
+  maxImages: 0,
+  logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+};
+
 /** Error rows are console-facing diagnostics — the model never sees them. */
-function toModelMessages(rows: MessageRow[]): ModelMessage[] {
+function toModelMessages(
+  rows: MessageRow[],
+  options: ModelMessageOptions = TEXT_ONLY_OPTIONS,
+): ModelMessage[] {
+  // Newest images win the budget: walking back from the latest row, the first
+  // `maxImages` vision-eligible attachments become parts; older ones stay
+  // text-only (their projection in row.content already describes them).
+  const shown = new Set<number>();
+  if (options.vision) {
+    outer: for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const attachments = options.attachments.get(rows[i]!.id) ?? [];
+      for (let j = attachments.length - 1; j >= 0; j -= 1) {
+        const attachment = attachments[j]!;
+        if (attachment.kind !== "image" || !attachment.visionEligible) continue;
+        shown.add(attachment.id);
+        if (shown.size >= options.maxImages) break outer;
+      }
+    }
+  }
   return rows
     .filter((row): row is MessageRow & { role: "user" | "assistant" } => row.role !== "error")
-    .map((row) => ({ role: row.role, content: row.content }));
+    .map((row) => {
+      if (row.role !== "user" || shown.size === 0) {
+        return { role: row.role, content: row.content };
+      }
+      const images = (options.attachments.get(row.id) ?? []).filter((attachment) =>
+        shown.has(attachment.id),
+      );
+      const parts = images.flatMap((attachment) => {
+        const part = imagePart(attachment, options.dataDir);
+        if (!part) {
+          options.logger.warn("Skipping an image whose stored bytes are unreadable", {
+            attachmentId: attachment.id,
+            path: attachment.path,
+          });
+        }
+        return part ? [part] : [];
+      });
+      if (parts.length === 0) {
+        return { role: row.role, content: row.content };
+      }
+      return {
+        role: row.role,
+        content: [
+          ...(row.content.length > 0 ? [{ type: "text" as const, text: row.content }] : []),
+          ...parts,
+        ],
+      };
+    });
+}
+
+/** The vision copy: the HEIC→JPEG conversion when present, the original otherwise. */
+function imagePart(
+  attachment: AttachmentRow,
+  dataDir: string,
+): { type: "file"; data: Buffer; mediaType: string; filename: string } | undefined {
+  const relative = attachment.altPath ?? attachment.path;
+  if (!relative) return undefined;
+  try {
+    return {
+      type: "file",
+      data: readFileSync(join(dataDir, relative)),
+      mediaType: attachment.altPath ? "image/jpeg" : attachment.mimeType,
+      filename: attachment.name,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function transcript(messages: MessageRow[]): string {

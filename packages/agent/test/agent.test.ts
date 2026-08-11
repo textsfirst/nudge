@@ -1,6 +1,9 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NudgeAgent, SubscriptionAuthError } from "../src/index.js";
-import type { ModelSource } from "../src/index.js";
+import type { MediaRef, ModelSource } from "../src/index.js";
+import type { NudgeStore } from "@nudge/store";
 import {
   errorChunks,
   makeAgent,
@@ -529,6 +532,125 @@ describe("NudgeAgent.reply", () => {
     const { agent, store } = makeAgent(["Fresh start it is. [NEW_THREAD]"]);
     await expect(agent.reply(HANDLE, "please start over")).resolves.toBe("Fresh start it is.");
     expect(store.activeSession(HANDLE)).toBeUndefined();
+  });
+});
+
+describe("NudgeAgent.reply multimodal", () => {
+  /** Persist image bytes + an attachments row the way MediaIngest would. */
+  function storedImage(
+    store: NudgeStore,
+    dataDir: string,
+    name: string,
+    bytes = "jpeg-bytes",
+  ): MediaRef {
+    const relative = join("attachments", `${name.replace(/\W/g, "")}.jpg`);
+    mkdirSync(join(dataDir, "attachments"), { recursive: true });
+    writeFileSync(join(dataDir, relative), Buffer.from(bytes));
+    const row = store.insertAttachment({
+      handle: HANDLE,
+      kind: "image",
+      name,
+      mimeType: "image/jpeg",
+      sizeBytes: bytes.length,
+      path: relative,
+      visionEligible: true,
+    });
+    return {
+      attachmentId: row.id,
+      kind: "image",
+      name,
+      mimeType: "image/jpeg",
+      path: relative,
+      visionEligible: true,
+    };
+  }
+
+  it("shows a linked photo to the model as an image part when vision is on", async () => {
+    const { agent, store, source, dataDir } = makeAgent(["nice dog!"], {
+      multimodal: { vision: "on" },
+    });
+    const ref = storedImage(store, dataDir, "dog.jpg");
+
+    await expect(
+      agent.reply(HANDLE, { text: 'look\n[image "dog.jpg"]', media: [ref] }),
+    ).resolves.toBe("nice dog!");
+
+    // The row is linked so future turns replay the image from history.
+    expect(store.attachmentById(ref.attachmentId)?.messageId).not.toBeNull();
+    const messages = promptMessages(source.calls[0]!);
+    expect(messages.at(-1)).toEqual({
+      role: "user",
+      text: 'look\n[image "dog.jpg"]',
+      images: 1,
+    });
+  });
+
+  it("replays earlier photos on later turns from linked history", async () => {
+    const { agent, store, source, dataDir } = makeAgent(["r1", "r2"], {
+      multimodal: { vision: "on" },
+    });
+    const ref = storedImage(store, dataDir, "dog.jpg");
+
+    await agent.reply(HANDLE, { text: '[image "dog.jpg"]', media: [ref] });
+    await agent.reply(HANDLE, "what breed was that?");
+
+    const second = promptMessages(source.calls[1]!);
+    expect(second.filter((message) => message.images)).toHaveLength(1);
+  });
+
+  it("keeps prompts text-only for models outside the vision registry (auto)", async () => {
+    // ScriptedSource's model id is deliberately off-registry.
+    const { agent, store, source, dataDir } = makeAgent(["reply"]);
+    const ref = storedImage(store, dataDir, "dog.jpg");
+
+    await agent.reply(HANDLE, { text: '[image "dog.jpg"]', media: [ref] });
+
+    const messages = promptMessages(source.calls[0]!);
+    expect(messages.every((message) => message.images === undefined)).toBe(true);
+  });
+
+  it("caps image parts at the newest N, leaving older photos as text", async () => {
+    const { agent, store, source, dataDir } = makeAgent(["r1", "r2"], {
+      multimodal: { vision: "on", maxImagesPerPrompt: 1 },
+    });
+    const first = storedImage(store, dataDir, "first.jpg", "first-bytes");
+    const second = storedImage(store, dataDir, "second.jpg", "second-bytes");
+
+    await agent.reply(HANDLE, { text: '[image "first.jpg"]', media: [first] });
+    await agent.reply(HANDLE, { text: '[image "second.jpg"]', media: [second] });
+
+    const call = promptMessages(source.calls[1]!);
+    const withImages = call.filter((message) => message.images);
+    expect(withImages).toHaveLength(1);
+    // The newest photo won the budget.
+    expect(withImages[0]?.text).toContain("second.jpg");
+  });
+
+  it("folds image turns into a text summary — no image parts survive compaction", async () => {
+    const long = (label: string) => `${label} ${"x".repeat(20_000)}`;
+    const { agent, store, source, dataDir } = makeAgent(
+      ["r1", "fold summary", "r2"],
+      {
+        multimodal: { vision: "on" },
+        compaction: { contextWindowTokens: 24_000, keepRecentTokens: 6_000 },
+      },
+    );
+    const ref = storedImage(store, dataDir, "dog.jpg");
+
+    await agent.reply(HANDLE, {
+      text: `${long("m1")}\n[image "dog.jpg": a dog on a beach]`,
+      media: [ref],
+    });
+    await agent.reply(HANDLE, long("m2"));
+
+    expect(store.activeSession(HANDLE)!.summary).toBe("fold summary");
+    // The summarizer saw the caption projection, not the pixels.
+    const summarize = promptMessages(source.calls[1]!);
+    expect(summarize.every((message) => message.images === undefined)).toBe(true);
+    expect(summarize.at(-1)?.text).toContain('[image "dog.jpg": a dog on a beach]');
+    // The post-fold reply prompt carries no image parts either.
+    const reply = promptMessages(source.calls[2]!);
+    expect(reply.every((message) => message.images === undefined)).toBe(true);
   });
 });
 

@@ -164,17 +164,26 @@ export function makeAgent(script: ScriptEntry[], overrides: Partial<NudgeAgentOp
   };
 }
 
-/** Flatten a mock call's prompt into readable role/text pairs. */
+/**
+ * Flatten a mock call's prompt into readable role/text pairs. Image/file
+ * parts surface as an `images` count — present only when non-zero, so
+ * text-only assertions stay untouched.
+ */
 export function promptMessages(
   call: LanguageModelV3CallOptions,
-): { role: string; text: string }[] {
-  return call.prompt.map((message) => ({
-    role: message.role,
-    text:
-      typeof message.content === "string"
-        ? message.content
-        : message.content
-            .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
-            .join(""),
-  }));
+): { role: string; text: string; images?: number }[] {
+  return call.prompt.map((message) => {
+    const parts = typeof message.content === "string" ? [] : message.content;
+    const images = parts.filter((part) => part.type === "file").length;
+    return {
+      role: message.role,
+      text:
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
+              .join(""),
+      ...(images > 0 ? { images } : {}),
+    };
+  });
 }

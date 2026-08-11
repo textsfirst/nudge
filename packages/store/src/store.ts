@@ -6,6 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 export type MessageRole = "user" | "assistant" | "error";
 export type OutboundKind = "reply" | "nudge";
 export type OutboundStatus = "pending" | "sending" | "sent" | "failed";
+export type AttachmentKind = "image" | "voice" | "file";
+/** `failed` rows record media the owner sent but whose bytes never arrived. */
+export type AttachmentStatus = "stored" | "failed";
 
 export interface SessionRow {
   id: number;
@@ -32,6 +35,35 @@ export interface MessageRow {
   outputTokens: number | null;
   /** JSON turn metrics (model, latency, cache tokens) for the console; assistant rows only. */
   metrics: string | null;
+  /** Vision-eligible images linked to this row; 0 outside `sessionMessages`. */
+  imageCount: number;
+  createdAt: number;
+}
+
+/**
+ * Media the owner sent (or that failed to arrive), with bytes on disk under
+ * the data directory. Rows are inserted unlinked during ingest and tied to
+ * their message once the agent persists the user row.
+ */
+export interface AttachmentRow {
+  id: number;
+  messageId: number | null;
+  handle: string;
+  /** Webhook message id the media arrived with, for dedupe and debugging. */
+  sourceMessageId: string | null;
+  kind: AttachmentKind;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** Path relative to the data directory; null when the transfer failed. */
+  path: string | null;
+  /** Converted artifact (wav for voice, jpeg for HEIC), relative to the data directory. */
+  altPath: string | null;
+  transcript: string | null;
+  caption: string | null;
+  status: AttachmentStatus;
+  /** True when the stored bytes are an image the model can be shown. */
+  visionEligible: boolean;
   createdAt: number;
 }
 
@@ -85,7 +117,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -219,6 +251,31 @@ const MIGRATIONS: readonly Migration[] = [
     // landed, so recovery resumes mid-message instead of replaying it all.
     db.exec("ALTER TABLE outbound_ledger ADD COLUMN sent_chunks INTEGER NOT NULL DEFAULT 0");
   },
+  (db) => {
+    // Inbound media: bytes live on disk under the data directory; the row
+    // carries the metadata, transcript, and caption. message_id stays NULL
+    // between ingest and the agent persisting the user row it belongs to.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER REFERENCES messages(id),
+        handle TEXT NOT NULL,
+        source_message_id TEXT,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        path TEXT,
+        alt_path TEXT,
+        transcript TEXT,
+        caption TEXT,
+        status TEXT NOT NULL DEFAULT 'stored',
+        vision_eligible INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
+    `);
+  },
 ];
 
 export class NudgeStore {
@@ -322,6 +379,11 @@ export class NudgeStore {
 
   /** Delete a session and all its messages (the FTS trigger prunes the index). */
   deleteSession(id: number): boolean {
+    this.#db
+      .prepare(
+        "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)",
+      )
+      .run(id);
     this.#db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
     this.clearTurnProgress(id);
     const result = this.#db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
@@ -329,6 +391,7 @@ export class NudgeStore {
   }
 
   deleteMessage(id: number): boolean {
+    this.#db.prepare("DELETE FROM attachments WHERE message_id = ?").run(id);
     const result = this.#db.prepare("DELETE FROM messages WHERE id = ?").run(id);
     return result.changes > 0;
   }
@@ -372,8 +435,114 @@ export class NudgeStore {
       inputTokens: input.inputTokens ?? null,
       outputTokens: input.outputTokens ?? null,
       metrics: input.metrics ?? null,
+      imageCount: 0,
       createdAt: at,
     };
+  }
+
+  // -- attachments ---------------------------------------------------------
+
+  /** Record ingested media. Linked to its message row once that row exists. */
+  insertAttachment(input: {
+    handle: string;
+    sourceMessageId?: string;
+    kind: AttachmentKind;
+    name: string;
+    mimeType: string;
+    sizeBytes: number;
+    path?: string;
+    altPath?: string;
+    transcript?: string;
+    caption?: string;
+    status?: AttachmentStatus;
+    visionEligible?: boolean;
+    at?: number;
+  }): AttachmentRow {
+    const at = input.at ?? Date.now();
+    const status = input.status ?? "stored";
+    const result = this.#db
+      .prepare(
+        `INSERT INTO attachments
+           (handle, source_message_id, kind, name, mime_type, size_bytes,
+            path, alt_path, transcript, caption, status, vision_eligible, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.handle,
+        input.sourceMessageId ?? null,
+        input.kind,
+        input.name,
+        input.mimeType,
+        input.sizeBytes,
+        input.path ?? null,
+        input.altPath ?? null,
+        input.transcript ?? null,
+        input.caption ?? null,
+        status,
+        input.visionEligible ? 1 : 0,
+        at,
+      );
+    return {
+      id: Number(result.lastInsertRowid),
+      messageId: null,
+      handle: input.handle,
+      sourceMessageId: input.sourceMessageId ?? null,
+      kind: input.kind,
+      name: input.name,
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      path: input.path ?? null,
+      altPath: input.altPath ?? null,
+      transcript: input.transcript ?? null,
+      caption: input.caption ?? null,
+      status,
+      visionEligible: input.visionEligible ?? false,
+      createdAt: at,
+    };
+  }
+
+  /** Tie ingested media to the message row the agent persisted for its turn. */
+  linkAttachments(ids: readonly number[], messageId: number): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => "?").join(", ");
+    this.#db
+      .prepare(`UPDATE attachments SET message_id = ? WHERE id IN (${placeholders})`)
+      .run(messageId, ...ids);
+  }
+
+  attachmentById(id: number): AttachmentRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM attachments WHERE id = ?").get(id);
+    return row ? toAttachment(row) : undefined;
+  }
+
+  messageAttachments(messageId: number): AttachmentRow[] {
+    return this.#db
+      .prepare("SELECT * FROM attachments WHERE message_id = ? ORDER BY id")
+      .all(messageId)
+      .map(toAttachment);
+  }
+
+  /** All linked attachments of a session's messages, grouped by message id. */
+  attachmentsForSession(sessionId: number): Map<number, AttachmentRow[]> {
+    const grouped = new Map<number, AttachmentRow[]>();
+    const rows = this.#db
+      .prepare(
+        `SELECT attachments.* FROM attachments
+         JOIN messages ON messages.id = attachments.message_id
+         WHERE messages.session_id = ? ORDER BY attachments.id`,
+      )
+      .all(sessionId)
+      .map(toAttachment);
+    for (const row of rows) {
+      if (row.messageId === null) continue;
+      const group = grouped.get(row.messageId);
+      if (group) {
+        group.push(row);
+      } else {
+        grouped.set(row.messageId, [row]);
+      }
+    }
+    return grouped;
   }
 
   // -- turn progress -------------------------------------------------------
@@ -411,7 +580,13 @@ export class NudgeStore {
 
   sessionMessages(sessionId: number, afterMessageId = 0): MessageRow[] {
     return this.#db
-      .prepare("SELECT * FROM messages WHERE session_id = ? AND id > ? ORDER BY id")
+      .prepare(
+        `SELECT messages.*,
+           (SELECT COUNT(*) FROM attachments
+            WHERE attachments.message_id = messages.id
+              AND attachments.kind = 'image' AND attachments.vision_eligible = 1) AS image_count
+         FROM messages WHERE session_id = ? AND id > ? ORDER BY id`,
+      )
       .all(sessionId, afterMessageId)
       .map(toMessage);
   }
@@ -752,6 +927,28 @@ function toMessage(row: Row): MessageRow {
     inputTokens: nullableNumber(row, "input_tokens"),
     outputTokens: nullableNumber(row, "output_tokens"),
     metrics: nullableString(row, "metrics"),
+    // Only `sessionMessages` selects the aggregate; other queries default it.
+    imageCount: "image_count" in row ? requiredNumber(row, "image_count") : 0,
+    createdAt: requiredNumber(row, "created_at"),
+  };
+}
+
+function toAttachment(row: Row): AttachmentRow {
+  return {
+    id: requiredNumber(row, "id"),
+    messageId: nullableNumber(row, "message_id"),
+    handle: requiredString(row, "handle"),
+    sourceMessageId: nullableString(row, "source_message_id"),
+    kind: requiredString(row, "kind") as AttachmentKind,
+    name: requiredString(row, "name"),
+    mimeType: requiredString(row, "mime_type"),
+    sizeBytes: requiredNumber(row, "size_bytes"),
+    path: nullableString(row, "path"),
+    altPath: nullableString(row, "alt_path"),
+    transcript: nullableString(row, "transcript"),
+    caption: nullableString(row, "caption"),
+    status: requiredString(row, "status") as AttachmentStatus,
+    visionEligible: requiredNumber(row, "vision_eligible") === 1,
     createdAt: requiredNumber(row, "created_at"),
   };
 }

@@ -1,9 +1,26 @@
+/**
+ * Media that arrived with a message. Bytes are NOT fetched here: `read` is the
+ * provider's lazy, memoized gRPC download, passed through untouched so the
+ * webhook can return fast and the ingest layer owns fetch failures.
+ */
+export interface InboundMedia {
+  kind: "image" | "voice" | "file";
+  name: string;
+  mimeType: string;
+  sizeBytes?: number;
+  /** Voice memos only. */
+  durationSeconds?: number;
+  read: () => Promise<Buffer>;
+}
+
 export interface InboundTextMessage {
   id: string;
   handle: string;
+  /** Empty for a bare media message; the media still carries the turn. */
   text: string;
   spaceId: string;
   platform: string;
+  media?: InboundMedia[];
 }
 
 export interface InboundBatch {
@@ -11,6 +28,8 @@ export interface InboundBatch {
   spaceId: string;
   texts: string[];
   messageIds: string[];
+  /** All media of the batch, flattened in arrival order. */
+  media: InboundMedia[];
 }
 
 export interface InboundLogger {
@@ -48,6 +67,7 @@ interface PendingBatch<Context> {
   spaceId: string;
   texts: string[];
   messageIds: string[];
+  media: InboundMedia[];
   context: Context;
   timer: NodeJS.Timeout;
   /** True when the debounce expired while a run was in flight: flush on settle. */
@@ -111,6 +131,7 @@ export class InboundProcessor<Context> {
       clearTimeout(existing.timer);
       existing.texts.push(message.text);
       existing.messageIds.push(message.id);
+      existing.media.push(...(message.media ?? []));
       existing.context = context;
       existing.spaceId = message.spaceId;
       existing.ripe = false;
@@ -121,6 +142,7 @@ export class InboundProcessor<Context> {
         spaceId: message.spaceId,
         texts: [message.text],
         messageIds: [message.id],
+        media: [...(message.media ?? [])],
         context,
         timer: setTimeout(() => this.#flush(message.handle), this.#debounceMs),
         ripe: false,
@@ -159,6 +181,7 @@ export class InboundProcessor<Context> {
       spaceId: pending.spaceId,
       texts: pending.texts,
       messageIds: pending.messageIds,
+      media: pending.media,
     };
     const controller = new AbortController();
     const done = Promise.resolve()

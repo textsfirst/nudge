@@ -273,11 +273,98 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 6 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 7 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("stores attachments unlinked, links them, and counts images per message", () => {
+    const store = new NudgeStore(":memory:");
+    const session = store.startSession(HANDLE);
+
+    const image = store.insertAttachment({
+      handle: HANDLE,
+      sourceMessageId: "wh-1",
+      kind: "image",
+      name: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 1234,
+      path: "attachments/abc123.jpg",
+      visionEligible: true,
+      at: 1_000,
+    });
+    const failed = store.insertAttachment({
+      handle: HANDLE,
+      kind: "voice",
+      name: "voice-memo.caf",
+      mimeType: "audio/x-caf",
+      sizeBytes: 0,
+      status: "failed",
+      at: 1_001,
+    });
+    expect(image.messageId).toBeNull();
+    expect(store.attachmentById(image.id)).toMatchObject({
+      kind: "image",
+      path: "attachments/abc123.jpg",
+      visionEligible: true,
+      status: "stored",
+    });
+    expect(store.attachmentById(failed.id)).toMatchObject({
+      kind: "voice",
+      path: null,
+      status: "failed",
+      visionEligible: false,
+    });
+
+    const message = store.appendMessage({
+      sessionId: session.id,
+      handle: HANDLE,
+      role: "user",
+      content: '[image "photo.jpg"] [voice memo — transcription unavailable]',
+    });
+    store.linkAttachments([image.id, failed.id], message.id);
+
+    expect(store.messageAttachments(message.id).map((a) => a.id)).toEqual([image.id, failed.id]);
+    expect(store.attachmentById(image.id)?.messageId).toBe(message.id);
+
+    // Only linked, vision-eligible images count toward the message aggregate.
+    const rows = store.sessionMessages(session.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.imageCount).toBe(1);
+
+    const grouped = store.attachmentsForSession(session.id);
+    expect(grouped.get(message.id)?.map((a) => a.id)).toEqual([image.id, failed.id]);
+
+    // Deleting the message removes its attachments rows too.
+    store.deleteMessage(message.id);
+    expect(store.attachmentById(image.id)).toBeUndefined();
+    expect(store.attachmentById(failed.id)).toBeUndefined();
+  });
+
+  it("deletes a session's attachments along with its messages", () => {
+    const store = new NudgeStore(":memory:");
+    const session = store.startSession(HANDLE);
+    const message = store.appendMessage({
+      sessionId: session.id,
+      handle: HANDLE,
+      role: "user",
+      content: '[image "photo.jpg"]',
+    });
+    const attachment = store.insertAttachment({
+      handle: HANDLE,
+      kind: "image",
+      name: "photo.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 10,
+      path: "attachments/deadbeef.jpg",
+      visionEligible: true,
+    });
+    store.linkAttachments([attachment.id], message.id);
+
+    store.deleteSession(session.id);
+    expect(store.attachmentById(attachment.id)).toBeUndefined();
   });
 
   it("replaces the settings override set wholesale", () => {

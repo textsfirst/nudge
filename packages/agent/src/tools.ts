@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { NudgeStore } from "@nudge/store";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
@@ -120,6 +121,76 @@ export function buildSendUpdateTool(send: (text: string) => Promise<void>): Tool
         lastSent = update;
         sent += 1;
         return "sent";
+      },
+    }),
+  };
+}
+
+/** File sends allowed per turn. */
+const FILE_SEND_CAP = 2;
+/** Attachments above this are rejected before they hit the wire. */
+const FILE_SEND_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * MIME by extension for outbound sends. Mirrors the transport's allowlist
+ * (images, PDF, plain text) — audio and video are deliberately absent: Nudge
+ * never sends voice messages, and the transport rejects audio regardless.
+ */
+const SENDABLE_MIME_BY_EXTENSION: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+};
+
+/**
+ * The outbound-file tool, built fresh per reply turn around that turn's
+ * attachment-send closure, like send_update. Best-effort: every failure is a
+ * result string the model can read, never an error that sinks the turn.
+ */
+export function buildSendFileTool(
+  workspace: FileWorkspace,
+  send: (data: Buffer, options: { name: string; mimeType: string }) => Promise<void>,
+): ToolSet {
+  let sent = 0;
+  return {
+    send_file: tool({
+      description:
+        "Send the owner a file from your data directory as an iMessage attachment — a photo they sent earlier (under attachments/), or an image, PDF, or text file you produced. Sent immediately, before your final reply. You can never send audio or voice messages.",
+      inputSchema: z.object({ path: z.string().min(1) }),
+      execute: async ({ path }) => {
+        if (sent >= FILE_SEND_CAP) {
+          return "skipped: file limit reached for this turn — mention the rest in your reply";
+        }
+        const resolved = workspace.resolvePath(path);
+        if ("error" in resolved) return resolved.error;
+        const extension = resolved.rel.split(".").at(-1)?.toLowerCase() ?? "";
+        const mimeType = SENDABLE_MIME_BY_EXTENSION[extension];
+        if (!mimeType) {
+          return `Error: cannot send ".${extension}" files. Sendable types: ${Object.keys(SENDABLE_MIME_BY_EXTENSION).join(", ")}.`;
+        }
+        let data: Buffer;
+        try {
+          data = readFileSync(resolved.abs);
+        } catch {
+          return `Error: "${resolved.rel}" does not exist or cannot be read.`;
+        }
+        if (data.length > FILE_SEND_MAX_BYTES) {
+          return `Error: "${resolved.rel}" is ${(data.length / (1024 * 1024)).toFixed(1)}MB — the send limit is ${FILE_SEND_MAX_BYTES / (1024 * 1024)}MB.`;
+        }
+        const name = resolved.rel.split("/").at(-1) ?? resolved.rel;
+        try {
+          await send(data, { name, mimeType });
+        } catch (error) {
+          return `failed to send: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        sent += 1;
+        return `sent ${name} (${mimeType}, ${data.length} bytes)`;
       },
     }),
   };

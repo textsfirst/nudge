@@ -1,5 +1,8 @@
 export {
   NudgeStore,
+  type AttachmentKind,
+  type AttachmentRow,
+  type AttachmentStatus,
   type MaintenanceResult,
   type MessageRole,
   type MessageRow,

@@ -3,13 +3,21 @@ import type { MessageRow } from "@nudge/store";
 import {
   contextWindowFor,
   DEFAULT_CONTEXT_WINDOW,
+  estimateMessageTokens,
   estimateTokens,
+  IMAGE_TOKENS,
   planCompaction,
   RESERVE_TOKENS,
+  supportsVision,
   usableWindow,
 } from "../src/context.js";
 
-function row(id: number, role: "user" | "assistant" | "error", content: string): MessageRow {
+function row(
+  id: number,
+  role: "user" | "assistant" | "error",
+  content: string,
+  imageCount = 0,
+): MessageRow {
   return {
     id,
     sessionId: 1,
@@ -19,11 +27,32 @@ function row(id: number, role: "user" | "assistant" | "error", content: string):
     toolPayload: null,
     inputTokens: null,
     outputTokens: null,
+    imageCount,
     createdAt: id,
   };
 }
 
 const budget = { contextWindow: 100_000, compactAtFraction: 0.8, keepRecentTokens: 1_000 };
+
+describe("estimateMessageTokens", () => {
+  it("charges linked prompt-eligible images flat, never as text", () => {
+    const plain = row(1, "user", "look at this");
+    const withImages = row(2, "user", 'look at this\n[image "a.jpg"]', 2);
+    expect(estimateMessageTokens(withImages)).toBeGreaterThanOrEqual(
+      estimateMessageTokens(plain) + 2 * IMAGE_TOKENS,
+    );
+  });
+});
+
+describe("supportsVision", () => {
+  it("recognizes vision-capable model families and defaults unknown ids to false", () => {
+    expect(supportsVision("gpt-5-mini")).toBe(true);
+    expect(supportsVision("gpt-4o")).toBe(true);
+    expect(supportsVision("gpt-4.1")).toBe(true);
+    expect(supportsVision("llama3.3:70b")).toBe(false);
+    expect(supportsVision("scripted-test-model")).toBe(false);
+  });
+});
 
 describe("estimateTokens", () => {
   it("counts ~4 ASCII characters per token", () => {

@@ -67,6 +67,12 @@ another short line if the work drags or changes shape. Quick one-tool-call
 answers don't need one. It never replaces the reply you finish the turn with,
 and that reply shouldn't repeat the updates.`;
 
+/** Appended only when the send_file tool is in the set (reply path, multimodal on). */
+const SEND_FILE_TOOL_GUIDANCE = `send_file texts the owner a file from your data directory — a photo they sent
+earlier (saved under attachments/), or an image, PDF, or text file you made.
+The file lands as its own message before your reply, so don't describe what
+they can already see. You can never send audio or voice messages.`;
+
 /** One line per connected Google account, only when bash carries the gws shim. */
 function googleGuidance(accounts: GoogleAccountRef[]): string {
   const list = accounts
@@ -96,6 +102,8 @@ export interface PromptStackInput {
   bashEnabled?: boolean;
   /** True only on the reply path, where the send_update tool exists. */
   progressEnabled?: boolean;
+  /** True only when the send_file tool exists (reply path, multimodal on). */
+  fileSendEnabled?: boolean;
   /** Connected Google accounts; non-empty adds gws guidance (needs bash). */
   googleAccounts?: GoogleAccountRef[];
 }
@@ -112,6 +120,7 @@ export function buildSystemPrompt(input: PromptStackInput): string {
     guidance += `\n\n${googleGuidance(input.googleAccounts)}`;
   }
   if (input.progressEnabled) guidance += `\n\n${PROGRESS_TOOL_GUIDANCE}`;
+  if (input.fileSendEnabled) guidance += `\n\n${SEND_FILE_TOOL_GUIDANCE}`;
   const sections = [input.systemFile?.trim() || DEFAULT_SYSTEM_FILE, guidance];
 
   if (input.memory) {

@@ -19,7 +19,9 @@ import { MEMORY_LIMITS, validateDataFile } from "@nudge/agent";
 const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json"]);
 const HIDDEN_PREFIXES = ["nudge.db"];
 /** Google OAuth credentials + token caches — managed on the Connections page. */
-const HIDDEN_DIRS = new Set(["google"]);
+// attachments/ holds inbound media bytes (hash-named, system-managed) — the
+// thread view is their surface, not the file editor.
+const HIDDEN_DIRS = new Set(["google", "attachments"]);
 const SYSTEM_MANAGED = new Set(["README.md"]);
 
 export interface FileInfo {

@@ -29,6 +29,11 @@ function fakeSpectrumInstance() {
 
 vi.mock("@spectrum-ts/core", () => ({
   Spectrum: vi.fn(async () => fakeSpectrumInstance()),
+  attachment: vi.fn((input: unknown, options: unknown) => ({
+    __builder: "attachment",
+    input,
+    options,
+  })),
 }));
 
 vi.mock("@spectrum-ts/imessage", () => {
@@ -227,6 +232,7 @@ describe("sendToSpace", () => {
 interface TestControls {
   stopTyping: () => void;
   react: (emoji: string) => Promise<void>;
+  sendAttachment: (data: Buffer, options: { name: string; mimeType: string }) => Promise<void>;
 }
 
 function fakeSpace() {
@@ -272,6 +278,96 @@ describe("batch controls", () => {
     // Shown while the text buffered, cleared the moment the handler said so.
     expect(space.startTyping).toHaveBeenCalled();
     expect(space.stopTyping).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends allowed attachments through the spectrum builder on the batch's space", async () => {
+    const space = fakeSpace();
+    const onBatch = vi.fn(
+      async (_batch: unknown, _send: unknown, _signal: unknown, controls: TestControls) => {
+        await controls.sendAttachment(Buffer.from("png-bytes"), {
+          name: "chart.png",
+          mimeType: "image/png",
+        });
+      },
+    );
+    const transport = await createPhotonTransport({
+      ...transportConfig(),
+      debounceMs: 0,
+      onBatch,
+    });
+    const instance = spectrumInstances.at(-1)!;
+    instance.webhook.mockImplementation(
+      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
+        await handle(space, {
+          id: "msg-a1",
+          platform: "imessage",
+          sender: { id: "+100" },
+          content: { type: "text", text: "chart?" },
+          react: vi.fn(async () => {}),
+        });
+        return { status: 200, headers: {}, body: new Uint8Array() };
+      },
+    );
+
+    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    await transport.flushInbound();
+
+    expect(space.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        __builder: "attachment",
+        options: { mimeType: "image/png", name: "chart.png" },
+      }),
+    );
+  });
+
+  it("refuses to send audio — the voice-message ban — and off-allowlist types", async () => {
+    const space = fakeSpace();
+    const outcomes: string[] = [];
+    const onBatch = vi.fn(
+      async (_batch: unknown, _send: unknown, _signal: unknown, controls: TestControls) => {
+        for (const [name, mimeType] of [
+          ["memo.m4a", "audio/mp4"],
+          ["memo.caf", "AUDIO/x-caf"],
+          ["clip.mov", "video/quicktime"],
+          ["app.zip", "application/zip"],
+        ] as const) {
+          await controls
+            .sendAttachment(Buffer.from("bytes"), { name, mimeType })
+            .then(() => outcomes.push(`sent ${name}`))
+            .catch((error: Error) => outcomes.push(error.message));
+        }
+      },
+    );
+    const transport = await createPhotonTransport({
+      ...transportConfig(),
+      debounceMs: 0,
+      onBatch,
+    });
+    const instance = spectrumInstances.at(-1)!;
+    instance.webhook.mockImplementation(
+      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
+        await handle(space, {
+          id: "msg-a2",
+          platform: "imessage",
+          sender: { id: "+100" },
+          content: { type: "text", text: "try" },
+          react: vi.fn(async () => {}),
+        });
+        return { status: 200, headers: {}, body: new Uint8Array() };
+      },
+    );
+
+    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    await transport.flushInbound();
+
+    expect(outcomes).toEqual([
+      "Refusing to send audio: Nudge never sends voice messages",
+      "Refusing to send audio: Nudge never sends voice messages",
+      'Refusing to send unsupported attachment type "video/quicktime"',
+      'Refusing to send unsupported attachment type "application/zip"',
+    ]);
+    // Nothing reached the wire.
+    expect(space.send).not.toHaveBeenCalled();
   });
 
   it("routes controls.react to the newest message of the batch", async () => {
@@ -325,6 +421,148 @@ function ownerMessage(id: string, overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+describe("inbound media", () => {
+  interface TestBatch {
+    texts: string[];
+    media: Array<{
+      kind: string;
+      name: string;
+      mimeType: string;
+      sizeBytes?: number;
+      durationSeconds?: number;
+      read: () => Promise<Buffer>;
+    }>;
+  }
+
+  async function deliverContents(contents: unknown[]): Promise<{
+    batches: TestBatch[];
+    warnings: number;
+  }> {
+    logger.warn.mockClear();
+    const space = fakeSpace();
+    const batches: TestBatch[] = [];
+    const transport = await createPhotonTransport({
+      ...transportConfig(),
+      debounceMs: 0,
+      onBatch: vi.fn(async (batch: TestBatch) => {
+        batches.push(batch);
+      }),
+    });
+    const instance = spectrumInstances.at(-1)!;
+    let delivered = 0;
+    instance.webhook.mockImplementation(
+      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
+        const content = contents[delivered];
+        delivered += 1;
+        await handle(space, ownerMessage(`msg-m${delivered}`, { content }));
+        return { status: 200, headers: {}, body: new Uint8Array() };
+      },
+    );
+    for (let i = 0; i < contents.length; i += 1) {
+      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    }
+    await transport.flushInbound();
+    return { batches, warnings: logger.warn.mock.calls.length };
+  }
+
+  it("passes a bare image through as lazy media without fetching bytes", async () => {
+    const read = vi.fn(async () => Buffer.from("jpeg-bytes"));
+    const { batches } = await deliverContents([
+      { type: "attachment", id: "att-1", name: "photo.jpg", mimeType: "image/jpeg", size: 1234, read },
+    ]);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.texts).toEqual([""]);
+    expect(batches[0]?.media).toEqual([
+      expect.objectContaining({
+        kind: "image",
+        name: "photo.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: 1234,
+      }),
+    ]);
+    // Bytes are fetched by the ingest layer, never by the transport.
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("classifies voice memos, defaulting a name and carrying duration", async () => {
+    const { batches } = await deliverContents([
+      {
+        type: "voice",
+        mimeType: "audio/x-caf",
+        duration: 12.4,
+        size: 999,
+        read: async () => Buffer.from("caf"),
+      },
+    ]);
+
+    expect(batches[0]?.media).toEqual([
+      expect.objectContaining({
+        kind: "voice",
+        name: "voice-memo.caf",
+        mimeType: "audio/x-caf",
+        durationSeconds: 12.4,
+      }),
+    ]);
+  });
+
+  it("classifies a non-voice audio file as a plain file, not a voice memo", async () => {
+    const { batches } = await deliverContents([
+      { type: "attachment", name: "song.mp3", mimeType: "audio/mpeg", read: async () => Buffer.from("mp3") },
+    ]);
+
+    expect(batches[0]?.media[0]?.kind).toBe("file");
+  });
+
+  it("flattens a text-plus-attachment group in item order", async () => {
+    const { batches } = await deliverContents([
+      {
+        type: "group",
+        items: [
+          { content: { type: "text", text: "look at this" } },
+          {
+            content: {
+              type: "attachment",
+              name: "receipt.png",
+              mimeType: "image/png",
+              read: async () => Buffer.from("png"),
+            },
+          },
+          // Unsupported sub-items are skipped without sinking the message.
+          { content: { type: "contact", name: "Someone" } },
+          { content: { type: "text", text: "worth it?" } },
+        ],
+      },
+    ]);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.texts).toEqual(["look at this\nworth it?"]);
+    expect(batches[0]?.media).toEqual([
+      expect.objectContaining({ kind: "image", name: "receipt.png" }),
+    ]);
+  });
+
+  it("batches a text and a follow-up photo into one delivery with both", async () => {
+    const { batches } = await deliverContents([
+      { type: "text", text: "incoming" },
+      { type: "attachment", name: "dog.webp", mimeType: "image/webp", read: async () => Buffer.from("webp") },
+    ]);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.texts).toEqual(["incoming", ""]);
+    expect(batches[0]?.media).toHaveLength(1);
+  });
+
+  it("still drops unsupported content with a warning", async () => {
+    const { batches, warnings } = await deliverContents([
+      { type: "reaction", reaction: "love" },
+    ]);
+
+    expect(batches).toHaveLength(0);
+    expect(warnings).toBe(1);
+  });
+});
 
 describe("typing choreography", () => {
   it("shows the indicator only after the humanizing delay, then clears on settle", async () => {

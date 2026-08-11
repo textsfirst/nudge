@@ -1,10 +1,14 @@
-import { Spectrum } from "@spectrum-ts/core";
+// Deliberately only the `attachment` builder: spectrum's `voice()` (which
+// sends a true iMessage voice message) must never enter this codebase —
+// Nudge receives voice memos but never speaks.
+import { attachment, Spectrum } from "@spectrum-ts/core";
 import { imessage } from "@spectrum-ts/imessage";
 import { splitMessage } from "./chunk.js";
 import {
   InboundProcessor,
   type InboundBatch,
   type InboundLogger,
+  type InboundMedia,
 } from "./inbound.js";
 import { TypingController } from "./typing.js";
 
@@ -93,7 +97,28 @@ export interface BatchControls {
   stopTyping: () => void;
   /** Tapback the newest text of the batch with `emoji`. Rejects on failure. */
   react: (emoji: string) => Promise<void>;
+  /**
+   * Send a file to the batch's space. Rejects audio outright — Nudge never
+   * sends voice messages — and anything outside the image/pdf/text allowlist.
+   */
+  sendAttachment: (data: Buffer, options: AttachmentSendOptions) => Promise<void>;
 }
+
+export interface AttachmentSendOptions {
+  name: string;
+  mimeType: string;
+}
+
+/**
+ * What the agent may send. Audio is deliberately unmatchable — combined with
+ * never importing spectrum's `voice()` builder, this is the structural
+ * guarantee that Nudge cannot send voice messages.
+ */
+const OUTBOUND_MIME_ALLOWLIST: readonly RegExp[] = [
+  /^image\//,
+  /^application\/pdf$/,
+  /^text\//,
+];
 
 export interface RawWebhookRequest {
   body: Buffer;
@@ -188,6 +213,27 @@ export async function createPhotonTransport(
     }
   };
 
+  // The single chokepoint every outbound attachment passes through — the
+  // MIME gate lives here so no future send path can bypass it.
+  const sendAttachmentTo = async (
+    space: SendableSpace,
+    data: Buffer,
+    options: AttachmentSendOptions,
+  ): Promise<void> => {
+    const mime = options.mimeType.toLowerCase();
+    if (mime.startsWith("audio/")) {
+      throw new Error("Refusing to send audio: Nudge never sends voice messages");
+    }
+    if (!OUTBOUND_MIME_ALLOWLIST.some((pattern) => pattern.test(mime))) {
+      throw new Error(`Refusing to send unsupported attachment type "${options.mimeType}"`);
+    }
+    // SendableSpace narrows the real space to text sends; the underlying
+    // spectrum space accepts ContentBuilder inputs.
+    await (space as { send(content: unknown): Promise<unknown> }).send(
+      attachment(data, { mimeType: options.mimeType, name: options.name }),
+    );
+  };
+
   // The context tracks the batch's newest message so reactions land on the
   // text the owner sent last, not an id lookup after the fact.
   const processor = new InboundProcessor<{ space: SendableSpace; message: ReactableMessage }>({
@@ -217,6 +263,8 @@ export async function createPhotonTransport(
             react: async (emoji) => {
               await context.message.react(emoji);
             },
+            sendAttachment: (data, attachmentOptions) =>
+              sendAttachmentTo(context.space, data, attachmentOptions),
           },
         );
       } finally {
@@ -234,7 +282,8 @@ export async function createPhotonTransport(
       );
       return spectrum.webhook({ body: request.body, headers }, async (space, message) => {
         const sender = message.sender?.id;
-        if (message.content.type !== "text" || !sender) {
+        const parts = extractParts(message.content);
+        if (!parts || !sender) {
           config.logger.warn("Ignoring a Photon message with an unsupported payload", {
             messageId: message.id,
             contentType: message.content.type,
@@ -265,9 +314,10 @@ export async function createPhotonTransport(
           {
             id: message.id,
             handle: sender,
-            text: message.content.text,
+            text: parts.text,
             spaceId: space.id,
             platform: message.platform,
+            ...(parts.media.length > 0 ? { media: parts.media } : {}),
           },
           { space, message },
         );
@@ -290,4 +340,73 @@ export async function createPhotonTransport(
       await spectrum.stop();
     },
   };
+}
+
+interface ExtractedParts {
+  text: string;
+  media: InboundMedia[];
+}
+
+/**
+ * Normalize a provider message content into text plus lazy media handles.
+ * A `group` (text sent with attachments) is flattened in item order; sub-items
+ * we don't support (contacts, reactions, …) are skipped, and a message whose
+ * content is entirely unsupported yields undefined so the caller keeps the
+ * existing warn-and-drop.
+ */
+function extractParts(content: unknown): ExtractedParts | undefined {
+  if (content === null || typeof content !== "object") return undefined;
+  const item = content as Record<string, unknown>;
+  switch (item.type) {
+    case "text":
+      return typeof item.text === "string" ? { text: item.text, media: [] } : undefined;
+    case "attachment":
+    case "voice": {
+      if (typeof item.mimeType !== "string" || typeof item.read !== "function") {
+        return undefined;
+      }
+      const isVoice = item.type === "voice";
+      const name =
+        typeof item.name === "string" && item.name.length > 0
+          ? item.name
+          : isVoice
+            ? "voice-memo.caf"
+            : "attachment";
+      return {
+        text: "",
+        media: [
+          {
+            kind: isVoice
+              ? "voice"
+              : item.mimeType.toLowerCase().startsWith("image/")
+                ? "image"
+                : "file",
+            name,
+            mimeType: item.mimeType,
+            ...(typeof item.size === "number" ? { sizeBytes: item.size } : {}),
+            ...(isVoice && typeof item.duration === "number"
+              ? { durationSeconds: item.duration }
+              : {}),
+            read: item.read as () => Promise<Buffer>,
+          },
+        ],
+      };
+    }
+    case "group": {
+      if (!Array.isArray(item.items)) return undefined;
+      const texts: string[] = [];
+      const media: InboundMedia[] = [];
+      let supported = false;
+      for (const sub of item.items) {
+        const parts = extractParts((sub as { content?: unknown } | null)?.content);
+        if (!parts) continue;
+        supported = true;
+        if (parts.text.length > 0) texts.push(parts.text);
+        media.push(...parts.media);
+      }
+      return supported ? { text: texts.join("\n"), media } : undefined;
+    }
+    default:
+      return undefined;
+  }
 }

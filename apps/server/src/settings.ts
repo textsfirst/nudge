@@ -76,6 +76,23 @@ export const settingsSchema = z.object({
       chunk_delay_ms: z.number().int().min(0).max(5_000).default(500),
     })
     .prefault({}),
+  multimodal: z
+    .object({
+      // Off restores the old behavior: inbound media is ignored entirely.
+      enabled: z.boolean().default(true),
+      // auto consults the model-id registry; on forces image parts for custom
+      // endpoints serving vision models the registry doesn't know.
+      vision: z.enum(["auto", "on", "off"]).default("auto"),
+      max_attachment_mb: z.number().min(1).max(64).default(8),
+      max_images_per_prompt: z.number().int().min(1).max(20).default(6),
+      transcription_enabled: z.boolean().default(true),
+      transcription_model: z.string().min(1).default("whisper-1"),
+      transcription_base_url: z.url().optional(),
+      // Empty falls back to the reply model.
+      caption_model: z.string().min(1).optional(),
+      ffmpeg_path: z.string().min(1).optional(),
+    })
+    .prefault({}),
   agent: z
     .object({
       max_tool_steps: z.number().int().min(1).max(2000).default(256),
@@ -356,6 +373,74 @@ export const SETTINGS_FORM: SettingsSection[] = [
         label: "Bubble gap (ms)",
         control: "number",
         help: "Base pause between the bubbles of a multi-bubble reply; each gap grows with the next bubble's length. 0 sends bubbles back-to-back.",
+      },
+    ],
+  },
+  {
+    title: "Multimodal",
+    description:
+      "Photos and voice memos the owner sends. Voice memos are transcribed via an OpenAI-compatible speech-to-text API (needs ffmpeg for iMessage's CAF format). Nudge never sends voice messages.",
+    fields: [
+      {
+        path: "multimodal.enabled",
+        label: "Multimodal",
+        control: "boolean",
+        help: "Ingest photos, voice memos, and files the owner sends. Off ignores them entirely, like before.",
+      },
+      {
+        path: "multimodal.vision",
+        label: "Vision",
+        control: "select",
+        options: ["auto", "on", "off"],
+        help: "Whether recent photos are shown to the reply model as images. auto detects support from the model id; on forces it for custom endpoints; off keeps prompts text-only (captions still describe the photos).",
+      },
+      {
+        path: "multimodal.max_attachment_mb",
+        label: "Max attachment (MB)",
+        control: "number",
+        help: "Larger attachments are noted in the thread but not stored.",
+      },
+      {
+        path: "multimodal.max_images_per_prompt",
+        label: "Max images per prompt",
+        control: "number",
+        help: "Newest photos beyond this stay in the thread as text descriptions only.",
+      },
+      {
+        path: "multimodal.transcription_enabled",
+        label: "Voice transcription",
+        control: "boolean",
+        help: "Transcribe the owner's voice memos so the agent can read them. Needs TRANSCRIPTION_API_KEY (or OPENAI_API_KEY) in Secrets.",
+      },
+      {
+        path: "multimodal.transcription_model",
+        label: "Transcription model",
+        control: "text",
+        help: "Speech-to-text model id at the transcription endpoint.",
+      },
+      {
+        path: "multimodal.transcription_base_url",
+        label: "Transcription base URL",
+        control: "text",
+        optional: true,
+        placeholder: "https://api.openai.com/v1",
+        help: "OpenAI-compatible API root for /audio/transcriptions. Empty uses OpenAI.",
+      },
+      {
+        path: "multimodal.caption_model",
+        label: "Caption model",
+        control: "text",
+        optional: true,
+        placeholder: "reply model",
+        help: "Vision model that writes the one-line photo descriptions kept in the thread. Empty uses the reply model.",
+      },
+      {
+        path: "multimodal.ffmpeg_path",
+        label: "ffmpeg binary",
+        control: "text",
+        optional: true,
+        placeholder: "ffmpeg on PATH",
+        help: "Full path to ffmpeg, used to convert voice memos for transcription (and HEIC photos where sips is unavailable).",
       },
     ],
   },

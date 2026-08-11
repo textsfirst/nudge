@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   applyEdits,
+  buildSendFileTool,
   buildSendUpdateTool,
   DEFAULT_MAX_LINES,
   executeBash,
@@ -319,5 +320,82 @@ describe("send_update", () => {
       throw new Error("space unavailable");
     });
     await expect(update("hello")).resolves.toBe("failed to send: space unavailable");
+  });
+});
+
+describe("send_file", () => {
+  function makeTool(
+    dir: string,
+    send: (data: Buffer, options: { name: string; mimeType: string }) => Promise<void>,
+  ) {
+    const workspace = new FileWorkspace(realpathSync(dir));
+    const execute = buildSendFileTool(workspace, send)["send_file"]!.execute as (
+      input: { path: string },
+      options: { toolCallId: string; messages: [] },
+    ) => Promise<string>;
+    return (path: string) => execute({ path }, { toolCallId: "call-1", messages: [] });
+  }
+
+  it("reads the file and sends it with its inferred MIME type", async () => {
+    const dir = tempDir();
+    writeFileSync(join(realpathSync(dir), "chart.png"), Buffer.from("png-bytes"));
+    const sent: Array<{ name: string; mimeType: string; bytes: number }> = [];
+    const sendFile = makeTool(dir, async (data, options) => {
+      sent.push({ name: options.name, mimeType: options.mimeType, bytes: data.length });
+    });
+
+    await expect(sendFile("chart.png")).resolves.toContain("sent chart.png");
+    expect(sent).toEqual([{ name: "chart.png", mimeType: "image/png", bytes: 9 }]);
+  });
+
+  it("stays jailed to the data directory", async () => {
+    const sendFile = makeTool(tempDir(), async () => {});
+    await expect(sendFile("../../etc/passwd")).resolves.toContain("outside your data directory");
+  });
+
+  it("refuses hidden files even with a sendable extension", async () => {
+    const dir = realpathSync(tempDir());
+    mkdirSync(join(dir, "google"), { recursive: true });
+    writeFileSync(join(dir, "google", "accounts.csv"), "secret,token");
+    const sent: unknown[] = [];
+    const sendFile = makeTool(dir, async (data) => void sent.push(data));
+
+    await expect(sendFile("google/accounts.csv")).resolves.toContain("not readable");
+    expect(sent).toEqual([]);
+  });
+
+  it("refuses extensions outside the sendable set — audio above all", async () => {
+    const dir = tempDir();
+    writeFileSync(join(realpathSync(dir), "memo.m4a"), Buffer.from("audio"));
+    const sent: unknown[] = [];
+    const sendFile = makeTool(dir, async (data) => void sent.push(data));
+
+    await expect(sendFile("memo.m4a")).resolves.toContain('cannot send ".m4a"');
+    expect(sent).toEqual([]);
+  });
+
+  it("reports a missing file instead of failing the turn", async () => {
+    const sendFile = makeTool(tempDir(), async () => {});
+    await expect(sendFile("nope.png")).resolves.toContain("does not exist");
+  });
+
+  it("caps sends per turn", async () => {
+    const dir = tempDir();
+    writeFileSync(join(realpathSync(dir), "a.png"), Buffer.from("a"));
+    const sendFile = makeTool(dir, async () => {});
+    await expect(sendFile("a.png")).resolves.toContain("sent");
+    await expect(sendFile("a.png")).resolves.toContain("sent");
+    await expect(sendFile("a.png")).resolves.toContain("file limit reached");
+  });
+
+  it("degrades a transport rejection to a result string the model can read", async () => {
+    const dir = tempDir();
+    writeFileSync(join(realpathSync(dir), "a.png"), Buffer.from("a"));
+    const sendFile = makeTool(dir, async () => {
+      throw new Error("Refusing to send audio: Nudge never sends voice messages");
+    });
+    await expect(sendFile("a.png")).resolves.toBe(
+      "failed to send: Refusing to send audio: Nudge never sends voice messages",
+    );
   });
 });

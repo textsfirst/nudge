@@ -87,6 +87,18 @@ export class FileWorkspace {
     return `Saved ${check.rel} (${content.length} chars).`;
   }
 
+  /**
+   * The data-directory jail check for tools that read bytes directly.
+   * Hidden files (credentials, the database) are as unreadable here as they
+   * are through read_file.
+   */
+  resolvePath(path: string): { abs: string; rel: string } | { error: string } {
+    const check = this.#resolve(path);
+    if ("error" in check) return check;
+    if (isHidden(check.rel)) return { error: `Error: ${path} is not readable.` };
+    return check;
+  }
+
   #resolve(path: string): { abs: string; rel: string } | { error: string } {
     const abs = resolve(this.dataDir, path);
     if (abs !== this.dataDir && !abs.startsWith(this.dataDir + sep)) {

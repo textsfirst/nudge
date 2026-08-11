@@ -7,7 +7,13 @@ function makeLogger() {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
-const batch = { handle: "+100", spaceId: "space-1", texts: ["hi"], messageIds: ["m1", "m2"] };
+const batch = {
+  handle: "+100",
+  spaceId: "space-1",
+  texts: ["hi"],
+  messageIds: ["m1", "m2"],
+  media: [],
+};
 
 describe("createReplyHandler", () => {
   it("sends the reply, journals it, and marks the webhooks processed", async () => {
@@ -60,6 +66,174 @@ describe("createReplyHandler", () => {
     releasePostWork();
     await handling;
     expect(sent).toEqual(["hello now"]); // callback + return value never double-send
+  });
+
+  it("ingests batch media and hands the agent projections plus refs", async () => {
+    const store = new NudgeStore(":memory:");
+    const received: unknown[] = [];
+    const ingest = vi.fn(async () => ({
+      projections: ['[image "dog.jpg"]'],
+      refs: [
+        {
+          attachmentId: 7,
+          kind: "image" as const,
+          name: "dog.jpg",
+          mimeType: "image/jpeg",
+          path: "attachments/abc.jpg",
+          visionEligible: true,
+        },
+      ],
+    }));
+    const handler = createReplyHandler({
+      agent: {
+        reply: async (_handle, input) => {
+          received.push(input);
+          return "cute dog!";
+        },
+      },
+      store,
+      logger: makeLogger(),
+      media: { ingest } as unknown as import("@nudge/agent").MediaIngest,
+    });
+
+    const mediaItem = {
+      kind: "image" as const,
+      name: "dog.jpg",
+      mimeType: "image/jpeg",
+      read: async () => Buffer.from("jpg"),
+    };
+    await handler(
+      { ...batch, texts: ["look", ""], media: [mediaItem] },
+      async () => {},
+      new AbortController().signal,
+    );
+
+    expect(ingest).toHaveBeenCalledWith("+100", [mediaItem], "m2");
+    // Blank texts drop; projections append after the owner's words.
+    expect(received).toEqual([
+      {
+        text: 'look\n[image "dog.jpg"]',
+        media: [expect.objectContaining({ attachmentId: 7 })],
+      },
+    ]);
+  });
+
+  it("offers onSendFile only when multimodal is on, forwarding to the transport", async () => {
+    const store = new NudgeStore(":memory:");
+    const sentFiles: Array<{ name: string; mimeType: string }> = [];
+    const controls = {
+      stopTyping: () => {},
+      react: async () => {},
+      sendAttachment: async (_data: Buffer, options: { name: string; mimeType: string }) => {
+        sentFiles.push(options);
+      },
+    };
+    const media = {
+      ingest: async () => ({ projections: [], refs: [] }),
+    } as unknown as import("@nudge/agent").MediaIngest;
+
+    let withMedia: unknown;
+    await createReplyHandler({
+      agent: {
+        reply: async (_handle, _input, options) => {
+          withMedia = options?.onSendFile;
+          await options?.onSendFile?.(Buffer.from("png"), {
+            name: "chart.png",
+            mimeType: "image/png",
+          });
+          return "sent you the chart";
+        },
+      },
+      store,
+      logger: makeLogger(),
+      media,
+    })(batch, async () => {}, new AbortController().signal, controls);
+
+    expect(typeof withMedia).toBe("function");
+    expect(sentFiles).toEqual([{ name: "chart.png", mimeType: "image/png" }]);
+
+    // Without a media ingest (multimodal off) the tool is never offered.
+    let withoutMedia: unknown = "unset";
+    await createReplyHandler({
+      agent: {
+        reply: async (_handle, _input, options) => {
+          withoutMedia = options?.onSendFile;
+          return "ok";
+        },
+      },
+      store,
+      logger: makeLogger(),
+    })(batch, async () => {}, new AbortController().signal, controls);
+    expect(withoutMedia).toBeUndefined();
+  });
+
+  it("ignores media with a warning when no ingest is configured", async () => {
+    const store = new NudgeStore(":memory:");
+    const logger = makeLogger();
+    const received: unknown[] = [];
+    const handler = createReplyHandler({
+      agent: {
+        reply: async (_handle, input) => {
+          received.push(input);
+          return "ok";
+        },
+      },
+      store,
+      logger,
+    });
+
+    await handler(
+      {
+        ...batch,
+        media: [
+          {
+            kind: "image" as const,
+            name: "dog.jpg",
+            mimeType: "image/jpeg",
+            read: async () => Buffer.from("jpg"),
+          },
+        ],
+      },
+      async () => {},
+      new AbortController().signal,
+    );
+
+    expect(received).toEqual(["hi"]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "Ignoring inbound media because multimodal is disabled",
+      { count: 1 },
+    );
+  });
+
+  it("skips the turn entirely for a bare media message when multimodal is off", async () => {
+    const store = new NudgeStore(":memory:");
+    const logger = makeLogger();
+    const reply = vi.fn(async () => "should never run");
+    const stopTyping = vi.fn();
+    const handler = createReplyHandler({ agent: { reply }, store, logger });
+
+    await handler(
+      {
+        ...batch,
+        texts: [""],
+        media: [
+          {
+            kind: "voice" as const,
+            name: "voice-memo.caf",
+            mimeType: "audio/x-caf",
+            read: async () => Buffer.from("caf"),
+          },
+        ],
+      },
+      async () => {},
+      new AbortController().signal,
+      { stopTyping, react: async () => {}, sendAttachment: async () => {} },
+    );
+
+    // No model turn, no empty user row — but the webhook is still settled.
+    expect(reply).not.toHaveBeenCalled();
+    expect(stopTyping).toHaveBeenCalled();
+    expect(store.isWebhookProcessed("m1")).toBe(true);
   });
 
   it("forwards mid-turn progress updates straight to send, skipping the ledger", async () => {
