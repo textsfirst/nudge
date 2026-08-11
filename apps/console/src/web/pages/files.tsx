@@ -31,8 +31,9 @@ const CORE_ORDER = ["SYSTEM.md", "SCHEDULE.md", "MEMORY.md", "USER.md", "README.
 
 const SKILL_TEMPLATE = `---
 name: NAME
-description: One line shown in the agent's prompt.
-version: 1
+description: What this does and when to use it, shown in the agent's prompt.
+metadata:
+  version: "1"
 ---
 
 When to use, steps, pitfalls, verification.

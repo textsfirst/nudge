@@ -10,6 +10,7 @@ import { FilesPage } from "@/pages/files";
 import { OverviewPage } from "@/pages/overview";
 import { SchedulePage } from "@/pages/schedule";
 import { SecretsPage } from "@/pages/secrets";
+import { SkillsPage } from "@/pages/skills";
 import { ThreadDetailPage } from "@/pages/thread-detail";
 import { ThreadsPage } from "@/pages/threads";
 import "./index.css";
@@ -26,6 +27,7 @@ const router = createBrowserRouter([
       { path: "/threads", element: <ThreadsPage /> },
       { path: "/threads/:id", element: <ThreadDetailPage /> },
       { path: "/schedule", element: <SchedulePage /> },
+      { path: "/skills", element: <SkillsPage /> },
       { path: "/files", element: <FilesPage /> },
       { path: "/connections", element: <ConnectionsPage /> },
       { path: "/settings", element: <SettingsPage /> },

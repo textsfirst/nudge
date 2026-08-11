@@ -24,6 +24,7 @@ import { createHttpApp } from "./http.js";
 import type { ProviderHealth } from "./http.js";
 import { createLogger } from "./logger.js";
 import { buildMcpBashEnv } from "./mcp/env.js";
+import { buildSkillsBashEnv } from "./skills/env.js";
 import { seedMcpSkill } from "./mcp/skill.js";
 import { createReplyHandler } from "./reply.js";
 import { Scheduler } from "./scheduler.js";
@@ -114,6 +115,7 @@ async function main(): Promise<void> {
         gwsPath: config.google.gwsPath,
       }),
       ...buildMcpBashEnv({ dataDir: config.dataDir }),
+      ...buildSkillsBashEnv({ dataDir: config.dataDir }),
     },
     googleAccounts: () =>
       readGoogleAccounts(config.dataDir).map(({ label, email }) => ({ label, email })),

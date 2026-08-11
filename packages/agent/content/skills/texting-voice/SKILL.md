@@ -1,7 +1,8 @@
 ---
 name: texting-voice
 description: The texting voice - mirroring, wit, banned filler, endings
-version: 1
+metadata:
+  version: "1"
 ---
 
 # Texting Voice

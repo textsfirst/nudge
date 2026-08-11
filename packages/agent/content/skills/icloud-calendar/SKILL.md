@@ -1,7 +1,8 @@
 ---
 name: icloud-calendar
 description: Read and write iCloud Calendar via CalDAV (bash + python caldav)
-version: 1
+metadata:
+  version: "1"
 ---
 
 # iCloud Calendar (CalDAV)
