@@ -1,9 +1,73 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import type { Logger, NudgeAgent } from "@nudge/agent";
 import { nextRun, parseSchedule, type ScheduleEntry } from "@nudge/schedule";
 import type { NudgeStore } from "@nudge/store";
 import type { DeliveryService } from "./delivery.js";
+
+/** One watcher-check execution: ok mirrors the command's exit status. */
+export interface CheckResult {
+  ok: boolean;
+  output: string;
+}
+
+export type CheckRunner = (command: string) => Promise<CheckResult>;
+
+/** A hung check must not stall the tick loop. */
+const CHECK_TIMEOUT_MS = 30_000;
+/** Collection cap — a runaway check's output is cut, not buffered. */
+const CHECK_OUTPUT_MAX_BYTES = 64 * 1024;
+/** Check output embedded into a wake brief is capped head-and-tail. */
+const CHECK_BRIEF_MAX_CHARS = 4_000;
+
+/**
+ * The default check runner: bash with the agent's own environment (gws and
+ * mcp on PATH, secrets from .env), the data directory as cwd. Output is
+ * stdout+stderr combined — checks are diffed, not parsed, so interleaving
+ * is fine.
+ */
+export function buildCheckRunner(options: {
+  cwd: string;
+  env?: Record<string, string> | undefined;
+}): CheckRunner {
+  return (command) =>
+    new Promise((resolve) => {
+      const child = spawn("bash", ["-c", command], {
+        cwd: options.cwd,
+        env: { ...process.env, ...options.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let output = "";
+      let truncated = false;
+      const collect = (chunk: Buffer) => {
+        if (output.length >= CHECK_OUTPUT_MAX_BYTES) {
+          truncated = true;
+          return;
+        }
+        output += chunk.toString("utf8");
+      };
+      child.stdout.on("data", collect);
+      child.stderr.on("data", collect);
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve({ ok: false, output: `check timed out after ${CHECK_TIMEOUT_MS / 1000}s` });
+      }, CHECK_TIMEOUT_MS);
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        resolve({ ok: false, output: error.message });
+      });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        const text = truncated ? `${output}\n[output truncated]` : output;
+        resolve(
+          code === 0
+            ? { ok: true, output: text }
+            : { ok: false, output: `exit ${code ?? "?"}: ${text}`.trim() },
+        );
+      });
+    });
+}
 
 export interface SchedulerOptions {
   schedulePath: string;
@@ -13,6 +77,8 @@ export interface SchedulerOptions {
   agent: NudgeAgent;
   delivery: DeliveryService;
   logger: Logger;
+  /** Executes check: commands; tests inject a fake. */
+  runCheck?: CheckRunner;
   tickMs?: number;
   now?: () => number;
 }
@@ -26,6 +92,7 @@ export interface SchedulerOptions {
 export class Scheduler {
   readonly #options: SchedulerOptions;
   readonly #tickMs: number;
+  readonly #check: CheckRunner;
   #entries: ScheduleEntry[] = [];
   #contentHash = "";
   #notifiedErrorHash = "";
@@ -35,6 +102,7 @@ export class Scheduler {
   constructor(options: SchedulerOptions) {
     this.#options = options;
     this.#tickMs = options.tickMs ?? 20_000;
+    this.#check = options.runCheck ?? buildCheckRunner({ cwd: process.cwd() });
   }
 
   start(): void {
@@ -78,13 +146,25 @@ export class Scheduler {
       entry: entry.name,
       due: due.toISOString(),
       ...(entry.agent ? { agent: entry.agent } : {}),
+      ...(entry.check ? { check: true } : {}),
     });
     try {
       if (entry.agent) {
+        // Watcher gate: the check runs first, and an unchanged output means
+        // nobody wakes — the firing costs a subprocess, not a model turn.
+        let prompt = entry.prompt;
+        if (entry.check) {
+          const gate = await this.#runCheckGate(entry.id, entry.check, now);
+          if (!gate.wake) {
+            store.finishScheduleRun(entry.id, now, entry.when.kind === "once");
+            return;
+          }
+          prompt = `${entry.prompt}\n\n${gate.briefSuffix}`;
+        }
         // Agent-scoped: the named standing agent runs the entry with its
         // accumulated memory, and its report reaches the owner through the
         // interaction loop's curation — no direct delivery from here.
-        await agent.runAgentTask(ownerHandle, entry.name, entry.prompt, entry.agent);
+        await agent.runAgentTask(ownerHandle, entry.name, prompt, entry.agent);
       } else {
         const text = await agent.runTask(ownerHandle, entry.name, entry.prompt);
         if (text) {
@@ -101,6 +181,58 @@ export class Scheduler {
       });
       store.finishScheduleRun(entry.id, now, false);
     }
+  }
+
+  /**
+   * Run an entry's check and decide whether to wake its agent. Wake on a
+   * changed output or a failed command (a watcher that breaks must surface,
+   * not go dark); stay silent on the first sight (baseline) and on an
+   * unchanged output. Health counters land in schedule_state either way.
+   */
+  async #runCheckGate(
+    entryId: string,
+    command: string,
+    now: number,
+  ): Promise<{ wake: false } | { wake: true; briefSuffix: string }> {
+    const { store, logger } = this.#options;
+    const state = store.scheduleState(entryId);
+    let result: CheckResult;
+    try {
+      result = await this.#check(command);
+    } catch (error) {
+      result = { ok: false, output: error instanceof Error ? error.message : String(error) };
+    }
+    if (!result.ok) {
+      const output = capForBrief(result.output) || "(no output)";
+      store.recordScheduleCheck(entryId, { error: output, woke: true }, now);
+      logger.warn("A watcher check failed; waking its agent with the error", { entryId });
+      return {
+        wake: true,
+        briefSuffix:
+          "[This watcher's check command failed instead of producing output. Diagnose it — " +
+          "and if you cannot, report it so the owner hears the watcher is broken:]\n" +
+          output,
+      };
+    }
+    const normalized = result.output.trim();
+    const hash = createHash("sha256").update(normalized).digest("hex");
+    if (state.lastCheckHash === null) {
+      // First sight: baseline silently, mirroring the scheduler's no-back-fill rule.
+      store.recordScheduleCheck(entryId, { hash }, now);
+      logger.info("Watcher baseline recorded", { entryId });
+      return { wake: false };
+    }
+    if (state.lastCheckHash === hash) {
+      store.recordScheduleCheck(entryId, { hash }, now);
+      return { wake: false };
+    }
+    store.recordScheduleCheck(entryId, { hash, changed: true, woke: true }, now);
+    return {
+      wake: true,
+      briefSuffix:
+        "[This watcher's check output changed since the last run. Current output:]\n" +
+        (capForBrief(normalized) || "(empty)"),
+    };
   }
 
   async #reload(): Promise<void> {
@@ -143,4 +275,12 @@ export class Scheduler {
   #now(): number {
     return this.#options.now?.() ?? Date.now();
   }
+}
+
+/** Head-and-tail cap for check output embedded in a wake brief. */
+function capForBrief(text: string): string {
+  if (text.length <= CHECK_BRIEF_MAX_CHARS) return text;
+  const head = Math.floor(CHECK_BRIEF_MAX_CHARS * 0.7);
+  const tail = CHECK_BRIEF_MAX_CHARS - head;
+  return `${text.slice(0, head)}\n…[${text.length - CHECK_BRIEF_MAX_CHARS} chars omitted]…\n${text.slice(-tail)}`;
 }

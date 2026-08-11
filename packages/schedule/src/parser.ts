@@ -15,6 +15,14 @@ export interface ScheduleEntry {
    * one-shot turn, and the result flows back as an agent report.
    */
   agent: string | null;
+  /**
+   * Optional watcher gate: a bash command whose normalized output is hashed
+   * each firing. The agent is woken only when the output changes (or the
+   * command fails), making tight polling cost a subprocess, not a model turn.
+   * Requires `agent:` — a memoryless one-shot turn has nothing to diff
+   * against or build on.
+   */
+  check: string | null;
 }
 
 export type WhenSpec =
@@ -42,6 +50,7 @@ const WEEKDAY_NUMBERS: Record<string, number> = {
  *   ## Entry name
  *   when: <timing expression>
  *   agent: <standing agent name>     (optional)
+ *   check: <bash command>            (optional watcher gate; needs agent:)
  *   The prompt to run, on one or more lines.
  *
  * Timing grammar (deterministic — never interpreted by the model at runtime):
@@ -77,8 +86,20 @@ export function parseSchedule(markdown: string): ParseResult {
       errors.push(`"${section.name}": the "agent:" line names no agent`);
       continue;
     }
+    const checkLine = section.lines.find((line) => /^check\s*:/i.test(line.trim()));
+    const check = checkLine ? checkLine.trim().replace(/^check\s*:/i, "").trim() : null;
+    if (checkLine !== undefined && !check) {
+      errors.push(`"${section.name}": the "check:" line has no command`);
+      continue;
+    }
+    if (check && !agent) {
+      errors.push(
+        `"${section.name}": a "check:" line requires an "agent:" line — only a standing agent has the memory a watcher builds on`,
+      );
+      continue;
+    }
     const prompt = section.lines
-      .filter((line) => line !== whenLine && line !== agentLine)
+      .filter((line) => line !== whenLine && line !== agentLine && line !== checkLine)
       .join("\n")
       .trim();
     if (!prompt) {
@@ -103,6 +124,7 @@ export function parseSchedule(markdown: string): ParseResult {
       when,
       prompt,
       agent,
+      check,
     });
   }
 

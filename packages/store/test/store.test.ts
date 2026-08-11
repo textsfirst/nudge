@@ -23,6 +23,49 @@ describe("NudgeStore", () => {
     expect(store.activeSession(HANDLE)).toBeUndefined();
   });
 
+  it("tracks watcher check health on schedule state", () => {
+    const store = new NudgeStore(":memory:");
+    const blank = store.scheduleState("watch-1");
+    expect(blank).toMatchObject({ lastCheckHash: null, checksRun: 0, wakes: 0 });
+
+    // Baseline: hash recorded, nobody woken.
+    store.recordScheduleCheck("watch-1", { hash: "aaa" }, 1_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckHash: "aaa",
+      lastCheckAt: 1_000,
+      lastChangeAt: null,
+      checksRun: 1,
+      wakes: 0,
+      lastCheckError: null,
+    });
+
+    // A change wakes and moves the change timestamp.
+    store.recordScheduleCheck("watch-1", { hash: "bbb", changed: true, woke: true }, 2_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckHash: "bbb",
+      lastChangeAt: 2_000,
+      checksRun: 2,
+      wakes: 1,
+    });
+
+    // A failure keeps the last good hash and records the error…
+    store.recordScheduleCheck("watch-1", { error: "exit 6: dns", woke: true }, 3_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckHash: "bbb",
+      lastCheckError: "exit 6: dns",
+      checksRun: 3,
+      wakes: 2,
+    });
+
+    // …and the next success clears it.
+    store.recordScheduleCheck("watch-1", { hash: "bbb" }, 4_000);
+    expect(store.scheduleState("watch-1")).toMatchObject({
+      lastCheckError: null,
+      checksRun: 4,
+      wakes: 2,
+    });
+  });
+
   it("creates, finds, and archives execution agents", () => {
     const store = new NudgeStore(":memory:");
     const email = store.createAgent({
@@ -328,7 +371,7 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 8 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

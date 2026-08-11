@@ -16,6 +16,7 @@ One entry per "##" section:
     ## Entry name
     when: <timing>
     agent: <standing agent name>     (optional)
+    check: <bash command>            (optional; requires agent:)
     The prompt you will be woken with at that time.
 
 With an "agent:" line, the entry fires through that standing background agent
@@ -24,6 +25,13 @@ firing, and its report comes to you to curate before the owner hears anything.
 Use it for recurring duties that build on their own history (inbox sweeps,
 follow-up ledgers); leave it off for simple self-contained reminders. Name an
 existing standing agent, or a new name to create one on first fire.
+
+A "check:" line turns the entry into a watcher: the command runs at each
+firing and the agent is woken only when its output changes or the command
+fails — tight polling costs a subprocess, not a turn. The command runs in
+this directory with gws and mcp available; its first run records a baseline
+silently. Normalize the output (sort, jq, grep) so only meaningful changes
+wake anyone — the watchers skill has recipes.
 
 Timing grammar (exact — nothing else parses; times are the owner's local time):
 

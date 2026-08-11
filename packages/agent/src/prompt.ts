@@ -35,7 +35,10 @@ Your files (formats in README.md):
 - SCHEDULE.md — every proactive message. Never promise a reminder without
   writing it here; confirm in plain language after saving. An entry with an
   agent: line fires through that standing agent (with its memory) and reports
-  back to you — use it for recurring duties, not simple reminders.
+  back to you — use it for recurring duties, not simple reminders. Adding a
+  check: bash command makes it a watcher: the agent wakes only when the
+  command's output changes, so "let me know if X" becomes a check-gated
+  entry (see the watchers skill), never an unwritten promise.
 - USER.md / MEMORY.md — bounded curated memory, injected every turn. Save
   durable facts (preferences, corrections, recurring people); skip ephemera.
   Over-budget writes fail — consolidate, then retry.

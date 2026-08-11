@@ -108,6 +108,17 @@ export interface ScheduleStateRow {
   lastRunAt: number | null;
   claimedAt: number | null;
   completed: boolean;
+  /** Hash of the last check's normalized output; null before the baseline run. */
+  lastCheckHash: string | null;
+  lastCheckAt: number | null;
+  /** When the check output last differed from the previous run. */
+  lastChangeAt: number | null;
+  /** Total check executions — with `wakes`, the flapping signal (wake ratio). */
+  checksRun: number;
+  /** Firings that actually woke the agent (output changed or check failed). */
+  wakes: number;
+  /** The last check failure's message; null after any success. */
+  lastCheckError: string | null;
 }
 
 export interface OutboundRow {
@@ -140,7 +151,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 8;
+const CURRENT_SCHEMA_VERSION = 9;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -317,6 +328,16 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_agents_roster ON agents(handle, status, last_active_at);
     `);
     db.exec("ALTER TABLE sessions ADD COLUMN agent_id INTEGER REFERENCES agents(id)");
+  },
+  (db) => {
+    // Watcher bookkeeping for entries with a check: gate, doubling as the
+    // console's health data (wake ratio = flapping, last_error = dead watcher).
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_hash TEXT");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_at INTEGER");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_change_at INTEGER");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN checks_run INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN wakes INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_error TEXT");
   },
 ];
 
@@ -775,14 +796,65 @@ export class NudgeStore {
   scheduleState(entryId: string): ScheduleStateRow {
     const row = this.#db.prepare("SELECT * FROM schedule_state WHERE entry_id = ?").get(entryId);
     if (!row) {
-      return { entryId, lastRunAt: null, claimedAt: null, completed: false };
+      return {
+        entryId,
+        lastRunAt: null,
+        claimedAt: null,
+        completed: false,
+        lastCheckHash: null,
+        lastCheckAt: null,
+        lastChangeAt: null,
+        checksRun: 0,
+        wakes: 0,
+        lastCheckError: null,
+      };
     }
     return {
       entryId,
       lastRunAt: nullableNumber(row, "last_run_at"),
       claimedAt: nullableNumber(row, "claimed_at"),
       completed: requiredNumber(row, "completed") === 1,
+      lastCheckHash: nullableString(row, "last_check_hash"),
+      lastCheckAt: nullableNumber(row, "last_check_at"),
+      lastChangeAt: nullableNumber(row, "last_change_at"),
+      checksRun: requiredNumber(row, "checks_run"),
+      wakes: requiredNumber(row, "wakes"),
+      lastCheckError: nullableString(row, "last_check_error"),
     };
+  }
+
+  /**
+   * Record one watcher check execution. `changed` marks the output as
+   * differing from the previous hash (advancing the change timestamp), and
+   * `error` marks a failed command — hash untouched, so recovery compares
+   * against the last good output.
+   */
+  recordScheduleCheck(
+    entryId: string,
+    result: { hash?: string; changed?: boolean; error?: string; woke?: boolean },
+    at = Date.now(),
+  ): void {
+    this.#db.prepare("INSERT OR IGNORE INTO schedule_state (entry_id) VALUES (?)").run(entryId);
+    this.#db
+      .prepare(
+        `UPDATE schedule_state SET
+           checks_run = checks_run + 1,
+           wakes = wakes + ?,
+           last_check_at = ?,
+           last_check_hash = COALESCE(?, last_check_hash),
+           last_change_at = CASE WHEN ? THEN ? ELSE last_change_at END,
+           last_check_error = ?
+         WHERE entry_id = ?`,
+      )
+      .run(
+        result.woke ? 1 : 0,
+        at,
+        result.hash ?? null,
+        result.changed ? 1 : 0,
+        at,
+        result.error ?? null,
+        entryId,
+      );
   }
 
   /**

@@ -1,12 +1,13 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger, NudgeAgent } from "@nudge/agent";
 import type { SendOptions } from "@nudge/photon";
+import { parseSchedule } from "@nudge/schedule";
 import { NudgeStore } from "@nudge/store";
 import { describe, expect, it, vi } from "vitest";
 import { DeliveryService } from "../src/delivery.js";
-import { Scheduler } from "../src/scheduler.js";
+import { buildCheckRunner, Scheduler } from "../src/scheduler.js";
 
 const OWNER = "+15551234567";
 
@@ -17,7 +18,11 @@ const logger: Logger = {
   error: vi.fn(),
 };
 
-function harness(scheduleContent: string, runTaskResult: string | null = "nudge text") {
+function harness(
+  scheduleContent: string,
+  runTaskResult: string | null = "nudge text",
+  checks: { ok: boolean; output: string }[] = [],
+) {
   const dir = mkdtempSync(join(tmpdir(), "nudge-scheduler-"));
   const schedulePath = join(dir, "SCHEDULE.md");
   writeFileSync(schedulePath, scheduleContent);
@@ -36,6 +41,12 @@ function harness(scheduleContent: string, runTaskResult: string | null = "nudge 
   const agent = { runTask, runAgentTask } as unknown as NudgeAgent;
 
   let now = Date.UTC(2026, 7, 10, 12, 0, 0); // noon UTC
+  const remainingChecks = [...checks];
+  const runCheck = vi.fn(async () => {
+    const next = remainingChecks.shift();
+    if (!next) throw new Error("The harness ran out of scripted check results");
+    return next;
+  });
   const scheduler = new Scheduler({
     schedulePath,
     ownerHandle: OWNER,
@@ -44,6 +55,7 @@ function harness(scheduleContent: string, runTaskResult: string | null = "nudge 
     agent,
     delivery: new DeliveryService(store, sender, logger),
     logger,
+    runCheck,
     now: () => now,
   });
 
@@ -53,12 +65,32 @@ function harness(scheduleContent: string, runTaskResult: string | null = "nudge 
     sent,
     runTask,
     runAgentTask,
+    runCheck,
     scheduler,
     setNow: (at: number) => {
       now = at;
     },
   };
 }
+
+describe("buildCheckRunner", () => {
+  it("runs bash with the given cwd and env, reporting exit status", async () => {
+    // realpath: on macOS the temp dir is behind a /var → /private/var symlink,
+    // and the spawned shell reports the resolved cwd.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nudge-check-")));
+    const run = buildCheckRunner({ cwd: dir, env: { NUDGE_TEST_TOKEN: "sesame" } });
+
+    await expect(run("pwd && echo $NUDGE_TEST_TOKEN")).resolves.toEqual({
+      ok: true,
+      output: `${dir}\nsesame\n`,
+    });
+
+    const failed = await run("echo broken >&2; exit 6");
+    expect(failed.ok).toBe(false);
+    expect(failed.output).toContain("exit 6");
+    expect(failed.output).toContain("broken");
+  });
+});
 
 describe("Scheduler", () => {
   it("fires a due entry once and delivers through the ledger", async () => {
@@ -85,6 +117,56 @@ describe("Scheduler", () => {
     setNow(Date.UTC(2026, 7, 11, 13, 0, 30)); // next day fires again
     await scheduler.tick();
     expect(runTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("gates a watcher entry on its check: baseline and unchanged stay silent, change wakes", async () => {
+    const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe slots\nSlots changed.";
+    const { scheduler, store, runAgentTask, runCheck, setNow } = harness(WATCHER, null, [
+      { ok: true, output: "none open\n" },
+      { ok: true, output: "none open\n" },
+      { ok: true, output: "2 slots open\n" },
+    ]);
+
+    await scheduler.tick(); // noon: baseline not due yet
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick(); // first firing: baseline, silent
+    expect(runCheck).toHaveBeenCalledExactlyOnceWith("probe slots");
+    expect(runAgentTask).not.toHaveBeenCalled();
+
+    setNow(Date.UTC(2026, 7, 11, 13, 0, 30));
+    await scheduler.tick(); // unchanged output: silent
+    expect(runAgentTask).not.toHaveBeenCalled();
+
+    setNow(Date.UTC(2026, 7, 12, 13, 0, 30));
+    await scheduler.tick(); // changed output: wake with the output in the brief
+    expect(runAgentTask).toHaveBeenCalledOnce();
+    const [, name, prompt, agentName] = runAgentTask.mock.calls[0]! as unknown as string[];
+    expect(name).toBe("Slots");
+    expect(agentName).toBe("visa");
+    expect(prompt).toContain("Slots changed.");
+    expect(prompt).toContain("check output changed");
+    expect(prompt).toContain("2 slots open");
+
+    const entryId = parseSchedule(WATCHER).entries[0]!.id;
+    const health = store.scheduleState(entryId);
+    expect(health).toMatchObject({ checksRun: 3, wakes: 1 });
+    expect(health.lastChangeAt).not.toBeNull();
+  });
+
+  it("wakes the watcher's agent when the check command fails", async () => {
+    const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe\nSlots changed.";
+    const { scheduler, runAgentTask, setNow } = harness(WATCHER, null, [
+      { ok: false, output: "exit 6: could not resolve host" },
+    ]);
+
+    await scheduler.tick();
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick();
+
+    expect(runAgentTask).toHaveBeenCalledOnce();
+    const [, , prompt] = runAgentTask.mock.calls[0]! as unknown as string[];
+    expect(prompt).toContain("check command failed");
+    expect(prompt).toContain("could not resolve host");
   });
 
   it("routes an agent-scoped entry through its standing agent, not direct delivery", async () => {
