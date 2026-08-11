@@ -74,13 +74,24 @@ export class Scheduler {
     if (!due || due.getTime() > now) return;
     if (!store.claimScheduleRun(entry.id, now)) return;
 
-    logger.info("Running scheduled entry", { entry: entry.name, due: due.toISOString() });
+    logger.info("Running scheduled entry", {
+      entry: entry.name,
+      due: due.toISOString(),
+      ...(entry.agent ? { agent: entry.agent } : {}),
+    });
     try {
-      const text = await agent.runTask(ownerHandle, entry.name, entry.prompt);
-      if (text) {
-        await delivery.deliver(ownerHandle, text, "nudge");
+      if (entry.agent) {
+        // Agent-scoped: the named standing agent runs the entry with its
+        // accumulated memory, and its report reaches the owner through the
+        // interaction loop's curation — no direct delivery from here.
+        await agent.runAgentTask(ownerHandle, entry.name, entry.prompt, entry.agent);
       } else {
-        logger.debug("Scheduled entry chose to stay silent", { entry: entry.name });
+        const text = await agent.runTask(ownerHandle, entry.name, entry.prompt);
+        if (text) {
+          await delivery.deliver(ownerHandle, text, "nudge");
+        } else {
+          logger.debug("Scheduled entry chose to stay silent", { entry: entry.name });
+        }
       }
       store.finishScheduleRun(entry.id, now, entry.when.kind === "once");
     } catch (error) {

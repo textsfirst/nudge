@@ -262,6 +262,51 @@ describe("dispatching execution agents", () => {
     ]);
   });
 
+  it("runs scheduled tasks through a standing agent that keeps memory across firings", async () => {
+    let executionStep = 0;
+    const { agent, store, delivered } = makeDispatchAgent((lastMessage) => {
+      if (isReportTurn(lastMessage)) return "your inbox has one urgent thing — the visa email";
+      if (lastMessage.includes("[Scheduled task")) {
+        executionStep += 1;
+        return executionStep === 1 ? "Swept the inbox: one urgent visa email." : "Nothing new.";
+      }
+      return "unexpected";
+    });
+
+    await agent.runAgentTask(HANDLE, "Inbox sweep", "Check for urgent mail.", "email");
+    await vi.waitFor(() => {
+      expect(delivered).toEqual(["your inbox has one urgent thing — the visa email"]);
+    });
+
+    const standing = store.findAgentByName(HANDLE, "email")!;
+    expect(standing).toMatchObject({ kind: "standing", status: "active" });
+    expect(standing.description).toContain('scheduled task "Inbox sweep"');
+
+    // The second firing lands in the same session — memory across firings.
+    await agent.runAgentTask(HANDLE, "Inbox sweep", "Check for urgent mail.", "email");
+    const workerMessages = store
+      .sessionMessages(store.activeAgentSession(standing.id)!.id)
+      .map((message) => message.content);
+    expect(workerMessages).toHaveLength(4);
+    expect(workerMessages[0]).toContain('[Scheduled task "Inbox sweep" is firing now.');
+    expect(workerMessages[2]).toContain("your earlier runs are the turns above");
+    expect(store.findAgentByName(HANDLE, "email")!.id).toBe(standing.id);
+  });
+
+  it("never binds a scheduled task to a temp agent", async () => {
+    const { agent, store } = makeDispatchAgent((lastMessage) => {
+      if (isReportTurn(lastMessage)) return "[SILENT]";
+      if (lastMessage.includes("[Scheduled task")) return "Done.";
+      return "unexpected";
+    });
+    store.createAgent({ handle: HANDLE, name: "sweep", kind: "temp", description: "one-off", at: 1_000 });
+
+    await agent.runAgentTask(HANDLE, "Sweep", "Do the sweep.", "sweep");
+
+    const match = store.findAgentByName(HANDLE, "sweep")!;
+    expect(match.kind).toBe("standing");
+  });
+
   it("reports an execution failure instead of losing it", async () => {
     let interactionStep = 0;
     const { agent, delivered } = makeDispatchAgent((prompt) => {

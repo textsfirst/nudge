@@ -32,7 +32,8 @@ function harness(scheduleContent: string, runTaskResult: string | null = "nudge 
     },
   };
   const runTask = vi.fn(async () => runTaskResult);
-  const agent = { runTask } as unknown as NudgeAgent;
+  const runAgentTask = vi.fn(async () => undefined);
+  const agent = { runTask, runAgentTask } as unknown as NudgeAgent;
 
   let now = Date.UTC(2026, 7, 10, 12, 0, 0); // noon UTC
   const scheduler = new Scheduler({
@@ -51,6 +52,7 @@ function harness(scheduleContent: string, runTaskResult: string | null = "nudge 
     store,
     sent,
     runTask,
+    runAgentTask,
     scheduler,
     setNow: (at: number) => {
       now = at;
@@ -83,6 +85,29 @@ describe("Scheduler", () => {
     setNow(Date.UTC(2026, 7, 11, 13, 0, 30)); // next day fires again
     await scheduler.tick();
     expect(runTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes an agent-scoped entry through its standing agent, not direct delivery", async () => {
+    const { scheduler, sent, runTask, runAgentTask, setNow } = harness(
+      "## Inbox sweep\nwhen: every day at 13:00\nagent: email\nCheck for urgent mail.",
+    );
+
+    await scheduler.tick(); // baseline set at noon; 13:00 not due yet
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick();
+
+    expect(runAgentTask).toHaveBeenCalledExactlyOnceWith(
+      OWNER,
+      "Inbox sweep",
+      "Check for urgent mail.",
+      "email",
+    );
+    // The report channel owns delivery; the scheduler must send nothing itself.
+    expect(runTask).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+
+    await scheduler.tick(); // same occurrence must not refire
+    expect(runAgentTask).toHaveBeenCalledOnce();
   });
 
   it("does not back-fill occurrences from before the entry existed", async () => {

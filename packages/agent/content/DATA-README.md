@@ -15,7 +15,15 @@ One entry per "##" section:
 
     ## Entry name
     when: <timing>
+    agent: <standing agent name>     (optional)
     The prompt you will be woken with at that time.
+
+With an "agent:" line, the entry fires through that standing background agent
+instead of waking you cold: it runs with its own memory of every earlier
+firing, and its report comes to you to curate before the owner hears anything.
+Use it for recurring duties that build on their own history (inbox sweeps,
+follow-up ledgers); leave it off for simple self-contained reminders. Name an
+existing standing agent, or a new name to create one on first fire.
 
 Timing grammar (exact — nothing else parses; times are the owner's local time):
 

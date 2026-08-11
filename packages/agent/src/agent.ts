@@ -579,30 +579,78 @@ export class NudgeAgent {
       created = true;
     }
     const queued = (this.#inflightAgents.get(agent.id) ?? 0) > 0;
-    this.#inflightAgents.set(agent.id, (this.#inflightAgents.get(agent.id) ?? 0) + 1);
     const target = agent;
-    void this.#serialized(`agent:${target.id}`, () =>
-      this.#withExecutionSlot(() => this.#runExecution(target, request.brief)),
-    )
-      .catch((error: unknown) => {
-        // #runExecution reports its own failures; this catches only the truly
-        // unexpected (a store error before the run began, say).
-        this.#options.logger.error("An execution-agent run failed outside its turn", {
-          agent: target.name,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        const remaining = (this.#inflightAgents.get(target.id) ?? 1) - 1;
-        if (remaining <= 0) this.#inflightAgents.delete(target.id);
-        else this.#inflightAgents.set(target.id, remaining);
+    void this.#runTracked(target, request.brief).catch((error: unknown) => {
+      // #runExecution reports its own failures; this catches only the truly
+      // unexpected (a store error before the run began, say).
+      this.#options.logger.error("An execution-agent run failed outside its turn", {
+        agent: target.name,
+        error: error instanceof Error ? error.message : String(error),
       });
+    });
     if (queued) {
       return `queued: "${target.name}" is mid-task; this brief runs next and it will report back.`;
     }
     return created
       ? `dispatched: created ${target.kind} agent "${target.name}"; it works in the background and reports back to you when done. Don't wait for it — finish your reply.`
       : `dispatched: "${target.name}" is on it and will report back when done. Don't wait for it — finish your reply.`;
+  }
+
+  /**
+   * Run a scheduled entry through a standing execution agent, so the trigger
+   * fires with that agent's accumulated memory instead of a cold turn. The
+   * result flows back through the report channel like any dispatched task —
+   * curated by the interaction loop, [SILENT] included. Resolves once the run
+   * and its report turn settle; failures inside the run become failure
+   * reports rather than rejections.
+   */
+  async runAgentTask(
+    handle: string,
+    entryName: string,
+    prompt: string,
+    agentName: string,
+  ): Promise<void> {
+    const store = this.#options.store;
+    const now = this.#now();
+    const name = agentName.trim();
+    if (!name) throw new Error("The agent name is empty");
+    let agent = store.findAgentByName(handle, name);
+    // Triggers bind to standing agents only: a temp with the same name
+    // retires after one task, which would drop the memory a recurring
+    // trigger exists to accumulate.
+    if (agent && agent.kind === "temp") {
+      agent = undefined;
+    }
+    if (agent && agent.status === "archived") {
+      store.setAgentStatus(agent.id, "active", now);
+      agent = { ...agent, status: "active" };
+    }
+    agent ??= store.createAgent({
+      handle,
+      name,
+      kind: "standing",
+      description: `handles the scheduled task "${entryName}"`,
+      at: now,
+    });
+    const brief =
+      `[Scheduled task "${entryName}" is firing now. This is a recurring duty of yours, ` +
+      "not a one-off request — your earlier runs are the turns above.]\n" +
+      prompt;
+    await this.#runTracked(agent, brief);
+  }
+
+  /** One tracked run: per-agent serialization, the global slot, the inflight flag. */
+  async #runTracked(agent: AgentRow, brief: string): Promise<void> {
+    this.#inflightAgents.set(agent.id, (this.#inflightAgents.get(agent.id) ?? 0) + 1);
+    try {
+      await this.#serialized(`agent:${agent.id}`, () =>
+        this.#withExecutionSlot(() => this.#runExecution(agent, brief)),
+      );
+    } finally {
+      const remaining = (this.#inflightAgents.get(agent.id) ?? 1) - 1;
+      if (remaining <= 0) this.#inflightAgents.delete(agent.id);
+      else this.#inflightAgents.set(agent.id, remaining);
+    }
   }
 
   /**
