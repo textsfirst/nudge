@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Agent-facing MCP CLI. Nudge prepends this directory to the bash tool's PATH;
+# unlike gws-shim.mjs this launcher needs the workspace build (the MCP SDK),
+# so it runs dist/ when present and falls back to tsx in a dev checkout.
+dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$dir/../dist/mcp/main.js" ]; then
+  exec node "$dir/../dist/mcp/main.js" "$@"
+fi
+exec "$dir/../node_modules/.bin/tsx" --conditions=development "$dir/../src/mcp/main.ts" "$@"
