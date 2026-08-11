@@ -1,0 +1,24 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "defaultThreadEnvMode": "worktree",
+  "scripts": [
+    {
+      "name": "Setup",
+      "command": "bash scripts/t3-setup.sh",
+      "icon": "configure",
+      "runOnWorktreeCreate": true
+    },
+    {
+      "name": "Dev",
+      "command": "pnpm dev",
+      "icon": "play",
+      "previewUrl": "http://localhost:5174",
+      "autoOpenPreview": true
+    },
+    {
+      "name": "Check",
+      "command": "pnpm check",
+      "icon": "test"
+    }
+  ]
+}
