@@ -1,5 +1,6 @@
 import {
   Cable,
+  CalendarClock,
   FileText,
   KeyRound,
   LayoutDashboard,
@@ -16,6 +17,7 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/threads", label: "Threads", icon: MessagesSquare },
+  { to: "/schedule", label: "Schedule", icon: CalendarClock },
   { to: "/files", label: "Files", icon: FileText },
   { to: "/connections", label: "Connections", icon: Cable },
   { to: "/settings", label: "Settings", icon: Settings2 },

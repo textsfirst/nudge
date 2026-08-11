@@ -8,6 +8,7 @@ import { SettingsPage } from "@/pages/settings";
 import { ConnectionsPage } from "@/pages/connections";
 import { FilesPage } from "@/pages/files";
 import { OverviewPage } from "@/pages/overview";
+import { SchedulePage } from "@/pages/schedule";
 import { SecretsPage } from "@/pages/secrets";
 import { ThreadDetailPage } from "@/pages/thread-detail";
 import { ThreadsPage } from "@/pages/threads";
@@ -24,6 +25,7 @@ const router = createBrowserRouter([
       { path: "/", element: <OverviewPage /> },
       { path: "/threads", element: <ThreadsPage /> },
       { path: "/threads/:id", element: <ThreadDetailPage /> },
+      { path: "/schedule", element: <SchedulePage /> },
       { path: "/files", element: <FilesPage /> },
       { path: "/connections", element: <ConnectionsPage /> },
       { path: "/settings", element: <SettingsPage /> },

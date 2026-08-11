@@ -415,6 +415,9 @@ export const setSecret = (key: string, value: string) =>
 export const deleteSecret = (key: string) =>
   request<{ ok: boolean }>(`/api/secrets/${encodeURIComponent(key)}`, { method: "DELETE" });
 
+export const getFileContent = (path: string) =>
+  request<FileContent>(`/api/files/content?path=${encodeURIComponent(path)}`);
+
 export const saveFile = (path: string, content: string) =>
   request<{ path: string }>("/api/files/content", {
     method: "PUT",
