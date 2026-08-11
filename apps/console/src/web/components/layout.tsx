@@ -1,11 +1,13 @@
 import {
   Cable,
+  CalendarClock,
   FileText,
   KeyRound,
   LayoutDashboard,
   MessagesSquare,
   Moon,
   Settings2,
+  Sparkles,
   Sun,
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
@@ -16,6 +18,8 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
   { to: "/threads", label: "Threads", icon: MessagesSquare },
+  { to: "/schedule", label: "Schedule", icon: CalendarClock },
+  { to: "/skills", label: "Skills", icon: Sparkles },
   { to: "/files", label: "Files", icon: FileText },
   { to: "/connections", label: "Connections", icon: Cable },
   { to: "/settings", label: "Settings", icon: Settings2 },

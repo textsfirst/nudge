@@ -1,7 +1,8 @@
 ---
 name: personal-memory
 description: EA-grade memory use - natural recall, never creepy
-version: 1
+metadata:
+  version: "1"
 ---
 
 # Personal Memory

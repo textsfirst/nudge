@@ -22,7 +22,7 @@ const HIDDEN_PREFIXES = ["nudge.db"];
 // attachments/ holds inbound media bytes (hash-named, system-managed) — the
 // thread view is their surface, not the file editor.
 const HIDDEN_DIRS = new Set(["google", "attachments"]);
-const SYSTEM_MANAGED = new Set(["README.md"]);
+const SYSTEM_MANAGED = new Set(["README.md", "skills-lock.json"]);
 
 export interface FileInfo {
   path: string;

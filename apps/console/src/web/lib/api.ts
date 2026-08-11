@@ -274,6 +274,38 @@ export interface McpTestResult {
   truncated?: boolean;
 }
 
+export type SkillProvenance =
+  | "bundled"
+  | "bundled-customized"
+  | "registry"
+  | "registry-customized"
+  | "local";
+
+export interface SkillEntry {
+  name: string;
+  description: string;
+  version: string;
+  provenance: SkillProvenance;
+  source: string | null;
+  installedAt: string | null;
+  restorable: boolean;
+  files: string[];
+  problem: string | null;
+}
+
+export interface SkillsOverview {
+  skills: SkillEntry[];
+  restorable: { name: string; description: string }[];
+}
+
+export interface SkillUpdateStatus {
+  name: string;
+  source: string;
+  customized: boolean;
+  updateAvailable: boolean;
+  error: string | null;
+}
+
 export interface SearchHit {
   id: number;
   sessionId: number;
@@ -350,6 +382,9 @@ export const useConnections = () =>
 export const useMcp = () =>
   useQuery({ queryKey: ["mcp"], queryFn: () => request<McpOverview>("/api/mcp") });
 
+export const useSkills = () =>
+  useQuery({ queryKey: ["skills"], queryFn: () => request<SkillsOverview>("/api/skills") });
+
 // -- mutations --------------------------------------------------------------
 
 export const saveMcpServer = (name: string, server: McpServerConfig, baseHash: string | null) =>
@@ -363,6 +398,27 @@ export const deleteMcpServer = (name: string) =>
 
 export const testMcpServer = (name: string) =>
   request<McpTestResult>(`/api/mcp/servers/${encodeURIComponent(name)}/test`, { method: "POST" });
+
+export const installSkill = (source: string) =>
+  request<{ name: string; source: string }>("/api/skills/install", {
+    method: "POST",
+    body: JSON.stringify({ source }),
+  });
+
+export const updateSkill = (name: string, force: boolean) =>
+  request<{ name: string; source: string }>(`/api/skills/${encodeURIComponent(name)}/update`, {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+
+export const restoreSkill = (name: string) =>
+  request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/restore`, { method: "POST" });
+
+export const deleteSkill = (name: string) =>
+  request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" });
+
+export const checkSkillUpdates = () =>
+  request<SkillUpdateStatus[]>("/api/skills/check", { method: "POST" });
 
 export const saveGoogleClient = (input: { json?: string; client_id?: string; client_secret?: string }) =>
   request<{ clientId: string }>("/api/connections/google/client", {
@@ -414,6 +470,9 @@ export const setSecret = (key: string, value: string) =>
 
 export const deleteSecret = (key: string) =>
   request<{ ok: boolean }>(`/api/secrets/${encodeURIComponent(key)}`, { method: "DELETE" });
+
+export const getFileContent = (path: string) =>
+  request<FileContent>(`/api/files/content?path=${encodeURIComponent(path)}`);
 
 export const saveFile = (path: string, content: string) =>
   request<{ path: string }>("/api/files/content", {

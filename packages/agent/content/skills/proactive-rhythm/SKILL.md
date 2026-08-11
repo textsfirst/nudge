@@ -1,7 +1,8 @@
 ---
 name: proactive-rhythm
 description: Morning rundowns, nudges, follow-ups, habit routines
-version: 1
+metadata:
+  version: "1"
 ---
 
 # Proactive Rhythm

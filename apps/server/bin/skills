@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Agent-facing skills CLI. Nudge prepends this directory to the bash tool's
+# PATH; like bin/mcp it needs workspace code, so it runs dist/ when present
+# and falls back to tsx in a dev checkout.
+dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$dir/../dist/skills/main.js" ]; then
+  exec node "$dir/../dist/skills/main.js" "$@"
+fi
+exec "$dir/../node_modules/.bin/tsx" --conditions=development "$dir/../src/skills/main.ts" "$@"
