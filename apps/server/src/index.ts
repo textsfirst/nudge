@@ -6,6 +6,7 @@ import {
   ChatGptAuthManager,
   createModelSources,
   DATA_README,
+  listEnabledMcpServers,
   MediaIngest,
   NudgeAgent,
   supportsVision,
@@ -22,6 +23,8 @@ import { buildConnectionProbes, ConnectionHealthMonitor } from "./health.js";
 import { createHttpApp } from "./http.js";
 import type { ProviderHealth } from "./http.js";
 import { createLogger } from "./logger.js";
+import { buildMcpBashEnv } from "./mcp/env.js";
+import { seedMcpSkill } from "./mcp/skill.js";
 import { createReplyHandler } from "./reply.js";
 import { Scheduler } from "./scheduler.js";
 import { createSystemFileReader } from "./system-file.js";
@@ -104,13 +107,32 @@ async function main(): Promise<void> {
     },
     ...(config.firecrawl ? { web: config.firecrawl } : {}),
     bashEnabled: config.bashEnabled,
-    bashEnv: buildGwsBashEnv({
-      dataDir: config.dataDir,
-      defaultAccount: config.google.defaultAccount,
-      gwsPath: config.google.gwsPath,
-    }),
+    bashEnv: {
+      ...buildGwsBashEnv({
+        dataDir: config.dataDir,
+        defaultAccount: config.google.defaultAccount,
+        gwsPath: config.google.gwsPath,
+      }),
+      ...buildMcpBashEnv({ dataDir: config.dataDir }),
+    },
     googleAccounts: () =>
       readGoogleAccounts(config.dataDir).map(({ label, email }) => ({ label, email })),
+    mcpServers: () => {
+      const servers = listEnabledMcpServers(config.dataDir);
+      // Seed on first sight (write-if-missing), so a registry the agent
+      // creates mid-thread gets its skill without a restart. A failed write
+      // must not hide the servers from the prompt.
+      if (servers.length > 0) {
+        try {
+          seedMcpSkill(config.dataDir);
+        } catch (error) {
+          logger.warn("Could not seed the mcp skill", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return servers;
+    },
     modelOptions: config.modelOptions,
   });
 

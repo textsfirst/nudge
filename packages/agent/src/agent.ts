@@ -28,6 +28,7 @@ import { MemoryFiles } from "./memory.js";
 import { isContextOverflowError, SubscriptionAuthError } from "./providers/errors.js";
 import { truncateTail } from "./truncate.js";
 import { withStreamRetry, type StreamRetryOptions } from "./providers/retry.js";
+import type { McpServerRef } from "./mcp-config.js";
 import { buildSystemPrompt, type GoogleAccountRef } from "./prompt.js";
 import { SkillsLibrary } from "./skills.js";
 import { startOfDayInZone } from "./time.js";
@@ -89,6 +90,11 @@ export interface NudgeAgentOptions {
    * prompt build so accounts connected mid-thread appear without a restart.
    */
   googleAccounts?: () => GoogleAccountRef[];
+  /**
+   * Live reader for enabled MCP servers, same posture as googleAccounts:
+   * read at every prompt build so registry edits appear without a restart.
+   */
+  mcpServers?: () => McpServerRef[];
   /** OpenAI provider options applied to every model call (reasoningEffort, serviceTier, …). */
   modelOptions?: OpenAIResponsesProviderOptions;
   /** Tuning for the early-stream-error retry (mainly for tests) — see providers/retry.ts. */
@@ -450,6 +456,7 @@ export class NudgeAgent {
         webEnabled: Boolean(this.#options.web),
         bashEnabled: this.#options.bashEnabled !== false,
         googleAccounts: this.#googleAccounts(),
+        mcpServers: this.#mcpServers(),
       });
       const { text: raw, toolPayload, usage } = await this.#generate({
         system: systemPrompt,
@@ -587,6 +594,7 @@ export class NudgeAgent {
       ...(opts.progress ? { progressEnabled: true } : {}),
       ...(opts.fileSend ? { fileSendEnabled: true } : {}),
       googleAccounts: this.#googleAccounts(),
+      mcpServers: this.#mcpServers(),
     });
   }
 
@@ -594,6 +602,15 @@ export class NudgeAgent {
   #googleAccounts(): GoogleAccountRef[] {
     try {
       return this.#options.googleAccounts?.() ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Same posture for the MCP registry, which the agent itself can edit mid-thread. */
+  #mcpServers(): McpServerRef[] {
+    try {
+      return this.#options.mcpServers?.() ?? [];
     } catch {
       return [];
     }

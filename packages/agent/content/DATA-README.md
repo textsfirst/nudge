@@ -69,6 +69,34 @@ When the owner has connected Google accounts (your prompt lists them), the
 has the details. Auth is owner-managed — `gws auth` is blocked for you; if an
 account expires, tell the owner instead of retrying.
 
+## MCP servers (mcp/servers.json)
+
+Owner-connected MCP servers, used through the `mcp` CLI in bash: `mcp ls`,
+`mcp tools <server>`, `mcp schema <server> <tool>`, then
+`mcp call <server> <tool> '<json>'`. The registry:
+
+    {
+      "version": 1,
+      "servers": {
+        "github": {
+          "transport": "http",
+          "url": "https://api.githubcopilot.com/mcp/",
+          "headers": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" }
+        },
+        "memory": {
+          "transport": "stdio",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-memory"]
+        }
+      }
+    }
+
+Names are short lowercase slugs; `"enabled": false` disables an entry. Secrets
+never go in this file — `${VAR}` references are resolved from the owner's .env
+when a server is contacted, and a missing variable is reported by name so the
+owner knows what to add. Invalid writes are rejected with diagnostics. The mcp
+skill covers usage and failure handling.
+
 ## Read-only files
 
 SYSTEM.md (the owner's prompt) and this README are not writable by you.

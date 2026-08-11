@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { parseSchedule } from "@nudge/schedule";
 import { applyEdits, type FileEdit } from "./edits.js";
+import { MCP_CONFIG_PATH, parseMcpConfig } from "./mcp-config.js";
 import { DEFAULT_MAX_BYTES, splitLines, truncateHead } from "./truncate.js";
 
 /** Character budgets for the curated memory files (Hermes-style bounds). */
@@ -166,6 +167,14 @@ export function validateDataFile(rel: string, content: string): string | undefin
     const { errors } = parseSchedule(content);
     if (errors.length > 0) {
       return `SCHEDULE.md has problems — fix and retry (formats are in README.md):\n${errors.join("\n")}`;
+    }
+    return undefined;
+  }
+
+  if (rel === MCP_CONFIG_PATH) {
+    const parsed = parseMcpConfig(content);
+    if (!parsed.ok) {
+      return `mcp/servers.json rejected — ${parsed.error} (format is in README.md).`;
     }
     return undefined;
   }
