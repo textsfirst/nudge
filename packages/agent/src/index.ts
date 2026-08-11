@@ -40,6 +40,7 @@ export { DATA_README } from "./data-readme.js";
 export { applyEdits, type EditOutcome, type FileEdit } from "./edits.js";
 export { FileWorkspace, MAX_LIST_ENTRIES, MEMORY_LIMITS, validateDataFile } from "./files.js";
 export {
+  collectEnvRefs,
   interpolateEnvRefs,
   listEnabledMcpServers,
   MCP_CONFIG_PATH,
