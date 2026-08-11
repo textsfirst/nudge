@@ -96,12 +96,75 @@ export interface SchedulePreview {
   errors: string[];
   timeZone: string;
   entries: {
+    id: string;
     name: string;
     kind: "cron" | "once";
     pattern: string;
     prompt: string;
+    agent: string | null;
+    check: string | null;
     nextRun: string | null;
   }[];
+}
+
+export interface ScheduleEntryState {
+  entryId: string;
+  lastRunAt: number | null;
+  claimedAt: number | null;
+  completed: boolean;
+  lastCheckHash: string | null;
+  lastCheckAt: number | null;
+  lastChangeAt: number | null;
+  checksRun: number;
+  wakes: number;
+  lastCheckError: string | null;
+}
+
+export interface AgentStats {
+  id: number;
+  handle: string;
+  name: string;
+  kind: "temp" | "standing";
+  description: string;
+  status: "active" | "archived" | "done";
+  createdAt: number;
+  lastActiveAt: number;
+  sessionId: number | null;
+  messageCount: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export type ActivityEvent =
+  | {
+      type: "dispatch";
+      messageId: number;
+      createdAt: number;
+      agentName: string;
+      scheduled: boolean;
+      text: string;
+    }
+  | {
+      type: "report";
+      messageId: number;
+      sessionId: number;
+      createdAt: number;
+      agentName: string | null;
+      text: string;
+      outcome: "pending" | "silent" | "delivered";
+      reply: string | null;
+    };
+
+export interface CostsPayload {
+  days: number;
+  usage: {
+    day: string;
+    kind: "conversation" | "execution" | "report";
+    turns: number;
+    inputTokens: number;
+    outputTokens: number;
+  }[];
+  watcher: { checksRun: number; wakes: number; avoided: number };
 }
 
 export interface ThreadSummary {
@@ -384,6 +447,34 @@ export const useMcp = () =>
 
 export const useSkills = () =>
   useQuery({ queryKey: ["skills"], queryFn: () => request<SkillsOverview>("/api/skills") });
+
+export const useAgents = () =>
+  useQuery({
+    queryKey: ["agents"],
+    queryFn: () => request<{ agents: AgentStats[] }>("/api/agents"),
+    refetchInterval: 10_000,
+  });
+
+export const useActivity = (limit = 50) =>
+  useQuery({
+    queryKey: ["activity", limit],
+    queryFn: () => request<{ events: ActivityEvent[] }>(`/api/activity?limit=${limit}`),
+    refetchInterval: 10_000,
+  });
+
+export const useCosts = (days = 14) =>
+  useQuery({
+    queryKey: ["costs", days],
+    queryFn: () => request<CostsPayload>(`/api/costs?days=${days}`),
+    refetchInterval: 60_000,
+  });
+
+export const useScheduleState = () =>
+  useQuery({
+    queryKey: ["schedule-state"],
+    queryFn: () => request<{ states: ScheduleEntryState[] }>("/api/schedule/state"),
+    refetchInterval: 15_000,
+  });
 
 // -- mutations --------------------------------------------------------------
 

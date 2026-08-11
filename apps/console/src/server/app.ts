@@ -306,13 +306,71 @@ export function createConsoleApp(
           entries: entries.map((entry) => {
             const next = nextRun(entry, now, timeZone);
             return {
+              id: entry.id,
               name: entry.name,
               kind: entry.when.kind,
               pattern: entry.when.pattern,
               prompt: entry.prompt,
+              agent: entry.agent,
+              check: entry.check,
               nextRun: next ? next.toISOString() : null,
             };
           }),
+        };
+      })
+      // Run/check state per entry id, keyed for joining onto a preview.
+      .get("/api/schedule/state", () => ({ states: context.store().listScheduleState() }))
+
+      // -- agent visibility (read-only) --------------------------------------
+      .get("/api/agents", () => ({ agents: context.store().listAgentsWithStats() }))
+      .get("/api/activity", ({ query }) => {
+        const limit = clamp(Number(query.limit ?? 50), 1, 200);
+        const store = context.store();
+        const events = [
+          ...store.listAgentBriefs(limit).map((brief) => ({
+            type: "dispatch" as const,
+            messageId: brief.messageId,
+            createdAt: brief.createdAt,
+            agentName: brief.agentName,
+            scheduled: brief.content.startsWith("[Scheduled task"),
+            text: stripLeadingTag(brief.content),
+          })),
+          ...store.listAgentReports(limit).map((report) => {
+            const tag = /^\[Report from background agent "([^"]+)"/.exec(report.content);
+            const outcome =
+              report.outcome === null
+                ? ("pending" as const)
+                : /^\s*(\[SILENT\]|NO_REPLY)\s*$/.test(report.outcome.trim())
+                  ? ("silent" as const)
+                  : ("delivered" as const);
+            return {
+              type: "report" as const,
+              messageId: report.messageId,
+              sessionId: report.sessionId,
+              createdAt: report.createdAt,
+              agentName: tag?.[1] ?? null,
+              text: stripLeadingTag(report.content),
+              outcome,
+              reply: outcome === "delivered" ? report.outcome : null,
+            };
+          }),
+        ]
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, limit);
+        return { events };
+      })
+      .get("/api/costs", ({ query }) => {
+        const days = clamp(Number(query.days ?? 14), 1, 90);
+        const usage = context
+          .store()
+          .tokenUsageByDay(Date.now() - days * 24 * 60 * 60 * 1000);
+        const states = context.store().listScheduleState();
+        const checksRun = states.reduce((total, state) => total + state.checksRun, 0);
+        const wakes = states.reduce((total, state) => total + state.wakes, 0);
+        return {
+          days,
+          usage,
+          watcher: { checksRun, wakes, avoided: checksRun - wakes },
         };
       })
 
@@ -454,6 +512,11 @@ export type ConsoleApp = ReturnType<typeof createConsoleApp>;
 function contentOf(body: unknown): string {
   const content = (body as Record<string, unknown>)?.content;
   return typeof content === "string" ? content : "";
+}
+
+/** Drop the runtime's leading [bracketed] tag line from a brief or report. */
+function stripLeadingTag(content: string): string {
+  return content.replace(/^\[[^\]]*\]\n?/, "").trim();
 }
 
 

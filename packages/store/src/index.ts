@@ -1,9 +1,13 @@
 export {
   NudgeStore,
+  type AgentBriefRow,
   type AgentKind,
+  type AgentReportRow,
   type AgentRow,
+  type AgentStatsRow,
   type AgentStatus,
   type AttachmentKind,
+  type TokenUsageRow,
   type AttachmentRow,
   type AttachmentStatus,
   type MaintenanceResult,

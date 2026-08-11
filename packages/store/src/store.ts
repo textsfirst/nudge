@@ -96,6 +96,43 @@ export interface SessionSummaryRow extends SessionRow {
   preview: string | null;
 }
 
+/** An agent with the aggregates the console's roster shows. */
+export interface AgentStatsRow extends AgentRow {
+  /** The agent's open session, if it ever ran. */
+  sessionId: number | null;
+  messageCount: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/** A dispatched brief, for the console's activity feed. */
+export interface AgentBriefRow {
+  messageId: number;
+  agentId: number;
+  agentName: string;
+  content: string;
+  createdAt: number;
+}
+
+/** A report turn in the owner thread, with the curation outcome that followed. */
+export interface AgentReportRow {
+  messageId: number;
+  sessionId: number;
+  content: string;
+  createdAt: number;
+  /** The assistant reply that curated this report; null while still pending. */
+  outcome: string | null;
+}
+
+/** One day's token usage for one turn kind, for the console's cost view. */
+export interface TokenUsageRow {
+  day: string;
+  kind: "conversation" | "execution" | "report";
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
 export interface SpaceRow {
   handle: string;
   spaceId: string;
@@ -536,6 +573,134 @@ export class NudgeStore {
     this.#db
       .prepare("UPDATE agents SET status = ?, last_active_at = ? WHERE id = ?")
       .run(status, at, id);
+  }
+
+  /**
+   * Every agent with its usage aggregates, most recently active first.
+   * Console-facing; the agent itself only ever sees the capped roster.
+   */
+  listAgentsWithStats(): AgentStatsRow[] {
+    return this.#db
+      .prepare(
+        `SELECT agents.*,
+           (SELECT id FROM sessions WHERE sessions.agent_id = agents.id AND ended_at IS NULL
+              ORDER BY id DESC LIMIT 1) AS session_id,
+           (SELECT COUNT(*) FROM messages JOIN sessions ON messages.session_id = sessions.id
+              WHERE sessions.agent_id = agents.id) AS message_count,
+           (SELECT COALESCE(SUM(messages.input_tokens), 0) FROM messages
+              JOIN sessions ON messages.session_id = sessions.id
+              WHERE sessions.agent_id = agents.id) AS input_tokens,
+           (SELECT COALESCE(SUM(messages.output_tokens), 0) FROM messages
+              JOIN sessions ON messages.session_id = sessions.id
+              WHERE sessions.agent_id = agents.id) AS output_tokens
+         FROM agents ORDER BY last_active_at DESC`,
+      )
+      .all()
+      .map((row) => ({
+        ...toAgent(row),
+        sessionId: nullableNumber(row, "session_id"),
+        messageCount: requiredNumber(row, "message_count"),
+        inputTokens: requiredNumber(row, "input_tokens"),
+        outputTokens: requiredNumber(row, "output_tokens"),
+      }));
+  }
+
+  /**
+   * Dispatched briefs, newest first — every user row in an agent session is
+   * one (briefs are the only user input those sessions receive).
+   */
+  listAgentBriefs(limit = 50): AgentBriefRow[] {
+    return this.#db
+      .prepare(
+        `SELECT messages.id AS message_id, messages.content, messages.created_at,
+                agents.id AS agent_id, agents.name AS agent_name
+         FROM messages
+         JOIN sessions ON messages.session_id = sessions.id
+         JOIN agents ON sessions.agent_id = agents.id
+         WHERE messages.role = 'user'
+         ORDER BY messages.id DESC LIMIT ?`,
+      )
+      .all(limit)
+      .map((row) => ({
+        messageId: requiredNumber(row, "message_id"),
+        agentId: requiredNumber(row, "agent_id"),
+        agentName: requiredString(row, "agent_name"),
+        content: requiredString(row, "content"),
+        createdAt: requiredNumber(row, "created_at"),
+      }));
+  }
+
+  /**
+   * Report turns in owner threads, newest first, each with the assistant
+   * reply that curated it. Identified by the report tag the runtime writes —
+   * derived, not bookkept, which read-only visibility can afford.
+   */
+  listAgentReports(limit = 50): AgentReportRow[] {
+    return this.#db
+      .prepare(
+        `SELECT reports.id AS message_id, reports.session_id, reports.content,
+                reports.created_at,
+           (SELECT content FROM messages
+             WHERE session_id = reports.session_id AND id > reports.id AND role = 'assistant'
+             ORDER BY id LIMIT 1) AS outcome
+         FROM messages AS reports
+         WHERE reports.role = 'user' AND reports.content LIKE '[Report from background agent%'
+         ORDER BY reports.id DESC LIMIT ?`,
+      )
+      .all(limit)
+      .map((row) => ({
+        messageId: requiredNumber(row, "message_id"),
+        sessionId: requiredNumber(row, "session_id"),
+        content: requiredString(row, "content"),
+        createdAt: requiredNumber(row, "created_at"),
+        outcome: nullableString(row, "outcome"),
+      }));
+  }
+
+  /**
+   * Assistant-turn token usage per local day and turn kind. `report` turns
+   * are owner-thread replies whose preceding row is a tagged agent report.
+   */
+  tokenUsageByDay(sinceMs: number, now = Date.now()): TokenUsageRow[] {
+    return this.#db
+      .prepare(
+        `SELECT day, kind, COUNT(*) AS turns,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens
+         FROM (
+           SELECT date(messages.created_at / 1000, 'unixepoch', 'localtime') AS day,
+             CASE
+               WHEN sessions.agent_id IS NOT NULL THEN 'execution'
+               WHEN (SELECT content FROM messages AS prior
+                     WHERE prior.session_id = messages.session_id AND prior.id < messages.id
+                     ORDER BY prior.id DESC LIMIT 1)
+                    LIKE '[Report from background agent%' THEN 'report'
+               ELSE 'conversation'
+             END AS kind,
+             messages.input_tokens, messages.output_tokens
+           FROM messages
+           JOIN sessions ON messages.session_id = sessions.id
+           WHERE messages.role = 'assistant' AND messages.created_at >= ?
+             AND messages.created_at <= ?
+         )
+         GROUP BY day, kind ORDER BY day, kind`,
+      )
+      .all(sinceMs, now)
+      .map((row) => ({
+        day: requiredString(row, "day"),
+        kind: requiredString(row, "kind") as TokenUsageRow["kind"],
+        turns: requiredNumber(row, "turns"),
+        inputTokens: requiredNumber(row, "input_tokens"),
+        outputTokens: requiredNumber(row, "output_tokens"),
+      }));
+  }
+
+  /** Every entry's run/check state, for the console's schedule health view. */
+  listScheduleState(): ScheduleStateRow[] {
+    return this.#db
+      .prepare("SELECT entry_id FROM schedule_state ORDER BY entry_id")
+      .all()
+      .map((row) => this.scheduleState(requiredString(row, "entry_id")));
   }
 
   /**
