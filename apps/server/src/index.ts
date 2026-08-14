@@ -182,7 +182,7 @@ async function main(): Promise<void> {
     chunkDelayMs: config.texting.chunkDelayMs,
     logLevel: config.logLevel,
     logger,
-    isDuplicate: (messageId) => store.isWebhookProcessed(messageId),
+    isDuplicate: (messageId) => store.isMessageProcessed(messageId),
     rememberSpace: (handle, spaceId, platform) => store.rememberSpace(handle, spaceId, platform),
     onBatch: createReplyHandler({
       agent,
@@ -209,12 +209,12 @@ async function main(): Promise<void> {
     runCheck: buildCheckRunner({ cwd: config.dataDir, env: bashEnv }),
   });
 
-  const server = createServer(createHttpApp(transport, logger, providerHealth));
+  const server = createServer(createHttpApp(providerHealth));
   server.listen(config.port, () => {
     logger.info("Nudge is listening", {
       port: config.port,
       sources: sources.map((source) => source.id),
-      webhookPath: "/webhooks/photon",
+      inbound: "photon-stream",
       timeZone: config.timeZone,
       providerHealth,
     });

@@ -1,7 +1,7 @@
 /**
  * Media that arrived with a message. Bytes are NOT fetched here: `read` is the
- * provider's lazy, memoized gRPC download, passed through untouched so the
- * webhook can return fast and the ingest layer owns fetch failures.
+ * provider's lazy, memoized gRPC download, passed through untouched so inbound
+ * handling stays fast and the ingest layer owns fetch failures.
  */
 export interface InboundMedia {
   kind: "image" | "voice" | "file";

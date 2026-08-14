@@ -5,7 +5,6 @@ import { loadBootstrap, loadConfig, SECRET_SPECS, settingsFromOverrides } from "
 const SECRETS = {
   SPECTRUM_PROJECT_ID: "project-id",
   SPECTRUM_PROJECT_SECRET: "project-secret",
-  SPECTRUM_WEBHOOK_SECRET: "webhook-secret",
 };
 
 const ROOT = "/workspace";

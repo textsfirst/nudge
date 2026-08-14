@@ -19,7 +19,5 @@ export {
   type BatchControls,
   type PhotonTransport,
   type PhotonTransportConfig,
-  type RawWebhookRequest,
   type SendOptions,
-  type WebhookResponse,
 } from "./transport.js";

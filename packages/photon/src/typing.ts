@@ -98,7 +98,7 @@ export class TypingController {
     }
   }
 
-  /** Track the freshest space object — webhooks rehydrate a new one per delivery. */
+  /** Track the freshest space object — each delivery rehydrates a new one. */
   #state(space: TypingSpace): SpaceState {
     const existing = this.#spaces.get(space.id);
     if (existing) {

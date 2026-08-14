@@ -11,8 +11,8 @@ The pnpm workspace keeps the replaceable boundaries small:
 - `apps/server` — configuration, HTTP lifecycle, SYSTEM.md loading, the scheduler, ledger-backed outbound delivery, Google account plumbing for the gws CLI, and the daily connection health check
 - `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, secrets, and all connection setup (Google accounts, ChatGPT and Grok sign-in)
 - `packages/agent` — the tool-calling agent loop (Vercel AI SDK), prompt stack, thread lifecycle (rollover/compaction/carryover), the file workspace with per-path validators, and model providers
-- `packages/photon` — signed webhook handling, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
-- `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and webhook dedupe
+- `packages/photon` — the streaming inbound connection, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
+- `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and inbound dedupe
 - `packages/schedule` — the deterministic SCHEDULE.md parser and timing engine (croner)
 
 ### Files are the API
@@ -49,20 +49,21 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 ### Reliability
 
-- Photon webhooks are deduplicated durably and delivered at-least-once; near-simultaneous texts are coalesced (~250 ms), while later texts steer the active reply. A typing indicator shows from the first text.
+- Inbound texts arrive over a persistent streaming connection that reconnects forever with backoff and replays events missed during a disconnect; deliveries are at-least-once and deduplicated durably. Near-simultaneous texts are coalesced (~250 ms), while later texts steer the active reply. A typing indicator shows from the first text. One caveat: the replay cursor lives in memory, so a text sent while the server process itself is down is not recovered on startup — the sender sees no read receipt or reply and can re-send.
 - A text arriving while a reply is still being generated steers it: the in-flight model call aborts, everything sent while busy folds into one follow-up turn (full history included), and no stale reply goes out. If the aborted turn had already run tools, a note recording those calls lands in history so the next turn doesn't redo them.
 - Every outbound message is journaled in a ledger before sending, with per-bubble delivery progress. On restart, sends that never started go out as-is; ones interrupted mid-send resume from the first unconfirmed bubble behind a conversational notice ("not sure that went through, so again:" / "got cut off mid-text - here's the rest:"), bounded to 3 attempts within 24 hours.
 - Scheduled entries claim crash-safely and never back-fill occurrences from before they existed; a one-shot that came due while the server was down fires late, once.
-- SQLite upgrades run as ordered transactional migrations, including a one-time FTS rebuild for pre-versioned databases. Webhook dedupe and terminal delivery records are pruned on a bounded schedule; conversation history remains owner-controlled in the console.
+- SQLite upgrades run as ordered transactional migrations, including a one-time FTS rebuild for pre-versioned databases. Inbound dedupe and terminal delivery records are pruned on a bounded schedule; conversation history remains owner-controlled in the console.
 
 ## Requirements
 
 - Node.js 22.5+ (Nudge uses the built-in `node:sqlite`)
 - pnpm 10
 - A Photon Cloud project and iMessage line
-- Either a ChatGPT subscription (authorized from the console's Connections page), or an OpenAI API key
+- Either a ChatGPT or Grok subscription (authorized from the console's Connections page), or an OpenAI API key
 - Optional: the [`gws` CLI](https://github.com/googleworkspace/cli) plus a Google Cloud OAuth client for Google account access (see "Google accounts")
-- A public HTTPS URL for the webhook
+
+No public URL or tunnel is needed: inbound messages arrive over an outbound streaming connection to Photon Cloud.
 
 ## Setup
 
@@ -80,7 +81,6 @@ Every turn's system prompt is assembled from five slots, stable content first so
    ```dotenv
    SPECTRUM_PROJECT_ID=...
    SPECTRUM_PROJECT_SECRET=...
-   SPECTRUM_WEBHOOK_SECRET=...
    ```
 
    and set your handle on the console's **Settings** page (`pnpm console`, then Settings → Owner handle). It must exactly match Photon's `message.sender.id`; the server refuses to start until it is set.
@@ -93,7 +93,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
 
-5. Start everything and expose port 3000 via your HTTPS host or tunnel:
+5. Start everything:
 
    ```bash
    pnpm dev
@@ -101,7 +101,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
    This runs the agent server (`:3000`) and the web console (API `:3100`, UI `:5174`) together, each with a labeled, color-coded output prefix; Ctrl+C stops all of them. Use `pnpm dev:agent` or `pnpm console` to run just one side.
 
-   Register `POST https://your-host.example/webhooks/photon` in Photon. Health check: `GET /healthz`.
+   Inbound messages connect on their own — nothing to register or expose. Health check: `GET /healthz`.
 
 Note: Nudge can only text you proactively after you have texted it at least once — it needs one inbound message to learn the conversation's space id.
 
@@ -140,7 +140,7 @@ A daily health check probes every connection (Google accounts and ChatGPT auth) 
 
 ## Photon transport note
 
-Photon's inbound delivery is a signed HTTP webhook; the supported cloud send path is `space.send(...)` from `spectrum-ts`. Nudge verifies raw-body signatures via `app.webhook(...)`, replies through the webhook's rehydrated space, and sends proactively by persisting each space id and rehydrating it later with `space.get(id)`. All Photon-specific code stays behind the transport interface in `packages/photon`.
+Inbound delivery is `spectrum.messages` from `spectrum-ts`: an outbound gRPC streaming connection to Photon Cloud that reconnects forever with jittered backoff and, after a disconnect, replays missed events from a sequence cursor before resuming live. The cursor is held in memory, so replay covers connection drops but not full process downtime. The supported cloud send path is `space.send(...)`; Nudge replies through the stream's rehydrated space and sends proactively by persisting each space id and rehydrating it later with `space.get(id)`. All Photon-specific code stays behind the transport interface in `packages/photon`.
 
 ## Configuration
 
@@ -185,7 +185,7 @@ Settings (console → Settings):
 
 | Variable | Purpose |
 | --- | --- |
-| `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` / `SPECTRUM_WEBHOOK_SECRET` | Photon credentials (required) |
+| `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` | Photon credentials (required) |
 | `OPENAI_API_KEY` | Optional key for the `openai-api` provider (transcription falls back to it too) |
 | `CUSTOM_API_KEY` | Optional key for the custom provider endpoint (omit for keyless local servers) |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
@@ -193,7 +193,7 @@ Settings (console → Settings):
 | `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Paseo's per-worktree ports) |
 | `LOG_LEVEL` | Bootstrap: `debug`, `info`, `warn`, or `error` (default `info`) |
 
-Unknown senders, non-iMessage deliveries, non-text content, and duplicate webhook deliveries are ignored.
+Unknown senders, non-iMessage deliveries, non-text content, and duplicate deliveries are ignored.
 
 ## Run a production build
 
@@ -202,7 +202,7 @@ pnpm check
 pnpm start
 ```
 
-Use a single server process: the scheduler's claims, webhook dedupe, and debouncing assume one process over one SQLite file.
+Use a single server process: the scheduler's claims, inbound dedupe, and debouncing assume one process over one SQLite file.
 
 ## Updating
 
@@ -217,7 +217,7 @@ No manual steps beyond the restart: database migrations run automatically as ord
 
 ## Security boundaries
 
-- Photon HMAC verification runs on the exact raw request bytes, including the replay-window check.
+- Inbound messages arrive only over the authenticated outbound connection to Photon Cloud; the server accepts no inbound HTTP beyond `GET /healthz`.
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.
