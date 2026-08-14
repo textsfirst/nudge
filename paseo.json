@@ -1,0 +1,28 @@
+{
+  "worktree": {
+    "setup": "bash scripts/paseo-setup.sh",
+    "servicePorts": { "range": "3000-3999" },
+    "terminals": [{ "name": "shell", "command": "${SHELL:-bash}" }]
+  },
+  "scripts": {
+    "agent": {
+      "type": "service",
+      "command": "PORT=$PASEO_PORT pnpm --filter @nudge/server dev",
+      "port": 3000
+    },
+    "console-api": {
+      "type": "service",
+      "command": "CONSOLE_HOST=$HOST CONSOLE_PORT=$PASEO_PORT pnpm --filter @nudge/console dev:api",
+      "port": 3100
+    },
+    "console": {
+      "type": "service",
+      "command": "CONSOLE_PORT=${PASEO_SERVICE_CONSOLE_API_PORT:-3100} pnpm --filter @nudge/console exec vite --host \"$HOST\" --port \"$PASEO_PORT\"",
+      "port": 5174
+    },
+    "check": { "command": "pnpm check" },
+    "typecheck": { "command": "pnpm typecheck" },
+    "test": { "command": "pnpm test" },
+    "build": { "command": "pnpm build" }
+  }
+}

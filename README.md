@@ -188,7 +188,7 @@ Settings (console → Settings):
 | `CUSTOM_API_KEY` | Optional key for the custom provider endpoint (omit for keyless local servers) |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
 | `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ (default `.data`) |
-| `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Conductor's per-workspace ports) |
+| `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Paseo's per-worktree ports) |
 | `LOG_LEVEL` | Bootstrap: `debug`, `info`, `warn`, or `error` (default `info`) |
 
 Unknown senders, non-iMessage deliveries, non-text content, and duplicate webhook deliveries are ignored.
