@@ -279,11 +279,23 @@ export interface GoogleAccount {
   status: "ok" | "expired" | "unreachable" | "missing";
 }
 
+export type ProviderSelected =
+  | "chatgpt-subscription"
+  | "grok-subscription"
+  | "openai-api"
+  | "custom";
+
 export interface Connections {
   chatgpt: {
-    selected: "chatgpt-subscription" | "openai-api" | "custom";
+    selected: ProviderSelected;
     connected: boolean;
     accountId: string | null;
+    updatedAt: string | null;
+  };
+  grok: {
+    selected: ProviderSelected;
+    connected: boolean;
+    account: string | null;
     updatedAt: string | null;
   };
   google: {
@@ -301,6 +313,14 @@ export interface ChatGptFlow {
   verificationUrl: string;
   userCode: string;
   accountId?: string;
+  error?: string;
+}
+
+export interface GrokFlow {
+  status: "pending" | "done" | "error";
+  verificationUrl: string;
+  userCode: string;
+  account?: string;
   error?: string;
 }
 
@@ -539,6 +559,15 @@ export const startChatGptConnect = () =>
 
 export const getChatGptFlow = (flowId: string) =>
   request<ChatGptFlow>(`/api/connections/chatgpt/flow/${encodeURIComponent(flowId)}`);
+
+export const startGrokConnect = () =>
+  request<{ flowId: string; verificationUrl: string; userCode: string }>(
+    "/api/connections/grok/start",
+    { method: "POST" },
+  );
+
+export const getGrokFlow = (flowId: string) =>
+  request<GrokFlow>(`/api/connections/grok/flow/${encodeURIComponent(flowId)}`);
 
 export function useInvalidate() {
   const client = useQueryClient();

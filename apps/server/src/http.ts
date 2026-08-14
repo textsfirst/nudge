@@ -2,7 +2,6 @@ import express, { type Express } from "express";
 
 export interface ProviderHealth {
   ok: boolean;
-  degraded: boolean;
   error: string | null;
 }
 
@@ -11,7 +10,7 @@ export interface ProviderHealth {
  * over the Photon transport's outbound gRPC stream, not HTTP.
  */
 export function createHttpApp(
-  providerHealth: ProviderHealth = { ok: true, degraded: false, error: null },
+  providerHealth: ProviderHealth = { ok: true, error: null },
 ): Express {
   const app = express();
 

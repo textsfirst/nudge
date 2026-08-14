@@ -1,14 +1,22 @@
 import type { ModelSource } from "../types.js";
-import { ChatGptSubscriptionSource, CustomEndpointSource, OpenAiApiSource } from "./ai-sdk.js";
+import {
+  ChatGptSubscriptionSource,
+  CustomEndpointSource,
+  GrokSubscriptionSource,
+  OpenAiApiSource,
+} from "./ai-sdk.js";
 import { ChatGptAuthManager } from "./chatgpt-auth.js";
+import { GrokAuthManager } from "./grok-auth.js";
 
 export interface ProviderConfig {
-  selected: "chatgpt-subscription" | "openai-api" | "custom";
+  selected: "chatgpt-subscription" | "grok-subscription" | "openai-api" | "custom";
   chatGptModel: string;
   chatGptAuthFile: string;
+  grokModel: string;
+  grokAuthFile: string;
+  grokClientVersion?: string;
   openAiApiKey?: string;
   openAiModel: string;
-  openAiFallbackEnabled: boolean;
   customBaseUrl?: string;
   customModel?: string;
   customApi?: "chat-completions" | "responses";
@@ -16,15 +24,11 @@ export interface ProviderConfig {
 }
 
 /**
- * Ordered model sources: the selected provider first, then (for the
- * subscription provider only, when configured) the API-key fallback used
- * exclusively on auth failures.
+ * Exactly one model source: the selected provider. There is deliberately no
+ * API-key fallback — a subscription auth failure surfaces as an error telling
+ * the owner to reconnect, never as silent API-credit spending.
  */
 export function createModelSources(config: ProviderConfig): ModelSource[] {
-  const apiSource = config.openAiApiKey
-    ? new OpenAiApiSource({ apiKey: config.openAiApiKey, model: config.openAiModel })
-    : undefined;
-
   if (config.selected === "custom") {
     if (!config.customBaseUrl || !config.customModel) {
       throw new Error(
@@ -42,15 +46,29 @@ export function createModelSources(config: ProviderConfig): ModelSource[] {
   }
 
   if (config.selected === "openai-api") {
-    if (!apiSource) {
+    if (!config.openAiApiKey) {
       throw new Error("MODEL_PROVIDER=openai-api requires OPENAI_API_KEY");
     }
-    return [apiSource];
+    return [new OpenAiApiSource({ apiKey: config.openAiApiKey, model: config.openAiModel })];
   }
 
-  const subscription = new ChatGptSubscriptionSource({
-    auth: new ChatGptAuthManager({ authFile: config.chatGptAuthFile }),
-    model: config.chatGptModel,
-  });
-  return apiSource && config.openAiFallbackEnabled ? [subscription, apiSource] : [subscription];
+  if (config.selected === "grok-subscription") {
+    return [
+      new GrokSubscriptionSource({
+        auth: new GrokAuthManager({
+          authFile: config.grokAuthFile,
+          ...(config.grokClientVersion ? { clientVersion: config.grokClientVersion } : {}),
+        }),
+        model: config.grokModel,
+        ...(config.grokClientVersion ? { clientVersion: config.grokClientVersion } : {}),
+      }),
+    ];
+  }
+
+  return [
+    new ChatGptSubscriptionSource({
+      auth: new ChatGptAuthManager({ authFile: config.chatGptAuthFile }),
+      model: config.chatGptModel,
+    }),
+  ];
 }

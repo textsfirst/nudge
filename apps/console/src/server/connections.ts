@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { runChatGptDeviceLogin } from "@nudge/agent";
+import { runChatGptDeviceLogin, runGrokDeviceLogin } from "@nudge/agent";
 import {
   exchangeGoogleCode,
   findGwsBinary,
@@ -22,8 +22,8 @@ import type { ConsoleContext } from "./context.js";
 /**
  * Connection management for the Connections page: the Google OAuth
  * authorization-code flow (console-owned, so consent works from any browser
- * that can reach the console — headless server included) and the ChatGPT
- * subscription device-code flow.
+ * that can reach the console — headless server included) and the ChatGPT /
+ * Grok subscription device-code flows.
  *
  * Flow state is in-memory: a console restart mid-consent just means starting
  * the flow again, and nothing secret ever waits in the map.
@@ -46,6 +46,15 @@ export interface ChatGptFlow {
   error?: string;
 }
 
+export interface GrokFlow {
+  status: "pending" | "done" | "error";
+  verificationUrl: string;
+  userCode: string;
+  /** Display label — the id token's email when present. */
+  account?: string;
+  error?: string;
+}
+
 export interface ConnectionsOptions {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
@@ -57,6 +66,7 @@ export class ConnectionsService {
   readonly #now: () => number;
   readonly #googleFlows = new Map<string, PendingGoogleFlow>();
   readonly #chatGptFlows = new Map<string, ChatGptFlow>();
+  readonly #grokFlows = new Map<string, GrokFlow>();
 
   constructor(context: ConsoleContext, options: ConnectionsOptions = {}) {
     this.#context = context;
@@ -78,6 +88,10 @@ export class ConnectionsService {
       chatgpt: {
         selected: settings.provider.selected,
         ...this.#chatGptStatus(),
+      },
+      grok: {
+        selected: settings.provider.selected,
+        ...this.#grokStatus(),
       },
       google: {
         clientConfigured: client !== undefined,
@@ -235,9 +249,57 @@ export class ConnectionsService {
     return this.#chatGptFlows.get(flowId);
   }
 
+  /** Same device-code choreography as startChatGpt, against auth.x.ai. */
+  async startGrok(): Promise<{ flowId: string; verificationUrl: string; userCode: string }> {
+    const flowId = newOAuthState();
+    const clientVersion = this.#context.settings().settings.provider.grok.client_version;
+    const prompt = await new Promise<{ verificationUrl: string; userCode: string }>(
+      (resolvePrompt, rejectPrompt) => {
+        runGrokDeviceLogin({
+          authFile: this.#grokAuthFile(),
+          fetch: this.#fetch,
+          ...(clientVersion ? { clientVersion } : {}),
+          onPrompt: (details) => {
+            this.#grokFlows.set(flowId, { status: "pending", ...details });
+            resolvePrompt(details);
+          },
+        })
+          .then((tokens) => {
+            const flow = this.#grokFlows.get(flowId);
+            if (flow) {
+              this.#grokFlows.set(flowId, {
+                ...flow,
+                status: "done",
+                ...(tokens.email ? { account: tokens.email } : {}),
+              });
+            }
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const flow = this.#grokFlows.get(flowId);
+            if (flow) {
+              this.#grokFlows.set(flowId, { ...flow, status: "error", error: message });
+            } else {
+              rejectPrompt(new Error(message));
+            }
+          });
+      },
+    );
+    return { flowId, ...prompt };
+  }
+
+  grokFlow(flowId: string): GrokFlow | undefined {
+    return this.#grokFlows.get(flowId);
+  }
+
   #chatGptAuthFile(): string {
     const settings = this.#context.settings().settings;
     return resolve(this.#context.root, settings.provider.chatgpt.auth_file);
+  }
+
+  #grokAuthFile(): string {
+    const settings = this.#context.settings().settings;
+    return resolve(this.#context.root, settings.provider.grok.auth_file);
   }
 
   #chatGptStatus(): { connected: boolean; accountId: string | null; updatedAt: string | null } {
@@ -254,6 +316,23 @@ export class ConnectionsService {
       };
     } catch {
       return { connected: false, accountId: null, updatedAt: null };
+    }
+  }
+
+  #grokStatus(): { connected: boolean; account: string | null; updatedAt: string | null } {
+    const path = this.#grokAuthFile();
+    if (!existsSync(path)) return { connected: false, account: null, updatedAt: null };
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      const record = parsed as Record<string, unknown>;
+      return {
+        connected:
+          typeof record.accessToken === "string" && typeof record.refreshToken === "string",
+        account: typeof record.email === "string" ? record.email : null,
+        updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : null,
+      };
+    } catch {
+      return { connected: false, account: null, updatedAt: null };
     }
   }
 }

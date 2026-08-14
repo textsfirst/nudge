@@ -22,14 +22,13 @@ describe("HTTP app", () => {
     const health = await fetch(`http://127.0.0.1:${port}/healthz`);
     expect(await health.json()).toEqual({
       ok: true,
-      provider: { ok: true, degraded: false, error: null },
+      provider: { ok: true, error: null },
     });
   });
 
   it("reports provider startup failures through health", async () => {
     const server = createHttpApp({
       ok: false,
-      degraded: false,
       error: "ChatGPT auth is invalid. Reconnect it in the console (Connections page).",
     }).listen(0);
     servers.push(server);

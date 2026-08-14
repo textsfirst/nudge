@@ -147,6 +147,26 @@ describe("loadConfig", () => {
     expect(config.provider.customApi).toBe("chat-completions");
     expect(config.provider.customApiKey).toBeUndefined();
   });
+
+  it("maps grok provider settings, resolving the auth file from the workspace", () => {
+    const config = loadConfig(
+      SECRETS,
+      settings({
+        "provider.selected": "grok-subscription",
+        "provider.grok.model": "grok-build",
+        "provider.grok.client_version": "0.2.103",
+      }),
+      boot,
+    );
+    expect(config.provider.selected).toBe("grok-subscription");
+    expect(config.provider.grokModel).toBe("grok-build");
+    expect(config.provider.grokAuthFile.endsWith("grok-auth.json")).toBe(true);
+    expect(config.provider.grokClientVersion).toBe("0.2.103");
+
+    const defaults = loadConfig(SECRETS, settings(), boot);
+    expect(defaults.provider.grokModel).toBe("grok-4.6");
+    expect(defaults.provider.grokClientVersion).toBeUndefined();
+  });
 });
 
 describe("secret metadata", () => {

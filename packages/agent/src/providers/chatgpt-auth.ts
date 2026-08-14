@@ -1,13 +1,15 @@
-import {
-  chmod,
-  mkdir,
-  readFile,
-  rename,
-  writeFile,
-} from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { SubscriptionAuthError } from "./errors.js";
+import {
+  decodeJwtPayload,
+  getJwtExpiration,
+  isRecord,
+  safeResponseText,
+  saveTokenFile,
+} from "./oauth.js";
+
+export { getJwtExpiration } from "./oauth.js";
 
 export const CHATGPT_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CHATGPT_ISSUER = "https://auth.openai.com";
@@ -148,7 +150,7 @@ export class ChatGptAuthManager {
       accountId: extractAccountId(idToken) ?? stored.accountId,
       updatedAt: new Date().toISOString(),
     };
-    await saveTokens(this.#authFile, next);
+    await saveTokenFile(this.#authFile, next);
     return next;
   }
 }
@@ -238,13 +240,8 @@ export async function runChatGptDeviceLogin(
     accountId,
     updatedAt: new Date().toISOString(),
   };
-  await saveTokens(options.authFile, stored);
+  await saveTokenFile(options.authFile, stored);
   return stored;
-}
-
-export function getJwtExpiration(jwt: string): number | undefined {
-  const payload = decodeJwtPayload(jwt);
-  return typeof payload.exp === "number" ? payload.exp * 1_000 : undefined;
 }
 
 export function extractAccountId(jwt: string): string | undefined {
@@ -256,18 +253,6 @@ export function extractAccountId(jwt: string): string | undefined {
   return typeof payload.chatgpt_account_id === "string"
     ? payload.chatgpt_account_id
     : undefined;
-}
-
-function decodeJwtPayload(jwt: string): Record<string, unknown> {
-  const payload = jwt.split(".")[1];
-  if (!payload) {
-    throw new Error("Invalid JWT");
-  }
-  const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
-  if (!isRecord(decoded)) {
-    throw new Error("Invalid JWT payload");
-  }
-  return decoded;
 }
 
 function parseStoredTokens(value: unknown): StoredChatGptTokens {
@@ -282,22 +267,3 @@ function parseStoredTokens(value: unknown): StoredChatGptTokens {
   return value as unknown as StoredChatGptTokens;
 }
 
-async function saveTokens(path: string, tokens: StoredChatGptTokens): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(tokens, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await rename(temporaryPath, path);
-  await chmod(path, 0o600);
-}
-
-async function safeResponseText(response: Response): Promise<string> {
-  const text = (await response.text()).trim();
-  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
