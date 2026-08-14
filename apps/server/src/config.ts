@@ -33,11 +33,6 @@ export const SECRET_SPECS = [
     description: "Photon Cloud project secret",
   },
   {
-    key: "SPECTRUM_WEBHOOK_SECRET",
-    required: true,
-    description: "Photon webhook signing secret",
-  },
-  {
     key: "OPENAI_API_KEY",
     required: false,
     description: "OpenAI API key — API provider, or fallback for subscription auth",
@@ -127,7 +122,6 @@ export function loadConfig(
     spectrum: {
       projectId: secrets.SPECTRUM_PROJECT_ID,
       projectSecret: secrets.SPECTRUM_PROJECT_SECRET,
-      webhookSecret: secrets.SPECTRUM_WEBHOOK_SECRET,
     },
     provider: {
       selected: settings.provider.selected,

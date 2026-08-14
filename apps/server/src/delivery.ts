@@ -55,7 +55,7 @@ export class DeliveryService {
           count: result.expiredOutbound,
         });
       }
-      if (result.prunedOutbound > 0 || result.prunedWebhooks > 0) {
+      if (result.prunedOutbound > 0 || result.prunedMessages > 0) {
         this.logger.info("Pruned expired delivery bookkeeping", { ...result });
       }
     }

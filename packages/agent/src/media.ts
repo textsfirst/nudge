@@ -102,7 +102,7 @@ const EXTENSION_BY_MIME: Record<string, string> = {
 
 /**
  * Fetches inbound media bytes, persists them under `dataDir/attachments/`
- * (sha-named, so webhook redeliveries are idempotent), records an attachments
+ * (sha-named, so redeliveries are idempotent), records an attachments
  * row per item, and produces the text projections the thread keeps.
  *
  * Deliberately ignores the steering AbortSignal: a newer text must not make
@@ -370,7 +370,7 @@ export class MediaIngest {
     };
   }
 
-  /** Content-addressed write: a redelivered webhook lands on the same file. */
+  /** Content-addressed write: a redelivered message lands on the same file. */
   #persist(bytes: Buffer, item: IncomingMedia): string {
     const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 16);
     const relativePath = join(ATTACHMENTS_DIR, `${hash}.${extensionFor(item)}`);

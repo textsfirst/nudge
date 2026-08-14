@@ -29,8 +29,8 @@ describe("createReplyHandler", () => {
 
     expect(sent).toEqual(["hello there"]);
     expect(store.openOutbound()).toEqual([]); // journaled and marked sent
-    expect(store.isWebhookProcessed("m1")).toBe(true);
-    expect(store.isWebhookProcessed("m2")).toBe(true);
+    expect(store.isMessageProcessed("m1")).toBe(true);
+    expect(store.isMessageProcessed("m2")).toBe(true);
   });
 
   it("delivers through onReplyReady before the agent finishes post-turn work", async () => {
@@ -233,7 +233,7 @@ describe("createReplyHandler", () => {
     // No model turn, no empty user row — but the webhook is still settled.
     expect(reply).not.toHaveBeenCalled();
     expect(stopTyping).toHaveBeenCalled();
-    expect(store.isWebhookProcessed("m1")).toBe(true);
+    expect(store.isMessageProcessed("m1")).toBe(true);
   });
 
   it("forwards mid-turn progress updates straight to send, skipping the ledger", async () => {
@@ -275,7 +275,7 @@ describe("createReplyHandler", () => {
 
     expect(controls.stopTyping).toHaveBeenCalledTimes(1);
     expect(sent).toEqual([]);
-    expect(store.isWebhookProcessed("m1")).toBe(true);
+    expect(store.isMessageProcessed("m1")).toBe(true);
   });
 
   it("sends a reaction through the transport, skipping the ledger", async () => {
@@ -375,7 +375,7 @@ describe("createReplyHandler", () => {
     expect(logger.error).not.toHaveBeenCalled();
     expect(logger.info).toHaveBeenCalled();
     // The texts are already persisted in history, so the webhooks are done.
-    expect(store.isWebhookProcessed("m1")).toBe(true);
+    expect(store.isMessageProcessed("m1")).toBe(true);
   });
 
   it("drops a returned reply when steering wins just before delivery", async () => {
@@ -421,7 +421,7 @@ describe("createReplyHandler", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("hit a snag");
     expect(logger.error).toHaveBeenCalled();
-    expect(store.isWebhookProcessed("m1")).toBe(true);
+    expect(store.isMessageProcessed("m1")).toBe(true);
     expect(store.sessionMessages(session.id).at(-1)).toMatchObject({
       role: "error",
       content: "model down",

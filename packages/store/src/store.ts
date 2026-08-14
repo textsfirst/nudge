@@ -72,7 +72,7 @@ export interface AttachmentRow {
   id: number;
   messageId: number | null;
   handle: string;
-  /** Webhook message id the media arrived with, for dedupe and debugging. */
+  /** Provider message id the media arrived with, for dedupe and debugging. */
   sourceMessageId: string | null;
   kind: AttachmentKind;
   name: string;
@@ -174,7 +174,7 @@ export interface OutboundRow {
 export interface MaintenanceResult {
   expiredOutbound: number;
   prunedOutbound: number;
-  prunedWebhooks: number;
+  prunedMessages: number;
 }
 
 /** The live tool-step trace of a session's in-flight turn, for the console. */
@@ -188,7 +188,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 9;
+const CURRENT_SCHEMA_VERSION = 10;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -375,6 +375,13 @@ const MIGRATIONS: readonly Migration[] = [
     db.exec("ALTER TABLE schedule_state ADD COLUMN checks_run INTEGER NOT NULL DEFAULT 0");
     db.exec("ALTER TABLE schedule_state ADD COLUMN wakes INTEGER NOT NULL DEFAULT 0");
     db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_error TEXT");
+  },
+  (db) => {
+    // Inbound now arrives over Photon's streaming connection instead of a
+    // webhook; the dedupe table guards stream redeliveries, so its name
+    // follows. Migration 1 always creates the old table, so the rename is
+    // unconditional for fresh and upgraded databases alike.
+    db.exec("ALTER TABLE processed_webhooks RENAME TO processed_messages");
   },
 ];
 
@@ -1154,18 +1161,19 @@ export class NudgeStore {
 
   /**
    * Bound operational bookkeeping without deleting conversation history.
-   * Open sends outside the retry contract become terminal failures, webhook
-   * ids are retained for 30 days, and terminal ledger rows for 90 days.
+   * Open sends outside the retry contract become terminal failures, processed
+   * inbound message ids are retained for 30 days, and terminal ledger rows
+   * for 90 days.
    */
   maintain(options: {
     now?: number;
-    webhookRetentionMs?: number;
+    messageRetentionMs?: number;
     outboundRetentionMs?: number;
     outboundMaxAgeMs?: number;
     outboundMaxAttempts?: number;
   } = {}): MaintenanceResult {
     const now = options.now ?? Date.now();
-    const webhookRetentionMs = options.webhookRetentionMs ?? 30 * DAY_MS;
+    const messageRetentionMs = options.messageRetentionMs ?? 30 * DAY_MS;
     const outboundRetentionMs = options.outboundRetentionMs ?? 90 * DAY_MS;
     const outboundMaxAgeMs = options.outboundMaxAgeMs ?? DAY_MS;
     const outboundMaxAttempts = options.outboundMaxAttempts ?? 3;
@@ -1189,13 +1197,13 @@ export class NudgeStore {
           )
           .run(now - outboundRetentionMs).changes,
       );
-      const prunedWebhooks = Number(
+      const prunedMessages = Number(
         this.#db
-          .prepare("DELETE FROM processed_webhooks WHERE processed_at <= ?")
-          .run(now - webhookRetentionMs).changes,
+          .prepare("DELETE FROM processed_messages WHERE processed_at <= ?")
+          .run(now - messageRetentionMs).changes,
       );
       this.#db.exec("COMMIT");
-      return { expiredOutbound, prunedOutbound, prunedWebhooks };
+      return { expiredOutbound, prunedOutbound, prunedMessages };
     } catch (error) {
       this.#db.exec("ROLLBACK");
       throw error;
@@ -1229,18 +1237,18 @@ export class NudgeStore {
     this.#db.prepare("DELETE FROM schedule_state WHERE entry_id = ?").run(fromEntryId);
   }
 
-  // -- webhook dedupe ------------------------------------------------------
+  // -- inbound dedupe ------------------------------------------------------
 
-  isWebhookProcessed(messageId: string): boolean {
+  isMessageProcessed(messageId: string): boolean {
     return (
-      this.#db.prepare("SELECT 1 FROM processed_webhooks WHERE message_id = ?").get(messageId) !==
+      this.#db.prepare("SELECT 1 FROM processed_messages WHERE message_id = ?").get(messageId) !==
       undefined
     );
   }
 
-  markWebhookProcessed(messageId: string, at = Date.now()): void {
+  markMessageProcessed(messageId: string, at = Date.now()): void {
     this.#db
-      .prepare("INSERT OR IGNORE INTO processed_webhooks (message_id, processed_at) VALUES (?, ?)")
+      .prepare("INSERT OR IGNORE INTO processed_messages (message_id, processed_at) VALUES (?, ?)")
       .run(messageId, at);
   }
 }
