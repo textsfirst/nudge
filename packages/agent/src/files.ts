@@ -16,7 +16,7 @@ export const MEMORY_LIMITS: Record<string, number> = {
 export const MAX_LIST_ENTRIES = 500;
 
 /** Files the agent may never read or write (secrets and runtime state). */
-const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json"]);
+const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json", "grok-auth.json"]);
 const HIDDEN_PREFIXES = ["nudge.db"];
 /** Directories that hold secrets (Google OAuth credentials + token caches). */
 const HIDDEN_DIRS = new Set(["google"]);

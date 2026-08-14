@@ -9,7 +9,7 @@ There is deliberately no command system. Threads roll over silently (at local mi
 The pnpm workspace keeps the replaceable boundaries small:
 
 - `apps/server` — configuration, HTTP lifecycle, SYSTEM.md loading, the scheduler, ledger-backed outbound delivery, Google account plumbing for the gws CLI, and the daily connection health check
-- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, secrets, and all connection setup (Google accounts, ChatGPT sign-in)
+- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, secrets, and all connection setup (Google accounts, ChatGPT and Grok sign-in)
 - `packages/agent` — the tool-calling agent loop (Vercel AI SDK), prompt stack, thread lifecycle (rollover/compaction/carryover), the file workspace with per-path validators, and model providers
 - `packages/photon` — signed webhook handling, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
 - `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and webhook dedupe
@@ -21,7 +21,7 @@ The agent's world is a real filesystem on a real box, deliberately. Models are R
 
 The core tools are file operations scoped to `data_dir`: `list_files`, `read_file` (paged — long files return a `Use offset=N to continue` footer), `edit_file` (exact-match in-place edits), and `write_file` (whole-file replace) — the latter two share per-file validation. Genuine computation comes from `search_history` (FTS5), `bash` (runs with `data_dir` as its working directory — a default, not a sandbox; disable with `tools.bash_enabled: false`), and optional `web_search`/`web_extract` (Firecrawl). Everything else — schedule, memory, skills — is a markdown file convention documented in a system-written `data_dir/README.md` that the agent reads on demand. New capabilities cost a convention, not a tool schema in every prompt. Control signals are in-band tokens: `[SILENT]` (don't reply) and `[NEW_THREAD]` (reset the thread).
 
-Writes are validated per path and rejected with diagnostics the model can act on: SCHEDULE.md must parse, MEMORY.md/USER.md have hard character budgets, `skills/*/SKILL.md` needs frontmatter, and SYSTEM.md plus the README are read-only to the agent. Secrets (`chatgpt-auth.json`) and runtime state (`nudge.db`) are invisible to it.
+Writes are validated per path and rejected with diagnostics the model can act on: SCHEDULE.md must parse, MEMORY.md/USER.md have hard character budgets, `skills/*/SKILL.md` needs frontmatter, and SYSTEM.md plus the README are read-only to the agent. Secrets (`chatgpt-auth.json`, `grok-auth.json`) and runtime state (`nudge.db`) are invisible to it.
 
 ### The prompt stack
 
@@ -85,9 +85,9 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
    and set your handle on the console's **Settings** page (`pnpm console`, then Settings → Owner handle). It must exactly match Photon's `message.sender.id`; the server refuses to start until it is set.
 
-3. For the default ChatGPT subscription provider, authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser.
+3. For a subscription provider — the default `chatgpt-subscription`, or `grok-subscription` (SuperGrok, SuperGrok Heavy, or X Premium+) — authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser. There is deliberately no API-key fallback: when subscription auth breaks, Nudge tells you to reconnect instead of silently spending API credits.
 
-   To use only an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`. API fallback is off by default. With the subscription provider, a configured `OPENAI_API_KEY` + the API-credit fallback toggle is used only when subscription auth fails; startup and logs call out when it can spend API credits.
+   To use an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`.
 
    To use any other OpenAI-compatible endpoint (OpenRouter, Ollama, vLLM, LM Studio, a proxy): set Provider to `custom` in console Settings, fill in the custom base URL and model id, and — if the endpoint needs one — set `CUSTOM_API_KEY` in `.env`. Most compatible servers implement the Chat Completions API (the default); switch the API flavor to `responses` only when the endpoint supports it. For model ids the context-window registry does not recognize, set `agent.context_window_tokens` explicitly.
 
@@ -152,11 +152,13 @@ Settings (console → Settings):
 | --- | --- | --- |
 | `owner_handle` | required | The one handle allowed to talk to Nudge |
 | `timezone` | machine timezone | IANA zone for schedules and midnight rollover |
-| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `openai-api`, or `custom` |
-| `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the subscription endpoint |
-| `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | OAuth credential file |
+| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `grok-subscription`, `openai-api`, or `custom` |
+| `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the ChatGPT subscription endpoint |
+| `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | ChatGPT OAuth credential file |
+| `provider.grok.model` | `grok-4.6` | Model slug for the Grok subscription (xAI's CLI proxy maps it to its `-build` variant) |
+| `provider.grok.auth_file` | `.data/grok-auth.json` | Grok OAuth credential file |
+| `provider.grok.client_version` | built-in | CLI version header for xAI's proxy; set only when requests fail with HTTP 426 |
 | `provider.openai.model` | `gpt-5-mini` | Standard API model |
-| `provider.openai.fallback_enabled` | `false` | API-key fallback for subscription auth failures |
 | `provider.custom.base_url` | unset | Base URL of an OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1`) |
 | `provider.custom.model` | unset | Model id the custom endpoint expects |
 | `provider.custom.api` | `chat-completions` | API flavor the endpoint implements: `chat-completions` or `responses` |
@@ -184,7 +186,7 @@ Settings (console → Settings):
 | Variable | Purpose |
 | --- | --- |
 | `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` / `SPECTRUM_WEBHOOK_SECRET` | Photon credentials (required) |
-| `OPENAI_API_KEY` | Optional API provider / subscription fallback |
+| `OPENAI_API_KEY` | Optional key for the `openai-api` provider (transcription falls back to it too) |
 | `CUSTOM_API_KEY` | Optional key for the custom provider endpoint (omit for keyless local servers) |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
 | `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ (default `.data`) |

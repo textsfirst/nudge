@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ChatGptAuthManager } from "@nudge/agent";
+import { ChatGptAuthManager, GrokAuthManager } from "@nudge/agent";
 import { parseSchedule, nextRun } from "@nudge/schedule";
 import {
   formatIssues,
@@ -293,6 +293,15 @@ export function createConsoleApp(
         }
         return flow;
       })
+      .post("/api/connections/grok/start", () => connections.startGrok())
+      .get("/api/connections/grok/flow/:id", ({ params, set }) => {
+        const flow = connections.grokFlow(params.id);
+        if (!flow) {
+          set.status = 404;
+          return { error: "No such sign-in attempt — start again." };
+        }
+        return flow;
+      })
 
       // -- schedule preview -------------------------------------------------
       .post("/api/schedule/preview", ({ body }) => {
@@ -572,11 +581,16 @@ async function probe(url: string): Promise<{
 }
 
 async function subscriptionAuthError(root: string, settings: Settings): Promise<string | null> {
-  if (settings.provider.selected !== "chatgpt-subscription") return null;
   try {
-    await new ChatGptAuthManager({
-      authFile: resolve(root, settings.provider.chatgpt.auth_file),
-    }).validateStored();
+    if (settings.provider.selected === "chatgpt-subscription") {
+      await new ChatGptAuthManager({
+        authFile: resolve(root, settings.provider.chatgpt.auth_file),
+      }).validateStored();
+    } else if (settings.provider.selected === "grok-subscription") {
+      await new GrokAuthManager({
+        authFile: resolve(root, settings.provider.grok.auth_file),
+      }).validateStored();
+    }
     return null;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);

@@ -5,6 +5,7 @@ import {
   buildImageCaptioner,
   ChatGptAuthManager,
   createModelSources,
+  GrokAuthManager,
   DATA_README,
   listEnabledMcpServers,
   MediaIngest,
@@ -59,28 +60,28 @@ async function main(): Promise<void> {
   const config = loadConfig(process.env, settings, boot);
   ensureDataReadme(config.dataDir, logger);
   syncBundledContent({ dataDir: config.dataDir, logger });
-  const providerHealth: ProviderHealth = { ok: true, degraded: false, error: null };
-  if (config.provider.selected === "chatgpt-subscription") {
-    const fallbackEnabled = Boolean(
-      config.provider.openAiFallbackEnabled && config.provider.openAiApiKey,
-    );
-    if (fallbackEnabled) {
-      logger.warn("OpenAI API fallback is enabled; subscription auth failures may use API credits");
-    }
+  const providerHealth: ProviderHealth = { ok: true, error: null };
+  const subscriptionAuth =
+    config.provider.selected === "chatgpt-subscription"
+      ? new ChatGptAuthManager({ authFile: config.provider.chatGptAuthFile })
+      : config.provider.selected === "grok-subscription"
+        ? new GrokAuthManager({
+            authFile: config.provider.grokAuthFile,
+            ...(config.provider.grokClientVersion
+              ? { clientVersion: config.provider.grokClientVersion }
+              : {}),
+          })
+        : undefined;
+  if (subscriptionAuth) {
     try {
-      await new ChatGptAuthManager({
-        authFile: config.provider.chatGptAuthFile,
-      }).credentials();
+      await subscriptionAuth.credentials();
     } catch (error) {
-      providerHealth.ok = fallbackEnabled;
-      providerHealth.degraded = fallbackEnabled;
+      providerHealth.ok = false;
       providerHealth.error = error instanceof Error ? error.message : String(error);
-      logger.error(
-        fallbackEnabled
-          ? "ChatGPT subscription auth failed; API fallback will be used"
-          : "ChatGPT subscription auth failed; messages cannot be answered until it is fixed",
-        { error: providerHealth.error },
-      );
+      logger.error("Subscription auth failed; messages cannot be answered until it is fixed", {
+        provider: config.provider.selected,
+        error: providerHealth.error,
+      });
     }
   }
   const sources = createModelSources(config.provider);
@@ -228,6 +229,9 @@ async function main(): Promise<void> {
       dataDir: config.dataDir,
       ...(config.provider.selected === "chatgpt-subscription"
         ? { chatGptAuthFile: config.provider.chatGptAuthFile }
+        : {}),
+      ...(config.provider.selected === "grok-subscription"
+        ? { grokAuthFile: config.provider.grokAuthFile }
         : {}),
     }),
   });

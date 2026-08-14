@@ -1,4 +1,9 @@
-import { ChatGptAuthManager, SubscriptionAuthError, type Logger } from "@nudge/agent";
+import {
+  ChatGptAuthManager,
+  GrokAuthManager,
+  SubscriptionAuthError,
+  type Logger,
+} from "@nudge/agent";
 import type { NudgeStore } from "@nudge/store";
 import { probeGoogleAccount, readGoogleAccounts } from "./google.js";
 import type { DeliveryService } from "./delivery.js";
@@ -90,12 +95,13 @@ export class ConnectionHealthMonitor {
 }
 
 /**
- * The standard probe set: every connected Google account, plus ChatGPT
- * subscription auth when it is the selected provider.
+ * The standard probe set: every connected Google account, plus the selected
+ * subscription provider's auth (ChatGPT or Grok).
  */
 export function buildConnectionProbes(input: {
   dataDir: string;
   chatGptAuthFile?: string;
+  grokAuthFile?: string;
   fetch?: typeof globalThis.fetch;
 }): () => Promise<ProbeResult[]> {
   return async () => {
@@ -113,11 +119,33 @@ export function buildConnectionProbes(input: {
     }
 
     if (input.chatGptAuthFile) {
+      const authFile = input.chatGptAuthFile;
       results.push({
         id: "chatgpt",
-        healthy: await probeChatGpt(input.chatGptAuthFile, input.fetch),
+        healthy: await probeSubscription(() =>
+          new ChatGptAuthManager({
+            authFile,
+            ...(input.fetch ? { fetch: input.fetch } : {}),
+          }).credentials(),
+        ),
         brokenMessage:
           "Heads up — my ChatGPT sign-in has stopped working, so I may not be able to reply " +
+          "soon. Reconnect it in the console (Connections page).",
+      });
+    }
+
+    if (input.grokAuthFile) {
+      const authFile = input.grokAuthFile;
+      results.push({
+        id: "grok",
+        healthy: await probeSubscription(() =>
+          new GrokAuthManager({
+            authFile,
+            ...(input.fetch ? { fetch: input.fetch } : {}),
+          }).credentials(),
+        ),
+        brokenMessage:
+          "Heads up — my Grok sign-in has stopped working, so I may not be able to reply " +
           "soon. Reconnect it in the console (Connections page).",
       });
     }
@@ -125,20 +153,16 @@ export function buildConnectionProbes(input: {
   };
 }
 
-async function probeChatGpt(
-  authFile: string,
-  fetchImplementation?: typeof globalThis.fetch,
+async function probeSubscription(
+  credentials: () => Promise<unknown>,
 ): Promise<boolean | null> {
   try {
     // credentials() refreshes when close to expiry — a real end-to-end check.
-    await new ChatGptAuthManager({
-      authFile,
-      ...(fetchImplementation ? { fetch: fetchImplementation } : {}),
-    }).credentials();
+    await credentials();
     return true;
   } catch (error) {
     if (!(error instanceof SubscriptionAuthError)) return null;
-    // A refresh rejected with a 5xx is OpenAI having a bad day, not dead auth.
+    // A refresh rejected with a 5xx is the provider having a bad day, not dead auth.
     const status = /\((\d{3})\)/.exec(error.message)?.[1];
     return status !== undefined && Number(status) >= 500 ? null : false;
   }

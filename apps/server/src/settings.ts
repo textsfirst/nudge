@@ -22,7 +22,7 @@ export const settingsSchema = z.object({
   provider: z
     .object({
       selected: z
-        .enum(["chatgpt-subscription", "openai-api", "custom"])
+        .enum(["chatgpt-subscription", "grok-subscription", "openai-api", "custom"])
         .default("chatgpt-subscription"),
       chatgpt: z
         .object({
@@ -30,10 +30,16 @@ export const settingsSchema = z.object({
           auth_file: z.string().min(1).default(".data/chatgpt-auth.json"),
         })
         .prefault({}),
+      grok: z
+        .object({
+          model: z.string().min(1).default("grok-4.6"),
+          auth_file: z.string().min(1).default(".data/grok-auth.json"),
+          client_version: z.string().min(1).optional(),
+        })
+        .prefault({}),
       openai: z
         .object({
           model: z.string().min(1).default("gpt-5-mini"),
-          fallback_enabled: z.boolean().default(false),
         })
         .prefault({}),
       custom: z
@@ -232,23 +238,32 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "provider.selected",
         label: "Provider",
         control: "select",
-        options: ["chatgpt-subscription", "openai-api", "custom"],
-        help: "chatgpt-subscription signs in on the Connections page; openai-api needs OPENAI_API_KEY in Secrets; custom talks to any OpenAI-compatible endpoint configured below.",
+        options: ["chatgpt-subscription", "grok-subscription", "openai-api", "custom"],
+        help: "The subscription providers sign in on the Connections page; openai-api needs OPENAI_API_KEY in Secrets; custom talks to any OpenAI-compatible endpoint configured below.",
       },
       { path: "provider.chatgpt.model", label: "ChatGPT model", control: "text" },
       {
         path: "provider.chatgpt.auth_file",
         label: "ChatGPT auth file",
         control: "text",
-        help: "Where the subscription sign-in from the Connections page is stored.",
+        help: "Where the ChatGPT sign-in from the Connections page is stored.",
+      },
+      { path: "provider.grok.model", label: "Grok model", control: "text" },
+      {
+        path: "provider.grok.auth_file",
+        label: "Grok auth file",
+        control: "text",
+        help: "Where the Grok sign-in from the Connections page is stored.",
+      },
+      {
+        path: "provider.grok.client_version",
+        label: "Grok client version",
+        control: "text",
+        optional: true,
+        placeholder: "built-in default",
+        help: "CLI version header sent to xAI's proxy. Set it only when requests start failing with HTTP 426 (client outdated) — any current Grok Build CLI version works.",
       },
       { path: "provider.openai.model", label: "OpenAI API model", control: "text" },
-      {
-        path: "provider.openai.fallback_enabled",
-        label: "API-credit fallback",
-        control: "boolean",
-        help: "Answer with the OpenAI API when subscription auth fails. Needs OPENAI_API_KEY in Secrets and can spend API credits.",
-      },
       {
         path: "provider.custom.base_url",
         label: "Custom base URL",
@@ -475,7 +490,7 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "agent.compaction_model",
         label: "Compaction model",
         control: "text",
-        help: "Model that writes compaction and carryover summaries, on the same provider and auth as replies. For the custom provider, pick a model the endpoint serves.",
+        help: "Model that writes compaction and carryover summaries, on the same provider and auth as replies. For the grok-subscription or custom providers, pick a model that provider serves.",
       },
       {
         path: "agent.compaction_reasoning_effort",

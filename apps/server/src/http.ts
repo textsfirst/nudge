@@ -4,14 +4,13 @@ import type { PhotonTransport } from "@nudge/photon";
 
 export interface ProviderHealth {
   ok: boolean;
-  degraded: boolean;
   error: string | null;
 }
 
 export function createHttpApp(
   transport: PhotonTransport,
   logger: Logger,
-  providerHealth: ProviderHealth = { ok: true, degraded: false, error: null },
+  providerHealth: ProviderHealth = { ok: true, error: null },
 ): Express {
   const app = express();
 

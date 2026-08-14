@@ -16,7 +16,7 @@ import { MEMORY_LIMITS, validateDataFile } from "@nudge/agent";
  * README.md, which the server regenerates at boot.
  */
 
-const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json"]);
+const HIDDEN_BASENAMES = new Set(["chatgpt-auth.json", "grok-auth.json"]);
 const HIDDEN_PREFIXES = ["nudge.db"];
 /** Google OAuth credentials + token caches — managed on the Connections page. */
 // attachments/ holds inbound media bytes (hash-named, system-managed) — the

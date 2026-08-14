@@ -57,6 +57,22 @@ function fetchStub(): typeof fetch {
         id_token: jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }),
       });
     }
+    if (url.endsWith("/oauth2/device/code")) {
+      return respond({
+        device_code: "dev-2",
+        user_code: "GROK-1234",
+        verification_uri: "https://accounts.x.ai/activate",
+        interval: 0,
+      });
+    }
+    if (url.endsWith("/oauth2/token")) {
+      return respond({
+        access_token: "gat",
+        refresh_token: "grt",
+        id_token: jwt({ email: "owner@x.ai" }),
+        expires_in: 3600,
+      });
+    }
     return respond({ error: `unexpected fetch ${url}` }, 500);
   }) as typeof fetch;
 }
@@ -219,5 +235,33 @@ describe("connections API", () => {
 
     const overview = await json(application, "/api/connections");
     expect(overview.body.chatgpt).toMatchObject({ connected: true, accountId: "acct-1" });
+  });
+
+  it("runs the Grok device flow and writes the auth file", async () => {
+    const application = app();
+    const started = await json(application, "/api/connections/grok/start", { method: "POST" });
+    expect(started.status).toBe(200);
+    expect(started.body.userCode).toBe("GROK-1234");
+    expect(started.body.verificationUrl).toBe("https://accounts.x.ai/activate");
+
+    let flow: any;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      flow = (await json(application, `/api/connections/grok/flow/${started.body.flowId}`)).body;
+      if (flow.status !== "pending") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(flow.status).toBe("done");
+    expect(flow.account).toBe("owner@x.ai");
+
+    const authFile = JSON.parse(readFileSync(join(root!, ".data", "grok-auth.json"), "utf8"));
+    expect(authFile.refreshToken).toBe("grt");
+    expect(authFile.email).toBe("owner@x.ai");
+
+    const overview = await json(application, "/api/connections");
+    expect(overview.body.grok).toMatchObject({ connected: true, account: "owner@x.ai" });
+
+    // The token file is a secret: invisible to the agent's file surface.
+    const hidden = await json(application, "/api/files/content?path=grok-auth.json");
+    expect(hidden.status).toBe(403);
   });
 });
