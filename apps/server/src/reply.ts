@@ -22,7 +22,7 @@ export interface ReplyAgent {
  * The inbound-batch handler: generate a reply, journal it, send it. A steering
  * abort (a newer text superseded this run) is not a failure — the owner's
  * message is already in history and the next batch answers it, so send
- * nothing. Real failures get the apology. Either way the webhook ids are
+ * nothing. Real failures get the apology. Either way the message ids are
  * marked processed: the texts themselves are persisted before generation.
  */
 export function createReplyHandler(deps: {
@@ -147,7 +147,7 @@ export function createReplyHandler(deps: {
       }
     } finally {
       for (const messageId of batch.messageIds) {
-        store.markWebhookProcessed(messageId);
+        store.markMessageProcessed(messageId);
       }
     }
   };

@@ -285,18 +285,18 @@ describe("NudgeStore", () => {
     expect(store.openOutbound(86_400_000, 3, 4_000)[0]?.sentChunks).toBe(2);
   });
 
-  it("deduplicates webhook deliveries durably", () => {
+  it("deduplicates inbound deliveries durably", () => {
     const store = new NudgeStore(":memory:");
-    expect(store.isWebhookProcessed("m1")).toBe(false);
-    store.markWebhookProcessed("m1");
-    expect(store.isWebhookProcessed("m1")).toBe(true);
-    store.markWebhookProcessed("m1");
+    expect(store.isMessageProcessed("m1")).toBe(false);
+    store.markMessageProcessed("m1");
+    expect(store.isMessageProcessed("m1")).toBe(true);
+    store.markMessageProcessed("m1");
   });
 
-  it("bounds webhook and outbound bookkeeping", () => {
+  it("bounds inbound-dedupe and outbound bookkeeping", () => {
     const store = new NudgeStore(":memory:");
-    store.markWebhookProcessed("old", 1_000);
-    store.markWebhookProcessed("recent", 9_500);
+    store.markMessageProcessed("old", 1_000);
+    store.markMessageProcessed("recent", 9_500);
     const sent = store.enqueueOutbound(HANDLE, "sent", "reply", 1_000);
     store.markOutbound(sent, "sent", 1_500);
     store.enqueueOutbound(HANDLE, "expired", "nudge", 1_000);
@@ -305,13 +305,13 @@ describe("NudgeStore", () => {
     expect(
       store.maintain({
         now: 10_000,
-        webhookRetentionMs: 1_000,
+        messageRetentionMs: 1_000,
         outboundRetentionMs: 1_000,
         outboundMaxAgeMs: 1_000,
       }),
-    ).toEqual({ expiredOutbound: 1, prunedOutbound: 1, prunedWebhooks: 1 });
-    expect(store.isWebhookProcessed("old")).toBe(false);
-    expect(store.isWebhookProcessed("recent")).toBe(true);
+    ).toEqual({ expiredOutbound: 1, prunedOutbound: 1, prunedMessages: 1 });
+    expect(store.isMessageProcessed("old")).toBe(false);
+    expect(store.isMessageProcessed("recent")).toBe(true);
     expect(store.openOutbound(1_000, 3, 10_000).map((entry) => entry.body)).toEqual(["fresh"]);
   });
 
@@ -371,7 +371,13 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+      // The dedupe table exists under its post-rename name only.
+      expect(
+        upgraded
+          .prepare("SELECT name FROM sqlite_master WHERE name IN ('processed_webhooks', 'processed_messages')")
+          .all(),
+      ).toEqual([{ name: "processed_messages" }]);
       upgraded.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
