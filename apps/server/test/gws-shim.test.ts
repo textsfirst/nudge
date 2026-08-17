@@ -207,6 +207,24 @@ describe("gws shim", () => {
       expect(result.stdout).toContain("args:gmail users drafts create");
     });
 
+    it('blocks a raw send smuggled behind "--"', async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const result = await shim(["gmail", "--", "users", "messages", "send"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+      });
+      expect(result.code).toBe(3);
+      expect(result.stderr).toContain("draft");
+    });
+
+    it("blocks a send helper hiding behind a flag", async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const result = await shim(["gmail", "--verbose", "+send", "--to", "a@b.c"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+      });
+      expect(result.code).toBe(3);
+      expect(result.stderr).toContain("draft");
+    });
+
     it('ignores "send" inside flag values and quoted queries', async () => {
       const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
       const binary = makeFakeGws();

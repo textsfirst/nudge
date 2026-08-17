@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { parseSchedule } from "@nudge/schedule";
 import {
   chmodSync,
@@ -536,13 +536,37 @@ Wrap Sheets ranges in single quotes ('Sheet1!A1:C10') — \`!\` breaks bash.
 `;
 
 /**
- * Seed the skill on first connect; write-if-missing so agent or owner edits
- * (and deletions) are respected afterwards.
+ * sha256 of every prior GOOGLE_SKILL revision ever shipped. An on-disk copy
+ * matching one of these was never customized and is safe to replace with the
+ * current text; anything else belongs to the owner or the agent and is kept
+ * forever — the same rule syncBundledContent applies to bundled skills.
  */
-export function seedGoogleSkill(dataDir: string): void {
+const GOOGLE_SKILL_PRIOR_HASHES: ReadonlySet<string> = new Set([
+  // v1: pre drafts-first (no "Outbound mail" section).
+  "e2acecd79d9eb34e261af4df6ade06c72cbb53e9b1afd1928c402af8101aa5a8",
+]);
+
+/**
+ * Seed the skill (on connect) and upgrade it in place when the on-disk copy
+ * is an unmodified prior revision. A customized copy is the owner's or the
+ * agent's and is never touched. Boot passes createIfMissing: false so a
+ * deleted skill is only re-created by a deliberate reconnect, never by a
+ * restart.
+ */
+export function seedGoogleSkill(
+  dataDir: string,
+  options?: { createIfMissing?: boolean; priorHashes?: ReadonlySet<string> },
+): void {
   const dir = join(dataDir, "skills", GOOGLE_SKILL_NAME);
   const path = join(dir, "SKILL.md");
-  if (existsSync(path)) return;
+  if (existsSync(path)) {
+    const current = readFileSync(path, "utf8");
+    if (current === GOOGLE_SKILL) return;
+    const hash = createHash("sha256").update(current).digest("hex");
+    if (!(options?.priorHashes ?? GOOGLE_SKILL_PRIOR_HASHES).has(hash)) return;
+  } else if (options?.createIfMissing === false) {
+    return;
+  }
   mkdirSync(dir, { recursive: true });
   writeFileSync(path, GOOGLE_SKILL);
 }
@@ -610,11 +634,14 @@ function scheduleHeadings(markdown: string): Set<string> {
 }
 
 function inboxWatchSection(account: GoogleAccount): string {
+  // The check deliberately has no newer_than: window — a rolling window
+  // changes output whenever mail merely ages out of it, waking the agent on
+  // nothing. The unread inbox only changes when mail arrives or gets handled.
   const name = inboxWatchEntryName(account.label);
   return `## ${name}
 when: every 5 minutes
 agent: email
-check: gws -a ${account.label} gmail search "is:unread newer_than:1d" | sort
+check: gws -a ${account.label} gmail search "in:inbox is:unread" | sort
 New unread mail on the ${account.label} account (${account.email}). Triage it
 with gws -a ${account.label}: read what arrived, judge what actually matters
 against the owner's interruption budget, and prepare Gmail drafts — never

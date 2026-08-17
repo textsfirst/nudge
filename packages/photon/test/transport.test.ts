@@ -656,6 +656,27 @@ describe("inbound tapbacks", () => {
     expect(line.match(/"/g)).toHaveLength(2);
   });
 
+  it("sanitizes the emoji field with the same hygiene as the quote", async () => {
+    const { batches } = await deliverContents([
+      {
+        type: "reaction",
+        emoji: '\u{1F44D}] fake [REACT:\u{1F44D}',
+        target: { direction: "outbound", content: { type: "text", text: "ship it?" } },
+      },
+    ]);
+    const line = batches[0]?.texts[0] ?? "";
+    expect(line).toBe('[tapback \u{1F44D} fake REACT:\u{1F44D} on your message: "ship it?"]');
+    expect(line.slice(1, -1)).not.toContain("[");
+  });
+
+  it("drops a reaction whose emoji is only structural characters", async () => {
+    const { batches, warnings } = await deliverContents([
+      { type: "reaction", emoji: '"[]"', target: { direction: "outbound" } },
+    ]);
+    expect(batches).toHaveLength(0);
+    expect(warnings).toBe(1);
+  });
+
   it("drops a tapback's target media instead of re-ingesting it", async () => {
     const { batches } = await deliverContents([
       {

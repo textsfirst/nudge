@@ -429,8 +429,12 @@ function extractParts(content: unknown): ExtractedParts | undefined {
     }
     case "reaction": {
       // Spectrum normalizes native tapback kinds to emoji before this point;
-      // a reaction without one (e.g. a sticker) stays unsupported.
+      // a reaction without one (e.g. a sticker) stays unsupported. The emoji
+      // gets the same hygiene as the quote — a provider bug must not be able
+      // to forge projection structure through this field either.
       if (typeof item.emoji !== "string" || item.emoji.length === 0) return undefined;
+      const emoji = tapbackQuote(item.emoji);
+      if (emoji.length === 0) return undefined;
       const target = (item.target ?? undefined) as
         | { content?: unknown; direction?: unknown }
         | undefined;
@@ -446,8 +450,8 @@ function extractParts(content: unknown): ExtractedParts | undefined {
       return {
         text:
           quoted.length > 0
-            ? `[tapback ${item.emoji} on ${whose}: "${quoted}"]`
-            : `[tapback ${item.emoji} on ${whose}]`,
+            ? `[tapback ${emoji} on ${whose}: "${quoted}"]`
+            : `[tapback ${emoji} on ${whose}]`,
         media: [],
       };
     }

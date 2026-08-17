@@ -18,7 +18,12 @@ import { NudgeStore } from "@nudge/store";
 import { loadBootstrap, loadConfig, settingsFromOverrides } from "./config.js";
 import { DeliveryService } from "./delivery.js";
 import { loadWorkspaceEnvironment } from "./env.js";
-import { buildGwsBashEnv, readGoogleAccounts, seedInboxJobs } from "./google.js";
+import {
+  buildGwsBashEnv,
+  readGoogleAccounts,
+  seedGoogleSkill,
+  seedInboxJobs,
+} from "./google.js";
 import { buildConnectionProbes, ConnectionHealthMonitor } from "./health.js";
 import { createHttpApp } from "./http.js";
 import type { ProviderHealth } from "./http.js";
@@ -87,7 +92,20 @@ async function main(): Promise<void> {
   // Accounts connected before inbox seeding shipped get their standing email
   // job here instead of at connect time. Marker-guarded, so this is a no-op
   // on every boot after the first — and owner deletions stay deleted.
-  for (const account of readGoogleAccounts(config.dataDir)) {
+  const googleAccounts = readGoogleAccounts(config.dataDir);
+  if (googleAccounts.length > 0) {
+    // Upgrade-only (createIfMissing: false): an unmodified google-workspace
+    // skill picks up new shipped text; a deleted or customized copy is left
+    // alone — only a deliberate reconnect re-creates it.
+    try {
+      seedGoogleSkill(config.dataDir, { createIfMissing: false });
+    } catch (error) {
+      logger.warn("Could not upgrade the google-workspace skill", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  for (const account of googleAccounts) {
     try {
       seedInboxJobs(config.dataDir, account);
     } catch (error) {

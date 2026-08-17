@@ -51,7 +51,7 @@ describe("seedInboxJobs", () => {
 
     const watch = entries.find((entry) => entry.name === "Inbox watch (work)");
     expect(watch?.agent).toBe("email");
-    expect(watch?.check).toContain('gws -a work gmail search "is:unread newer_than:1d"');
+    expect(watch?.check).toContain('gws -a work gmail search "in:inbox is:unread"');
     expect(watch?.check).toContain("| sort");
     expect(watch?.when).toEqual({ kind: "cron", pattern: "*/5 * * * *" });
     expect(watch?.prompt).toContain("w@corp.com");
