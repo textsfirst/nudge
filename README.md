@@ -9,10 +9,10 @@ There is deliberately no command system. Threads roll over silently (at local mi
 The pnpm workspace keeps the replaceable boundaries small:
 
 - `apps/server` — configuration, HTTP lifecycle, SYSTEM.md loading, the scheduler, ledger-backed outbound delivery, Google account plumbing for the gws CLI, and the daily connection health check
-- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, secrets, and all connection setup (Google accounts, ChatGPT sign-in)
+- `apps/console` — the local web console (Elysia + React): threads manager, markdown/config editors, secrets, and all connection setup (Google accounts, ChatGPT and Grok sign-in)
 - `packages/agent` — the tool-calling agent loop (Vercel AI SDK), prompt stack, thread lifecycle (rollover/compaction/carryover), the file workspace with per-path validators, and model providers
-- `packages/photon` — signed webhook handling, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
-- `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and webhook dedupe
+- `packages/photon` — the streaming inbound connection, owner filtering, burst debouncing, typing indicators, message chunking, and proactive sends via persisted space ids
+- `packages/store` — SQLite (`node:sqlite`) persistence: threads, messages with FTS5 search, spaces, schedule state, memory, the outbound ledger, and inbound dedupe
 - `packages/schedule` — the deterministic SCHEDULE.md parser and timing engine (croner)
 
 ### Files are the API
@@ -21,7 +21,7 @@ The agent's world is a real filesystem on a real box, deliberately. Models are R
 
 The core tools are file operations scoped to `data_dir`: `list_files`, `read_file` (paged — long files return a `Use offset=N to continue` footer), `edit_file` (exact-match in-place edits), and `write_file` (whole-file replace) — the latter two share per-file validation. Genuine computation comes from `search_history` (FTS5), `bash` (runs with `data_dir` as its working directory — a default, not a sandbox; disable with `tools.bash_enabled: false`), and optional `web_search`/`web_extract` (Firecrawl). Everything else — schedule, memory, skills — is a markdown file convention documented in a system-written `data_dir/README.md` that the agent reads on demand. New capabilities cost a convention, not a tool schema in every prompt. Control signals are in-band tokens: `[SILENT]` (don't reply) and `[NEW_THREAD]` (reset the thread).
 
-Writes are validated per path and rejected with diagnostics the model can act on: SCHEDULE.md must parse, MEMORY.md/USER.md have hard character budgets, `skills/*/SKILL.md` needs frontmatter, and SYSTEM.md plus the README are read-only to the agent. Secrets (`chatgpt-auth.json`) and runtime state (`nudge.db`) are invisible to it.
+Writes are validated per path and rejected with diagnostics the model can act on: SCHEDULE.md must parse, MEMORY.md/USER.md have hard character budgets, `skills/*/SKILL.md` needs frontmatter, and SYSTEM.md plus the README are read-only to the agent. Secrets (`chatgpt-auth.json`, `grok-auth.json`) and runtime state (`nudge.db`) are invisible to it.
 
 ### The prompt stack
 
@@ -49,20 +49,21 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 ### Reliability
 
-- Photon webhooks are deduplicated durably and delivered at-least-once; near-simultaneous texts are coalesced (~250 ms), while later texts steer the active reply. A typing indicator shows from the first text.
+- Inbound texts arrive over a persistent streaming connection that reconnects forever with backoff and replays events missed during a disconnect; deliveries are at-least-once and deduplicated durably. Near-simultaneous texts are coalesced (~250 ms), while later texts steer the active reply. A typing indicator shows from the first text. One caveat: the replay cursor lives in memory, so a text sent while the server process itself is down is not recovered on startup — the sender sees no read receipt or reply and can re-send.
 - A text arriving while a reply is still being generated steers it: the in-flight model call aborts, everything sent while busy folds into one follow-up turn (full history included), and no stale reply goes out. If the aborted turn had already run tools, a note recording those calls lands in history so the next turn doesn't redo them.
 - Every outbound message is journaled in a ledger before sending, with per-bubble delivery progress. On restart, sends that never started go out as-is; ones interrupted mid-send resume from the first unconfirmed bubble behind a conversational notice ("not sure that went through, so again:" / "got cut off mid-text - here's the rest:"), bounded to 3 attempts within 24 hours.
 - Scheduled entries claim crash-safely and never back-fill occurrences from before they existed; a one-shot that came due while the server was down fires late, once.
-- SQLite upgrades run as ordered transactional migrations, including a one-time FTS rebuild for pre-versioned databases. Webhook dedupe and terminal delivery records are pruned on a bounded schedule; conversation history remains owner-controlled in the console.
+- SQLite upgrades run as ordered transactional migrations, including a one-time FTS rebuild for pre-versioned databases. Inbound dedupe and terminal delivery records are pruned on a bounded schedule; conversation history remains owner-controlled in the console.
 
 ## Requirements
 
 - Node.js 22.5+ (Nudge uses the built-in `node:sqlite`)
 - pnpm 10
 - A Photon Cloud project and iMessage line
-- Either a ChatGPT subscription (authorized from the console's Connections page), or an OpenAI API key
+- Either a ChatGPT or Grok subscription (authorized from the console's Connections page), or an OpenAI API key
 - Optional: the [`gws` CLI](https://github.com/googleworkspace/cli) plus a Google Cloud OAuth client for Google account access (see "Google accounts")
-- A public HTTPS URL for the webhook
+
+No public URL or tunnel is needed: inbound messages arrive over an outbound streaming connection to Photon Cloud.
 
 ## Setup
 
@@ -80,20 +81,19 @@ Every turn's system prompt is assembled from five slots, stable content first so
    ```dotenv
    SPECTRUM_PROJECT_ID=...
    SPECTRUM_PROJECT_SECRET=...
-   SPECTRUM_WEBHOOK_SECRET=...
    ```
 
    and set your handle on the console's **Settings** page (`pnpm console`, then Settings → Owner handle). It must exactly match Photon's `message.sender.id`; the server refuses to start until it is set.
 
-3. For the default ChatGPT subscription provider, authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser.
+3. For a subscription provider — the default `chatgpt-subscription`, or `grok-subscription` (SuperGrok, SuperGrok Heavy, or X Premium+) — authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser. There is deliberately no API-key fallback: when subscription auth breaks, Nudge tells you to reconnect instead of silently spending API credits.
 
-   To use only an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`. API fallback is off by default. With the subscription provider, a configured `OPENAI_API_KEY` + the API-credit fallback toggle is used only when subscription auth fails; startup and logs call out when it can spend API credits.
+   To use an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`.
 
    To use any other OpenAI-compatible endpoint (OpenRouter, Ollama, vLLM, LM Studio, a proxy): set Provider to `custom` in console Settings, fill in the custom base URL and model id, and — if the endpoint needs one — set `CUSTOM_API_KEY` in `.env`. Most compatible servers implement the Chat Completions API (the default); switch the API flavor to `responses` only when the endpoint supports it. For model ids the context-window registry does not recognize, set `agent.context_window_tokens` explicitly.
 
 4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
 
-5. Start everything and expose port 3000 via your HTTPS host or tunnel:
+5. Start everything:
 
    ```bash
    pnpm dev
@@ -101,7 +101,7 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
    This runs the agent server (`:3000`) and the web console (API `:3100`, UI `:5174`) together, each with a labeled, color-coded output prefix; Ctrl+C stops all of them. Use `pnpm dev:agent` or `pnpm console` to run just one side.
 
-   Register `POST https://your-host.example/webhooks/photon` in Photon. Health check: `GET /healthz`.
+   Inbound messages connect on their own — nothing to register or expose. Health check: `GET /healthz`.
 
 Note: Nudge can only text you proactively after you have texted it at least once — it needs one inbound message to learn the conversation's space id.
 
@@ -136,11 +136,11 @@ Setup lives entirely on the console's **Connections** page:
 
 The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; the gws binary setting for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
 
-A daily health check probes every connection (Google accounts and ChatGPT auth) and texts you once when one breaks — so an expired token doesn't surface as a silently failing morning briefing.
+A daily health check probes every connection (Google accounts and ChatGPT or Grok auth) and texts you once when one breaks — so an expired token doesn't surface as a silently failing morning briefing.
 
 ## Photon transport note
 
-Photon's inbound delivery is a signed HTTP webhook; the supported cloud send path is `space.send(...)` from `spectrum-ts`. Nudge verifies raw-body signatures via `app.webhook(...)`, replies through the webhook's rehydrated space, and sends proactively by persisting each space id and rehydrating it later with `space.get(id)`. All Photon-specific code stays behind the transport interface in `packages/photon`.
+Inbound delivery is `spectrum.messages` from `spectrum-ts`: an outbound gRPC streaming connection to Photon Cloud that reconnects forever with jittered backoff and, after a disconnect, replays missed events from a sequence cursor before resuming live. The cursor is held in memory, so replay covers connection drops but not full process downtime. The supported cloud send path is `space.send(...)`; Nudge replies through the stream's rehydrated space and sends proactively by persisting each space id and rehydrating it later with `space.get(id)`. All Photon-specific code stays behind the transport interface in `packages/photon`.
 
 ## Configuration
 
@@ -152,11 +152,13 @@ Settings (console → Settings):
 | --- | --- | --- |
 | `owner_handle` | required | The one handle allowed to talk to Nudge |
 | `timezone` | machine timezone | IANA zone for schedules and midnight rollover |
-| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `openai-api`, or `custom` |
-| `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the subscription endpoint |
-| `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | OAuth credential file |
+| `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `grok-subscription`, `openai-api`, or `custom` |
+| `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the ChatGPT subscription endpoint |
+| `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | ChatGPT OAuth credential file |
+| `provider.grok.model` | `grok-4.6` | Model slug for the Grok subscription (xAI's CLI proxy maps it to its `-build` variant) |
+| `provider.grok.auth_file` | `.data/grok-auth.json` | Grok OAuth credential file |
+| `provider.grok.client_version` | built-in | CLI version header for xAI's proxy; set only when requests fail with HTTP 426 |
 | `provider.openai.model` | `gpt-5-mini` | Standard API model |
-| `provider.openai.fallback_enabled` | `false` | API-key fallback for subscription auth failures |
 | `provider.custom.base_url` | unset | Base URL of an OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1`) |
 | `provider.custom.model` | unset | Model id the custom endpoint expects |
 | `provider.custom.api` | `chat-completions` | API flavor the endpoint implements: `chat-completions` or `responses` |
@@ -183,15 +185,15 @@ Settings (console → Settings):
 
 | Variable | Purpose |
 | --- | --- |
-| `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` / `SPECTRUM_WEBHOOK_SECRET` | Photon credentials (required) |
-| `OPENAI_API_KEY` | Optional API provider / subscription fallback |
+| `SPECTRUM_PROJECT_ID` / `SPECTRUM_PROJECT_SECRET` | Photon credentials (required) |
+| `OPENAI_API_KEY` | Optional key for the `openai-api` provider (transcription falls back to it too) |
 | `CUSTOM_API_KEY` | Optional key for the custom provider endpoint (omit for keyless local servers) |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
 | `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ (default `.data`) |
 | `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Paseo's per-worktree ports) |
 | `LOG_LEVEL` | Bootstrap: `debug`, `info`, `warn`, or `error` (default `info`) |
 
-Unknown senders, non-iMessage deliveries, non-text content, and duplicate webhook deliveries are ignored.
+Unknown senders, non-iMessage deliveries, non-text content, and duplicate deliveries are ignored.
 
 ## Run a production build
 
@@ -200,7 +202,7 @@ pnpm check
 pnpm start
 ```
 
-Use a single server process: the scheduler's claims, webhook dedupe, and debouncing assume one process over one SQLite file.
+Use a single server process: the scheduler's claims, inbound dedupe, and debouncing assume one process over one SQLite file.
 
 ## Updating
 
@@ -215,7 +217,7 @@ No manual steps beyond the restart: database migrations run automatically as ord
 
 ## Security boundaries
 
-- Photon HMAC verification runs on the exact raw request bytes, including the replay-window check.
+- Inbound messages arrive only over the authenticated outbound connection to Photon Cloud; the server accepts no inbound HTTP beyond `GET /healthz`.
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.

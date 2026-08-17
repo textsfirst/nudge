@@ -192,6 +192,7 @@ export function SchedulePage() {
                           day: "numeric",
                           hour: "2-digit",
                           minute: "2-digit",
+                          ...(preview?.timeZone ? { timeZone: preview.timeZone } : {}),
                         })
                       : "never (already fired)"}
                   </p>

@@ -12,7 +12,9 @@ describe("settingsFromOverrides", () => {
     expect(settings.owner_handle).toBe("");
     expect(settings.provider.selected).toBe("chatgpt-subscription");
     expect(settings.provider.chatgpt.auth_file).toBe(".data/chatgpt-auth.json");
-    expect(settings.provider.openai.fallback_enabled).toBe(false);
+    expect(settings.provider.grok.model).toBe("grok-4.6");
+    expect(settings.provider.grok.auth_file).toBe(".data/grok-auth.json");
+    expect(settings.provider.grok.client_version).toBeUndefined();
     expect(settings.tools.bash_enabled).toBe(true);
     expect(settings.threads.debounce_ms).toBe(250);
     expect(settings.agent.max_tool_steps).toBe(256);
@@ -83,6 +85,7 @@ describe("SETTINGS_FORM", () => {
       timezone: "UTC",
       "provider.custom.base_url": "http://localhost:11434/v1",
       "provider.custom.model": "llama3.3:70b",
+      "provider.grok.client_version": "0.2.103",
       "model.reasoning_effort": "medium",
       "tools.firecrawl_url": "http://localhost:3002",
       "google.default_account": "personal",

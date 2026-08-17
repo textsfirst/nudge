@@ -37,7 +37,9 @@ export class ConsoleContext {
   }
 
   #env(key: string): string | undefined {
-    return readEnvKeys(this.envPath).get(key) || process.env[key] || undefined;
+    const fromProcess = process.env[key];
+    if (fromProcess !== undefined) return fromProcess || undefined;
+    return readEnvKeys(this.envPath).get(key) || undefined;
   }
 
   dataDir(): string {

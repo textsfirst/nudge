@@ -15,9 +15,8 @@ import { TypingController } from "./typing.js";
 export interface PhotonTransportConfig {
   projectId: string;
   projectSecret: string;
-  webhookSecret: string;
   ownerHandle: string;
-  /** Durable dedupe check for webhook redeliveries. */
+  /** Durable dedupe check for stream redeliveries (reconnect catch-up replays). */
   isDuplicate: (messageId: string) => boolean;
   /** Persist the freshest space id per handle for proactive sends. */
   rememberSpace: (handle: string, spaceId: string, platform: string) => void;
@@ -120,19 +119,7 @@ const OUTBOUND_MIME_ALLOWLIST: readonly RegExp[] = [
   /^text\//,
 ];
 
-export interface RawWebhookRequest {
-  body: Buffer;
-  headers: Record<string, string | string[] | undefined>;
-}
-
-export interface WebhookResponse {
-  status: number;
-  headers: Record<string, string>;
-  body: Uint8Array;
-}
-
 export interface PhotonTransport {
-  webhook(request: RawWebhookRequest): Promise<WebhookResponse>;
   /** Proactively send to a space persisted from an earlier inbound message. */
   sendToSpace(spaceId: string, text: string, options?: SendOptions): Promise<void>;
   flushInbound(): Promise<void>;
@@ -163,7 +150,6 @@ export async function createPhotonTransport(
   const spectrum = await Spectrum({
     projectId: config.projectId,
     projectSecret: config.projectSecret,
-    webhookSecret: config.webhookSecret,
     providers: [provider],
     options: { logLevel: config.logLevel ?? "info" },
   });
@@ -273,14 +259,15 @@ export async function createPhotonTransport(
     },
   });
 
-  return {
-    async webhook(request) {
-      const headers = Object.fromEntries(
-        Object.entries(request.headers).flatMap(([name, value]) =>
-          value === undefined ? [] : [[name, Array.isArray(value) ? value.join(", ") : value]],
-        ),
-      );
-      return spectrum.webhook({ body: request.body, headers }, async (space, message) => {
+  // Inbound arrives over the SDK's persistent streaming connection — an
+  // outbound gRPC subscription that reconnects forever and replays missed
+  // events by cursor after a disconnect — so no HTTP endpoint is involved.
+  // Deliveries are at-least-once; the durable isDuplicate check absorbs
+  // catch-up replays. The cursor lives in memory, so texts sent while the
+  // process itself is down are not replayed.
+  const consumeInbound = async (): Promise<void> => {
+    for await (const [space, message] of spectrum.messages) {
+      try {
         const sender = message.sender?.id;
         const parts = extractParts(message.content);
         if (!parts || !sender) {
@@ -289,9 +276,13 @@ export async function createPhotonTransport(
             contentType: message.content.type,
             senderPresent: Boolean(sender),
           });
-          return;
+          continue;
         }
-        if (message.platform.toLowerCase() === "imessage" && sender === config.ownerHandle) {
+        if (
+          message.platform.toLowerCase() === "imessage" &&
+          sender === config.ownerHandle &&
+          !config.isDuplicate(message.id)
+        ) {
           config.rememberSpace(sender, space.id, message.platform);
           // Surface a read receipt a jittered beat after the text arrives —
           // "seen" comes before "typing" in the human rhythm. Best-effort,
@@ -321,9 +312,21 @@ export async function createPhotonTransport(
           },
           { space, message },
         );
-      });
-    },
+      } catch (error) {
+        // One bad message must not end inbound consumption for good.
+        config.logger.error("Failed to handle an inbound message", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  };
+  const inboundDone = consumeInbound().catch((error: unknown) => {
+    config.logger.error("The inbound message stream ended unexpectedly", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 
+  return {
     async sendToSpace(spaceId, text, options) {
       // The platform instance comes from calling the narrower with the
       // spectrum instance — the instance itself exposes no per-platform
@@ -337,7 +340,10 @@ export async function createPhotonTransport(
     async stop() {
       await processor.flushNow();
       typing.clear();
+      // Closing spectrum ends the message stream, which lets the consumer
+      // loop finish; joining it keeps shutdown deterministic.
       await spectrum.stop();
+      await inboundDone;
     },
   };
 }
@@ -375,7 +381,8 @@ function tapbackQuote(text: string): string {
  * a message whose content is entirely unsupported yields undefined so the
  * caller keeps the existing warn-and-drop.
  */
-function extractParts(content: unknown): ExtractedParts | undefined {
+function extractParts(content: unknown, depth = 0): ExtractedParts | undefined {
+  if (depth > 8) return undefined;
   if (content === null || typeof content !== "object") return undefined;
   const item = content as Record<string, unknown>;
   switch (item.type) {
@@ -419,7 +426,7 @@ function extractParts(content: unknown): ExtractedParts | undefined {
       const media: InboundMedia[] = [];
       let supported = false;
       for (const sub of item.items) {
-        const parts = extractParts((sub as { content?: unknown } | null)?.content);
+        const parts = extractParts((sub as { content?: unknown } | null)?.content, depth + 1);
         if (!parts) continue;
         supported = true;
         if (parts.text.length > 0) texts.push(parts.text);
@@ -446,7 +453,9 @@ function extractParts(content: unknown): ExtractedParts | undefined {
             : "an earlier message";
       // Quote only the target's text. Its media is deliberately dropped: the
       // reacted-to attachment already had its own turn when it arrived.
-      const quoted = target ? tapbackQuote(extractParts(target.content)?.text ?? "") : "";
+      const quoted = target
+        ? tapbackQuote(extractParts(target.content, depth + 1)?.text ?? "")
+        : "";
       return {
         text:
           quoted.length > 0
@@ -455,6 +464,8 @@ function extractParts(content: unknown): ExtractedParts | undefined {
         media: [],
       };
     }
+    case "reply":
+      return extractParts(item.content, depth + 1);
     default:
       return undefined;
   }

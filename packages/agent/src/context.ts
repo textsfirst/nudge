@@ -35,6 +35,12 @@ const MODEL_WINDOWS: ReadonlyArray<readonly [RegExp, number]> = [
   [/^gpt-5/, 272_000],
   [/^o[34]/, 200_000],
   [/^gpt-4o/, 128_000],
+  // Grok windows as the CLI proxy advertises them; the catch-all covers
+  // grok-4.5 / grok-4.6 / grok-build (all 500k).
+  [/^grok-4\.20/, 2_000_000],
+  [/^grok-4\.3/, 1_000_000],
+  [/^grok-composer/, 200_000],
+  [/^grok-/, 500_000],
 ];
 
 export function contextWindowFor(modelId: string): number {
@@ -57,7 +63,7 @@ export const IMAGE_TOKENS = 1_000;
  * carry the content). The `vision: "on"` setting overrides for custom
  * endpoints serving models this registry does not know.
  */
-const VISION_MODELS: ReadonlyArray<RegExp> = [/^gpt-4\.1/, /^gpt-5/, /^o[134]/, /^gpt-4o/];
+const VISION_MODELS: ReadonlyArray<RegExp> = [/^gpt-4\.1/, /^gpt-5/, /^o[134]/, /^gpt-4o/, /^grok-/];
 
 export function supportsVision(modelId: string): boolean {
   return VISION_MODELS.some((pattern) => pattern.test(modelId));

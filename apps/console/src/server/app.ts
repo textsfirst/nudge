@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ChatGptAuthManager } from "@nudge/agent";
+import { ChatGptAuthManager, GrokAuthManager } from "@nudge/agent";
 import { parseSchedule, nextRun } from "@nudge/schedule";
 import {
   formatIssues,
@@ -168,7 +168,12 @@ export function createConsoleApp(
           set.status = 422;
           return { error: "Expected { path, content }." };
         }
-        const result = writeDataFile(context.dataDir(), record.path, record.content);
+        const result = writeDataFile(
+          context.dataDir(),
+          record.path,
+          record.content,
+          typeof record.hash === "string" ? record.hash : undefined,
+        );
         if (!result.ok) {
           set.status = result.status;
           return { error: result.error };
@@ -287,6 +292,15 @@ export function createConsoleApp(
       .post("/api/connections/chatgpt/start", () => connections.startChatGpt())
       .get("/api/connections/chatgpt/flow/:id", ({ params, set }) => {
         const flow = connections.chatGptFlow(params.id);
+        if (!flow) {
+          set.status = 404;
+          return { error: "No such sign-in attempt — start again." };
+        }
+        return flow;
+      })
+      .post("/api/connections/grok/start", () => connections.startGrok())
+      .get("/api/connections/grok/flow/:id", ({ params, set }) => {
+        const flow = connections.grokFlow(params.id);
         if (!flow) {
           set.status = 404;
           return { error: "No such sign-in attempt — start again." };
@@ -478,14 +492,14 @@ export function createConsoleApp(
         return { ok: true };
       })
       .delete("/api/threads/:id", ({ params, set }) => {
-        if (!context.store().deleteSession(Number(params.id))) {
+        if (!context.store().deleteSession(Number(params.id), context.dataDir())) {
           set.status = 404;
           return { error: `No thread ${params.id}.` };
         }
         return { ok: true };
       })
       .delete("/api/threads/:id/messages/:messageId", ({ params, set }) => {
-        if (!context.store().deleteMessage(Number(params.messageId))) {
+        if (!context.store().deleteMessage(Number(params.messageId), context.dataDir())) {
           set.status = 404;
           return { error: `No message ${params.messageId}.` };
         }
@@ -572,11 +586,16 @@ async function probe(url: string): Promise<{
 }
 
 async function subscriptionAuthError(root: string, settings: Settings): Promise<string | null> {
-  if (settings.provider.selected !== "chatgpt-subscription") return null;
   try {
-    await new ChatGptAuthManager({
-      authFile: resolve(root, settings.provider.chatgpt.auth_file),
-    }).validateStored();
+    if (settings.provider.selected === "chatgpt-subscription") {
+      await new ChatGptAuthManager({
+        authFile: resolve(root, settings.provider.chatgpt.auth_file),
+      }).validateStored();
+    } else if (settings.provider.selected === "grok-subscription") {
+      await new GrokAuthManager({
+        authFile: resolve(root, settings.provider.grok.auth_file),
+      }).validateStored();
+    }
     return null;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);

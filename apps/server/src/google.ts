@@ -215,10 +215,10 @@ export function readGoogleAccounts(dataDir: string): GoogleAccount[] {
 
 function writeGoogleAccounts(dataDir: string, accounts: GoogleAccount[]): void {
   mkdirSync(googleDir(dataDir), { recursive: true });
-  writeFileSync(
-    join(googleDir(dataDir), REGISTRY_FILE),
-    `${JSON.stringify({ version: 1, accounts }, null, 2)}\n`,
-  );
+  const path = join(googleDir(dataDir), REGISTRY_FILE);
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, accounts }, null, 2)}\n`);
+  renameSync(temporary, path);
 }
 
 // -- OAuth flow -------------------------------------------------------------

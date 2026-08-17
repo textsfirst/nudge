@@ -2,20 +2,80 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const spaceGet = vi.fn();
 const narrower = vi.fn();
-// Each created fake instance, so tests can drive its webhook callback.
-const spectrumInstances: Array<{ webhook: ReturnType<typeof vi.fn> }> = [];
+
+interface FakeSpectrumInstance {
+  /**
+   * Push one inbound [space, message] pair into the fake `spectrum.messages`
+   * stream. Resolves once the transport's consumer loop has fully handled it
+   * (the ack fires when the loop asks for the next tuple), so tests can
+   * assert right after awaiting — no sleeps or tick-counting.
+   */
+  emit: (space: unknown, message: unknown) => Promise<void>;
+  /** End the stream, letting the transport's consumer loop finish. */
+  end: () => void;
+  stop: ReturnType<typeof vi.fn>;
+}
+
+// Each created fake instance, so tests can feed its message stream.
+const spectrumInstances: FakeSpectrumInstance[] = [];
+
+function fakeMessageStream() {
+  interface Entry {
+    tuple: [unknown, unknown];
+    ack: () => void;
+  }
+  const queue: Entry[] = [];
+  let notify: (() => void) | undefined;
+  let ended = false;
+  const iterable = (async function* () {
+    for (;;) {
+      while (queue.length === 0) {
+        if (ended) return;
+        await new Promise<void>((resolve) => {
+          notify = resolve;
+        });
+      }
+      const entry = queue.shift();
+      if (!entry) continue;
+      yield entry.tuple;
+      // The generator resumes here only when the consumer pulls the next
+      // tuple, i.e. after its loop body finished handling this one.
+      entry.ack();
+    }
+  })();
+  return {
+    iterable,
+    emit(space: unknown, message: unknown) {
+      return new Promise<void>((ack) => {
+        queue.push({ tuple: [space, message], ack });
+        notify?.();
+        notify = undefined;
+      });
+    },
+    end() {
+      ended = true;
+      notify?.();
+      notify = undefined;
+    },
+  };
+}
 
 // Mirror the real SpectrumInstance: a Proxy whose get-trap resolves unknown
 // string properties to custom event streams, never to platform instances.
 // Reading `spectrum.imessage` must NOT yield anything with `.space`.
 function fakeSpectrumInstance() {
+  const stream = fakeMessageStream();
   const base = {
     __providers: [],
     __internal: { platforms: new Map() },
-    messages: (async function* () {})(),
-    stop: vi.fn(async () => {}),
-    webhook: vi.fn(),
+    messages: stream.iterable,
+    // The real stop() closes platform clients, which ends the message stream.
+    stop: vi.fn(async () => {
+      stream.end();
+    }),
     responding: vi.fn(async (_space: unknown, fn: () => unknown) => fn()),
+    emit: stream.emit,
+    end: stream.end,
   };
   spectrumInstances.push(base);
   return new Proxy(base, {
@@ -56,7 +116,6 @@ function transportConfig() {
   return {
     projectId: "proj",
     projectSecret: "secret",
-    webhookSecret: "hook",
     ownerHandle: "+100",
     isDuplicate: () => false,
     rememberSpace: vi.fn(),
@@ -258,20 +317,13 @@ describe("batch controls", () => {
       onBatch,
     });
     const instance = spectrumInstances.at(-1)!;
-    instance.webhook.mockImplementation(
-      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-        await handle(space, {
-          id: "msg-1",
-          platform: "imessage",
-          sender: { id: "+100" },
-          content: { type: "text", text: "thanks" },
-          react: vi.fn(async () => {}),
-        });
-        return { status: 200, headers: {}, body: new Uint8Array() };
-      },
-    );
-
-    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    await instance.emit(space, {
+      id: "msg-1",
+      platform: "imessage",
+      sender: { id: "+100" },
+      content: { type: "text", text: "thanks" },
+      react: vi.fn(async () => {}),
+    });
     await transport.flushInbound();
 
     expect(onBatch).toHaveBeenCalledTimes(1);
@@ -296,20 +348,13 @@ describe("batch controls", () => {
       onBatch,
     });
     const instance = spectrumInstances.at(-1)!;
-    instance.webhook.mockImplementation(
-      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-        await handle(space, {
-          id: "msg-a1",
-          platform: "imessage",
-          sender: { id: "+100" },
-          content: { type: "text", text: "chart?" },
-          react: vi.fn(async () => {}),
-        });
-        return { status: 200, headers: {}, body: new Uint8Array() };
-      },
-    );
-
-    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    await instance.emit(space, {
+      id: "msg-a1",
+      platform: "imessage",
+      sender: { id: "+100" },
+      content: { type: "text", text: "chart?" },
+      react: vi.fn(async () => {}),
+    });
     await transport.flushInbound();
 
     expect(space.send).toHaveBeenCalledWith(
@@ -344,20 +389,13 @@ describe("batch controls", () => {
       onBatch,
     });
     const instance = spectrumInstances.at(-1)!;
-    instance.webhook.mockImplementation(
-      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-        await handle(space, {
-          id: "msg-a2",
-          platform: "imessage",
-          sender: { id: "+100" },
-          content: { type: "text", text: "try" },
-          react: vi.fn(async () => {}),
-        });
-        return { status: 200, headers: {}, body: new Uint8Array() };
-      },
-    );
-
-    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    await instance.emit(space, {
+      id: "msg-a2",
+      platform: "imessage",
+      sender: { id: "+100" },
+      content: { type: "text", text: "try" },
+      react: vi.fn(async () => {}),
+    });
     await transport.flushInbound();
 
     expect(outcomes).toEqual([
@@ -385,24 +423,19 @@ describe("batch controls", () => {
       onBatch,
     });
     const instance = spectrumInstances.at(-1)!;
-    let deliveries = 0;
-    instance.webhook.mockImplementation(
-      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-        deliveries += 1;
-        await handle(space, {
-          id: `msg-${deliveries}`,
-          platform: "imessage",
-          sender: { id: "+100" },
-          content: { type: "text", text: `text ${deliveries}` },
-          react: deliveries === 1 ? firstReact : secondReact,
-        });
-        return { status: 200, headers: {}, body: new Uint8Array() };
-      },
-    );
-
     // Two texts buffer into one batch; the tapback must land on the second.
-    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
-    await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    for (const [id, react] of [
+      ["msg-1", firstReact],
+      ["msg-2", secondReact],
+    ] as const) {
+      await instance.emit(space, {
+        id,
+        platform: "imessage",
+        sender: { id: "+100" },
+        content: { type: "text", text: `text ${id}` },
+        react,
+      });
+    }
     await transport.flushInbound();
 
     expect(onBatch).toHaveBeenCalledTimes(1);
@@ -450,17 +483,8 @@ describe("inbound media", () => {
       }),
     });
     const instance = spectrumInstances.at(-1)!;
-    let delivered = 0;
-    instance.webhook.mockImplementation(
-      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-        const content = contents[delivered];
-        delivered += 1;
-        await handle(space, ownerMessage(`msg-m${delivered}`, { content }));
-        return { status: 200, headers: {}, body: new Uint8Array() };
-      },
-    );
-    for (let i = 0; i < contents.length; i += 1) {
-      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    for (const [index, content] of contents.entries()) {
+      await instance.emit(space, ownerMessage(`msg-m${index + 1}`, { content }));
     }
     await transport.flushInbound();
     return { batches, warnings: logger.warn.mock.calls.length };
@@ -513,6 +537,29 @@ describe("inbound media", () => {
     ]);
 
     expect(batches[0]?.media[0]?.kind).toBe("file");
+  });
+
+  it("does not remember a space for a duplicate delivery", async () => {
+    const rememberSpace = vi.fn();
+    const transport = await createPhotonTransport({
+      ...transportConfig(),
+      rememberSpace,
+      isDuplicate: (id) => id === "old",
+      debounceMs: 0,
+    });
+    const instance = spectrumInstances.at(-1)!;
+    await instance.emit({ ...fakeSpace(), id: "space-a" }, ownerMessage("old"));
+    await transport.flushInbound();
+    expect(rememberSpace).not.toHaveBeenCalled();
+  });
+
+  it("unwraps an iMessage inline reply to its inner text", async () => {
+    const { batches, warnings } = await deliverContents([
+      { type: "reply", content: { type: "text", text: "yes" }, target: { id: "orig" } },
+    ]);
+    expect(warnings).toBe(0);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.texts).toEqual(["yes"]);
   });
 
   it("flattens a text-plus-attachment group in item order", async () => {
@@ -580,17 +627,8 @@ describe("inbound tapbacks", () => {
       }),
     });
     const instance = spectrumInstances.at(-1)!;
-    let delivered = 0;
-    instance.webhook.mockImplementation(
-      async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-        const content = contents[delivered];
-        delivered += 1;
-        await handle(space, ownerMessage(`msg-r${delivered}`, { content }));
-        return { status: 200, headers: {}, body: new Uint8Array() };
-      },
-    );
-    for (let i = 0; i < contents.length; i += 1) {
-      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+    for (const [index, content] of contents.entries()) {
+      await instance.emit(space, ownerMessage(`msg-r${index + 1}`, { content }));
     }
     await transport.flushInbound();
     return { batches, warnings: logger.warn.mock.calls.length };
@@ -733,14 +771,7 @@ describe("typing choreography", () => {
         onBatch,
       });
       const instance = spectrumInstances.at(-1)!;
-      instance.webhook.mockImplementation(
-        async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-          await handle(space, ownerMessage("msg-t1"));
-          return { status: 200, headers: {}, body: new Uint8Array() };
-        },
-      );
-
-      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+      await instance.emit(space, ownerMessage("msg-t1"));
       await vi.advanceTimersByTimeAsync(0);
       // Generation is already running, but the indicator waits out its delay.
       expect(onBatch).toHaveBeenCalledTimes(1);
@@ -775,14 +806,7 @@ describe("typing choreography", () => {
         onBatch,
       });
       const instance = spectrumInstances.at(-1)!;
-      instance.webhook.mockImplementation(
-        async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-          await handle(space, ownerMessage("msg-t2"));
-          return { status: 200, headers: {}, body: new Uint8Array() };
-        },
-      );
-
-      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+      await instance.emit(space, ownerMessage("msg-t2"));
       await vi.advanceTimersByTimeAsync(5_000);
       expect(onBatch).toHaveBeenCalledTimes(1);
       // The pending showing was cancelled; nothing ever hit the wire.
@@ -805,14 +829,7 @@ describe("read receipts", () => {
         readReceipts: true,
       });
       const instance = spectrumInstances.at(-1)!;
-      instance.webhook.mockImplementation(
-        async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-          await handle(space, ownerMessage("msg-r1", { read }));
-          return { status: 200, headers: {}, body: new Uint8Array() };
-        },
-      );
-
-      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+      await instance.emit(space, ownerMessage("msg-r1", { read }));
       // random 0.5 pins the jitter: 300ms floor + half the 500ms span = 550ms.
       await vi.advanceTimersByTimeAsync(549);
       expect(read).not.toHaveBeenCalled();
@@ -833,14 +850,7 @@ describe("read receipts", () => {
         readReceipts: false,
       });
       const instance = spectrumInstances.at(-1)!;
-      instance.webhook.mockImplementation(
-        async (_request: unknown, handle: (space: unknown, message: unknown) => Promise<void>) => {
-          await handle(space, ownerMessage("msg-r2", { read }));
-          return { status: 200, headers: {}, body: new Uint8Array() };
-        },
-      );
-
-      await transport.webhook({ body: Buffer.from("{}"), headers: {} });
+      await instance.emit(space, ownerMessage("msg-r2", { read }));
       await vi.advanceTimersByTimeAsync(5_000);
       expect(read).not.toHaveBeenCalled();
     } finally {

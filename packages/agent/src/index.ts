@@ -40,6 +40,7 @@ export {
 export { DATA_README } from "./data-readme.js";
 export { applyEdits, type EditOutcome, type FileEdit } from "./edits.js";
 export {
+  confinePath,
   FileWorkspace,
   fileBudget,
   MAX_LIST_ENTRIES,
@@ -81,11 +82,23 @@ export {
   type DeviceLoginPrompt,
   type StoredChatGptTokens,
 } from "./providers/chatgpt-auth.js";
+export {
+  GROK_CLIENT_IDENTIFIER,
+  GROK_CLIENT_VERSION,
+  GROK_ISSUER,
+  GROK_OAUTH_CLIENT_ID,
+  GrokAuthManager,
+  runGrokDeviceLogin,
+  type GrokCredentials,
+  type StoredGrokTokens,
+} from "./providers/grok-auth.js";
 export { isContextOverflowError, SubscriptionAuthError } from "./providers/errors.js";
 export { createModelSources, type ProviderConfig } from "./providers/factory.js";
 export {
   ChatGptSubscriptionSource,
   CustomEndpointSource,
+  GROK_PROXY_BASE_URL,
+  GrokSubscriptionSource,
   OpenAiApiSource,
 } from "./providers/ai-sdk.js";
 export {

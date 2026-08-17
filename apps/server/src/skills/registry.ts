@@ -180,6 +180,13 @@ export async function installSkill(options: {
     rmSync(target, { recursive: true, force: true });
     cpSync(picked.dir, target, { recursive: true });
     rmSync(join(target, ".git"), { recursive: true, force: true });
+    const symlink = firstSymlink(target);
+    if (symlink) {
+      rmSync(target, { recursive: true, force: true });
+      throw new SkillsUserError(
+        `${repo}/${picked.name} contains a symlink (${symlink}) and was not installed.`,
+      );
+    }
 
     const lock = readSkillsLock(options.dataDir);
     const entry: SkillLockEntry = {
@@ -279,4 +286,16 @@ export function removeSkill(dataDir: string, name: string): boolean {
     writeSkillsLock(dataDir, lock);
   }
   return existed;
+}
+
+function firstSymlink(dir: string, root = dir): string | undefined {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name);
+    if (entry.isSymbolicLink()) return abs.slice(root.length + 1);
+    if (entry.isDirectory()) {
+      const nested = firstSymlink(abs, root);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
 }

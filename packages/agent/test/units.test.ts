@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NudgeStore } from "@nudge/store";
@@ -110,6 +110,17 @@ describe("FileWorkspace", () => {
     expect(workspace.write("google/notes.md", "x")).toContain("not writable");
     expect(workspace.write("nudge.db", "x")).toContain("not writable");
     expect(workspace.list()).toBe("(no files yet)");
+  });
+
+  it("rejects symlink escapes out of the data directory", () => {
+    const dir = tempDir();
+    const outside = join(dir, "..", `outside-${Date.now()}.txt`);
+    writeFileSync(outside, "TOP_SECRET");
+    symlinkSync(outside, join(dir, "escape"));
+    const workspace = new FileWorkspace(dir);
+    expect(workspace.read("escape")).toContain("outside your data directory");
+    expect(workspace.write("escape", "OVERWRITTEN")).toContain("outside your data directory");
+    expect(readFileSync(outside, "utf8")).toBe("TOP_SECRET");
   });
 
   it("keeps SYSTEM.md and README.md read-only to the agent", () => {

@@ -14,9 +14,11 @@ import {
   ApiError,
   disconnectGoogle,
   getChatGptFlow,
+  getGrokFlow,
   saveGoogleClient,
   startChatGptConnect,
   startGoogleConnect,
+  startGrokConnect,
   useConnections,
   useInvalidate,
   type Connections,
@@ -59,7 +61,7 @@ export function ConnectionsPage() {
       title="Connections"
       description="Model provider sign-in, the Google accounts the agent can use through the gws CLI, and its MCP servers."
     >
-      <ChatGptCard chatgpt={data.chatgpt} />
+      <ProviderSection chatgpt={data.chatgpt} grok={data.grok} />
       <GoogleSection google={data.google} openWizard={(preset) => setWizard(preset ?? {})} />
       <McpSection />
       {wizard && (
@@ -73,43 +75,139 @@ export function ConnectionsPage() {
   );
 }
 
-// -- ChatGPT subscription ---------------------------------------------------
+// -- subscription providers (ChatGPT, Grok) ---------------------------------
 
-function ChatGptCard({ chatgpt }: { chatgpt: Connections["chatgpt"] }) {
-  const [open, setOpen] = useState(false);
+function ProviderSection({
+  chatgpt,
+  grok,
+}: {
+  chatgpt: Connections["chatgpt"];
+  grok: Connections["grok"];
+}) {
   return (
     <section className="flex flex-col gap-2">
       <h2 className="text-sm font-medium text-muted-foreground">Model provider</h2>
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <CardTitle className="flex items-center gap-2">
-            <StatusDot ok={chatgpt.connected} />
-            ChatGPT subscription
-            {chatgpt.selected !== "chatgpt-subscription" && (
-              <Badge variant="outline">not the selected provider</Badge>
-            )}
-          </CardTitle>
-          <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
-            {chatgpt.connected ? "Reconnect" : "Connect"}
-          </Button>
-        </CardHeader>
-        <CardContent className="text-muted-foreground">
-          {chatgpt.connected ? (
-            <>
-              Connected as <span className="font-mono text-xs">{chatgpt.accountId}</span>
-              {chatgpt.updatedAt && ` · tokens refreshed ${new Date(chatgpt.updatedAt).toLocaleString()}`}
-            </>
-          ) : (
-            "Sign in with your ChatGPT account to use the subscription provider. The OpenAI API key (Secrets page) is separate."
-          )}
-        </CardContent>
-      </Card>
-      {open && <ChatGptDialog onClose={() => setOpen(false)} />}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <ChatGptCard chatgpt={chatgpt} />
+        <GrokCard grok={grok} />
+      </div>
     </section>
   );
 }
 
-function ChatGptDialog({ onClose }: { onClose: () => void }) {
+function ChatGptCard({ chatgpt }: { chatgpt: Connections["chatgpt"] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <ProviderCard
+        title="ChatGPT subscription"
+        connected={chatgpt.connected}
+        notSelected={chatgpt.selected !== "chatgpt-subscription"}
+        onConnect={() => setOpen(true)}
+      >
+        {chatgpt.connected ? (
+          <>
+            Connected as <span className="font-mono text-xs">{chatgpt.accountId}</span>
+            {chatgpt.updatedAt && ` · tokens refreshed ${new Date(chatgpt.updatedAt).toLocaleString()}`}
+          </>
+        ) : (
+          "Sign in with your ChatGPT account to use the subscription provider. The OpenAI API key (Secrets page) is separate."
+        )}
+      </ProviderCard>
+      {open && (
+        <DeviceFlowDialog
+          title="Connect ChatGPT"
+          start={startChatGptConnect}
+          poll={getChatGptFlow}
+          doneToast={(state) => `ChatGPT connected (account ${state.accountId})`}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+function GrokCard({ grok }: { grok: Connections["grok"] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <ProviderCard
+        title="Grok subscription"
+        connected={grok.connected}
+        notSelected={grok.selected !== "grok-subscription"}
+        onConnect={() => setOpen(true)}
+      >
+        {grok.connected ? (
+          <>
+            Connected{grok.account && (
+              <>
+                {" as "}
+                <span className="font-mono text-xs">{grok.account}</span>
+              </>
+            )}
+            {grok.updatedAt && ` · tokens refreshed ${new Date(grok.updatedAt).toLocaleString()}`}
+          </>
+        ) : (
+          "Sign in with your xAI account to use a Grok subscription (SuperGrok, SuperGrok Heavy, or X Premium+)."
+        )}
+      </ProviderCard>
+      {open && (
+        <DeviceFlowDialog
+          title="Connect Grok"
+          start={startGrokConnect}
+          poll={getGrokFlow}
+          doneToast={(state) => (state.account ? `Grok connected (${state.account})` : "Grok connected")}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+function ProviderCard({
+  title,
+  connected,
+  notSelected,
+  onConnect,
+  children,
+}: {
+  title: string;
+  connected: boolean;
+  notSelected: boolean;
+  onConnect: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardTitle className="flex items-center gap-2">
+          <StatusDot ok={connected} />
+          {title}
+          {notSelected && <Badge variant="outline">not the selected provider</Badge>}
+        </CardTitle>
+        <Button variant="outline" size="sm" onClick={onConnect}>
+          {connected ? "Reconnect" : "Connect"}
+        </Button>
+      </CardHeader>
+      <CardContent className="text-muted-foreground">{children}</CardContent>
+    </Card>
+  );
+}
+
+/** Shared device-code sign-in dialog: start a flow, show link + code, poll until it lands. */
+function DeviceFlowDialog<Flow extends { status: "pending" | "done" | "error"; error?: string }>({
+  title,
+  start,
+  poll,
+  doneToast,
+  onClose,
+}: {
+  title: string;
+  start: () => Promise<{ flowId: string; verificationUrl: string; userCode: string }>;
+  poll: (flowId: string) => Promise<Flow>;
+  doneToast: (state: Flow) => string;
+  onClose: () => void;
+}) {
   const invalidate = useInvalidate();
   const [flow, setFlow] = useState<{ flowId: string; verificationUrl: string; userCode: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -118,21 +216,21 @@ function ChatGptDialog({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (started.current) return;
     started.current = true;
-    startChatGptConnect()
+    start()
       .then(setFlow)
       .catch((problem: unknown) =>
         setError(problem instanceof ApiError ? problem.message : String(problem)),
       );
-  }, []);
+  }, [start]);
 
   useEffect(() => {
     if (!flow) return;
     const timer = setInterval(() => {
-      getChatGptFlow(flow.flowId)
+      poll(flow.flowId)
         .then((state) => {
           if (state.status === "done") {
             clearInterval(timer);
-            toast.success(`ChatGPT connected (account ${state.accountId})`);
+            toast.success(doneToast(state));
             invalidate("connections");
             onClose();
           } else if (state.status === "error") {
@@ -143,12 +241,12 @@ function ChatGptDialog({ onClose }: { onClose: () => void }) {
         .catch(() => undefined);
     }, 2_000);
     return () => clearInterval(timer);
-  }, [flow, invalidate, onClose]);
+  }, [flow, poll, doneToast, invalidate, onClose]);
 
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent>
-        <DialogTitle>Connect ChatGPT</DialogTitle>
+        <DialogTitle>{title}</DialogTitle>
         <DialogDescription>
           Open the link on any device, sign in, and enter the code. This page finishes by itself.
         </DialogDescription>

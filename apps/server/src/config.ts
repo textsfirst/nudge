@@ -33,14 +33,9 @@ export const SECRET_SPECS = [
     description: "Photon Cloud project secret",
   },
   {
-    key: "SPECTRUM_WEBHOOK_SECRET",
-    required: true,
-    description: "Photon webhook signing secret",
-  },
-  {
     key: "OPENAI_API_KEY",
     required: false,
-    description: "OpenAI API key — API provider, or fallback for subscription auth",
+    description: "OpenAI API key for the openai-api provider (transcription falls back to it too)",
   },
   {
     key: "CUSTOM_API_KEY",
@@ -127,15 +122,18 @@ export function loadConfig(
     spectrum: {
       projectId: secrets.SPECTRUM_PROJECT_ID,
       projectSecret: secrets.SPECTRUM_PROJECT_SECRET,
-      webhookSecret: secrets.SPECTRUM_WEBHOOK_SECRET,
     },
     provider: {
       selected: settings.provider.selected,
       chatGptModel: settings.provider.chatgpt.model,
       chatGptAuthFile: resolveFromWorkspace(settings.provider.chatgpt.auth_file),
+      grokModel: settings.provider.grok.model,
+      grokAuthFile: resolveFromWorkspace(settings.provider.grok.auth_file),
+      ...(settings.provider.grok.client_version
+        ? { grokClientVersion: settings.provider.grok.client_version }
+        : {}),
       ...(secrets.OPENAI_API_KEY ? { openAiApiKey: secrets.OPENAI_API_KEY } : {}),
       openAiModel: settings.provider.openai.model,
-      openAiFallbackEnabled: settings.provider.openai.fallback_enabled,
       ...(settings.provider.custom.base_url
         ? { customBaseUrl: settings.provider.custom.base_url }
         : {}),

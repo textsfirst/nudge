@@ -1,15 +1,6 @@
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Logger } from "@nudge/agent";
-import type { PhotonTransport } from "@nudge/photon";
+import { afterEach, describe, expect, it } from "vitest";
 import { createHttpApp } from "../src/http.js";
-
-const logger: Logger = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-};
 
 const servers: Array<{ close: (callback: () => void) => void }> = [];
 
@@ -22,19 +13,8 @@ afterEach(async () => {
 });
 
 describe("HTTP app", () => {
-  it("serves health and forwards exact webhook bytes", async () => {
-    const webhook = vi.fn(async () => ({
-      status: 202,
-      headers: { "content-type": "text/plain" },
-      body: new TextEncoder().encode("accepted"),
-    }));
-    const transport: PhotonTransport = {
-      webhook,
-      sendToSpace: async () => undefined,
-      flushInbound: async () => undefined,
-      stop: async () => undefined,
-    };
-    const server = createHttpApp(transport, logger).listen(0);
+  it("serves the health probe", async () => {
+    const server = createHttpApp().listen(0);
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const port = (server.address() as AddressInfo).port;
@@ -42,30 +22,13 @@ describe("HTTP app", () => {
     const health = await fetch(`http://127.0.0.1:${port}/healthz`);
     expect(await health.json()).toEqual({
       ok: true,
-      provider: { ok: true, degraded: false, error: null },
+      provider: { ok: true, error: null },
     });
-
-    const payload = '{"event":"messages"}\n';
-    const response = await fetch(`http://127.0.0.1:${port}/webhooks/photon`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: payload,
-    });
-    expect(response.status).toBe(202);
-    expect(await response.text()).toBe("accepted");
-    expect(webhook.mock.calls[0]?.[0].body.equals(Buffer.from(payload))).toBe(true);
   });
 
   it("reports provider startup failures through health", async () => {
-    const transport: PhotonTransport = {
-      webhook: async () => ({ status: 200, headers: {}, body: new Uint8Array() }),
-      sendToSpace: async () => undefined,
-      flushInbound: async () => undefined,
-      stop: async () => undefined,
-    };
-    const server = createHttpApp(transport, logger, {
+    const server = createHttpApp({
       ok: false,
-      degraded: false,
       error: "ChatGPT auth is invalid. Reconnect it in the console (Connections page).",
     }).listen(0);
     servers.push(server);

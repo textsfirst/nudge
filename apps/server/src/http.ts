@@ -1,17 +1,16 @@
 import express, { type Express } from "express";
-import type { Logger } from "@nudge/agent";
-import type { PhotonTransport } from "@nudge/photon";
 
 export interface ProviderHealth {
   ok: boolean;
-  degraded: boolean;
   error: string | null;
 }
 
+/**
+ * The server's only HTTP surface: a liveness probe. Inbound messages arrive
+ * over the Photon transport's outbound gRPC stream, not HTTP.
+ */
 export function createHttpApp(
-  transport: PhotonTransport,
-  logger: Logger,
-  providerHealth: ProviderHealth = { ok: true, degraded: false, error: null },
+  providerHealth: ProviderHealth = { ok: true, error: null },
 ): Express {
   const app = express();
 
@@ -21,29 +20,6 @@ export function createHttpApp(
       provider: providerHealth,
     });
   });
-
-  app.post(
-    "/webhooks/photon",
-    express.raw({ type: "*/*", limit: "1mb" }),
-    async (request, response) => {
-      try {
-        if (!Buffer.isBuffer(request.body)) {
-          response.status(400).send("expected raw request body");
-          return;
-        }
-        const result = await transport.webhook({
-          body: request.body,
-          headers: request.headers,
-        });
-        response.status(result.status).set(result.headers).send(Buffer.from(result.body));
-      } catch (error) {
-        logger.error("Photon webhook handling failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        response.status(500).send("webhook failed");
-      }
-    },
-  );
 
   return app;
 }

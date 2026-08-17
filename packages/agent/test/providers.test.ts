@@ -7,9 +7,27 @@ const BASE: ProviderConfig = {
   selected: "chatgpt-subscription",
   chatGptModel: "gpt-5.4-mini",
   chatGptAuthFile: "/tmp/chatgpt-auth.json",
+  grokModel: "grok-4.6",
+  grokAuthFile: "/tmp/grok-auth.json",
   openAiModel: "gpt-5-mini",
-  openAiFallbackEnabled: false,
 };
+
+describe("createModelSources", () => {
+  it("returns only the selected subscription source — never an API-key fallback", () => {
+    const sources = createModelSources({ ...BASE, openAiApiKey: "sk-test" });
+    expect(sources.map((source) => source.id)).toEqual(["chatgpt-subscription"]);
+  });
+
+  it("returns the Grok subscription source when selected", () => {
+    const sources = createModelSources({
+      ...BASE,
+      selected: "grok-subscription",
+      openAiApiKey: "sk-test",
+    });
+    expect(sources.map((source) => source.id)).toEqual(["grok-subscription"]);
+    expect(sources[0]?.modelId).toBe("grok-4.6");
+  });
+});
 
 describe("createModelSources with the custom provider", () => {
   it("returns only the custom source, with no fallback", () => {
@@ -19,7 +37,6 @@ describe("createModelSources with the custom provider", () => {
       customBaseUrl: "http://localhost:11434/v1",
       customModel: "llama3.3:70b",
       openAiApiKey: "sk-test",
-      openAiFallbackEnabled: true,
     });
     expect(sources.map((source) => source.id)).toEqual(["custom"]);
     expect(sources[0]?.modelId).toBe("llama3.3:70b");
@@ -114,5 +131,22 @@ describe("CustomEndpointSource", () => {
 
     expect(authHeader).toBe("Bearer none");
     expect(source.isAuthError()).toBe(false);
+  });
+});
+
+describe("GrokSubscriptionSource", () => {
+  it("treats HTTP 426 as an auth/config failure", async () => {
+    const { APICallError } = await import("@ai-sdk/provider");
+    const { GrokSubscriptionSource } = await import("../src/index.js");
+    const source = new GrokSubscriptionSource({
+      auth: { credentials: async () => ({ accessToken: "t" }) } as never,
+      model: "grok-4.6",
+    });
+    expect(
+      source.isAuthError(new APICallError({ message: "upgrade", statusCode: 426, url: "x" })),
+    ).toBe(true);
+    expect(
+      source.isAuthError(new APICallError({ message: "busy", statusCode: 503, url: "x" })),
+    ).toBe(false);
   });
 });
