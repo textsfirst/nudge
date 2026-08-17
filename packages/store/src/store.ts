@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 /** `error` rows are console-facing diagnostics; the agent excludes them from model context. */
@@ -496,7 +496,11 @@ export class NudgeStore {
   }
 
   /** Delete a session and all its messages (the FTS trigger prunes the index). */
-  deleteSession(id: number): boolean {
+  deleteSession(id: number, dataDir?: string): boolean {
+    const files = this.#attachmentPaths(
+      "message_id IN (SELECT id FROM messages WHERE session_id = ?)",
+      id,
+    );
     this.#db
       .prepare(
         "DELETE FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE session_id = ?)",
@@ -505,13 +509,51 @@ export class NudgeStore {
     this.#db.prepare("DELETE FROM messages WHERE session_id = ?").run(id);
     this.clearTurnProgress(id);
     const result = this.#db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.#unlinkOrphans(files, dataDir);
     return result.changes > 0;
   }
 
-  deleteMessage(id: number): boolean {
+  deleteMessage(id: number, dataDir?: string): boolean {
+    const row = this.#db.prepare("SELECT session_id FROM messages WHERE id = ?").get(id);
+    if (!row) return false;
+    const sessionId = requiredNumber(row, "session_id");
+    const session = this.sessionById(sessionId);
+    const files = this.#attachmentPaths("message_id = ?", id);
     this.#db.prepare("DELETE FROM attachments WHERE message_id = ?").run(id);
-    const result = this.#db.prepare("DELETE FROM messages WHERE id = ?").run(id);
-    return result.changes > 0;
+    this.#db.prepare("DELETE FROM messages WHERE id = ?").run(id);
+    if (session && id <= session.compactedThrough) {
+      this.#db
+        .prepare("UPDATE sessions SET summary = NULL, compacted_through = 0 WHERE id = ?")
+        .run(sessionId);
+    }
+    this.#unlinkOrphans(files, dataDir);
+    return true;
+  }
+
+  #attachmentPaths(where: string, bind: number): string[] {
+    const paths: string[] = [];
+    for (const row of this.#db.prepare(`SELECT path, alt_path FROM attachments WHERE ${where}`).all(bind)) {
+      const path = nullableString(row, "path");
+      const alt = nullableString(row, "alt_path");
+      if (path) paths.push(path);
+      if (alt) paths.push(alt);
+    }
+    return paths;
+  }
+
+  #unlinkOrphans(paths: string[], dataDir: string | undefined): void {
+    if (!dataDir) return;
+    for (const rel of paths) {
+      const still = this.#db
+        .prepare("SELECT 1 FROM attachments WHERE path = ? OR alt_path = ?")
+        .get(rel, rel);
+      if (still) continue;
+      try {
+        unlinkSync(join(dataDir, rel));
+      } catch {
+        // Already gone, or the bytes were never written.
+      }
+    }
   }
 
   // -- agents --------------------------------------------------------------

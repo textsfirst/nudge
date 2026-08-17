@@ -168,7 +168,12 @@ export function createConsoleApp(
           set.status = 422;
           return { error: "Expected { path, content }." };
         }
-        const result = writeDataFile(context.dataDir(), record.path, record.content);
+        const result = writeDataFile(
+          context.dataDir(),
+          record.path,
+          record.content,
+          typeof record.hash === "string" ? record.hash : undefined,
+        );
         if (!result.ok) {
           set.status = result.status;
           return { error: result.error };
@@ -487,14 +492,14 @@ export function createConsoleApp(
         return { ok: true };
       })
       .delete("/api/threads/:id", ({ params, set }) => {
-        if (!context.store().deleteSession(Number(params.id))) {
+        if (!context.store().deleteSession(Number(params.id), context.dataDir())) {
           set.status = 404;
           return { error: `No thread ${params.id}.` };
         }
         return { ok: true };
       })
       .delete("/api/threads/:id/messages/:messageId", ({ params, set }) => {
-        if (!context.store().deleteMessage(Number(params.messageId))) {
+        if (!context.store().deleteMessage(Number(params.messageId), context.dataDir())) {
           set.status = 404;
           return { error: `No message ${params.messageId}.` };
         }

@@ -231,8 +231,17 @@ export function findUrlSecret(url: string): string | null {
     if (SECRET_PATTERN.test(candidate)) return "an embedded API key or token";
   }
   try {
-    for (const name of new URL(url).searchParams.keys()) {
-      if (SENSITIVE_PARAM.test(name)) return `a credential-like query parameter (${name})`;
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "a non-HTTP URL";
+    }
+    if (parsed.username || parsed.password) {
+      return "embedded URL credentials";
+    }
+    for (const name of parsed.searchParams.keys()) {
+      if (SENSITIVE_PARAM.test(name) || /^(x-amz-|amz-)/i.test(name) || /credential|signature|token|secret/i.test(name)) {
+        return `a credential-like query parameter (${name})`;
+      }
     }
   } catch {
     // Unparseable URLs fall through; the scrape itself will report the problem.

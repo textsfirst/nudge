@@ -136,7 +136,7 @@ Setup lives entirely on the console's **Connections** page:
 
 The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; the gws binary setting for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
 
-A daily health check probes every connection (Google accounts and ChatGPT auth) and texts you once when one breaks — so an expired token doesn't surface as a silently failing morning briefing.
+A daily health check probes every connection (Google accounts and ChatGPT or Grok auth) and texts you once when one breaks — so an expired token doesn't surface as a silently failing morning briefing.
 
 ## Photon transport note
 

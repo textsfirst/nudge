@@ -37,6 +37,7 @@ export function buildCheckRunner(options: {
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
         stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
       });
       let output = "";
       let truncated = false;
@@ -49,8 +50,15 @@ export function buildCheckRunner(options: {
       };
       child.stdout.on("data", collect);
       child.stderr.on("data", collect);
+      const killCheck = () => {
+        try {
+          if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      };
       const timer = setTimeout(() => {
-        child.kill("SIGKILL");
+        killCheck();
         resolve({ ok: false, output: `check timed out after ${CHECK_TIMEOUT_MS / 1000}s` });
       }, CHECK_TIMEOUT_MS);
       child.once("error", (error) => {
@@ -106,10 +114,15 @@ export class Scheduler {
   }
 
   start(): void {
-    void this.tick();
-    this.#timer = setInterval(() => {
-      void this.tick();
-    }, this.#tickMs);
+    const run = () => {
+      void this.tick().catch((error: unknown) => {
+        this.#options.logger.error("Scheduler tick failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    };
+    run();
+    this.#timer = setInterval(run, this.#tickMs);
   }
 
   stop(): void {
@@ -140,6 +153,7 @@ export class Scheduler {
     const after = new Date(state.lastRunAt ?? now);
     const due = nextRun(entry, after, timeZone);
     if (!due || due.getTime() > now) return;
+    if (!store.spaceFor(ownerHandle)) return;
     if (!store.claimScheduleRun(entry.id, now)) return;
 
     logger.info("Running scheduled entry", {
@@ -153,18 +167,23 @@ export class Scheduler {
         // Watcher gate: the check runs first, and an unchanged output means
         // nobody wakes — the firing costs a subprocess, not a model turn.
         let prompt = entry.prompt;
+        let pendingHash: string | undefined;
         if (entry.check) {
           const gate = await this.#runCheckGate(entry.id, entry.check, now);
           if (!gate.wake) {
-            store.finishScheduleRun(entry.id, now, entry.when.kind === "once");
+            store.finishScheduleRun(entry.id, now, false);
             return;
           }
           prompt = `${entry.prompt}\n\n${gate.briefSuffix}`;
+          pendingHash = gate.pendingHash;
         }
         // Agent-scoped: the named standing agent runs the entry with its
         // accumulated memory, and its report reaches the owner through the
         // interaction loop's curation — no direct delivery from here.
         await agent.runAgentTask(ownerHandle, entry.name, prompt, entry.agent);
+        if (pendingHash) {
+          store.recordScheduleCheck(entry.id, { hash: pendingHash, changed: true, woke: true }, now);
+        }
       } else {
         const text = await agent.runTask(ownerHandle, entry.name, entry.prompt);
         if (text) {
@@ -179,6 +198,10 @@ export class Scheduler {
         entry: entry.name,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (entry.when.kind === "once") {
+        // Leave the claim; the 10-minute stale steal is the retry, not every tick.
+        return;
+      }
       store.finishScheduleRun(entry.id, now, false);
     }
   }
@@ -193,7 +216,7 @@ export class Scheduler {
     entryId: string,
     command: string,
     now: number,
-  ): Promise<{ wake: false } | { wake: true; briefSuffix: string }> {
+  ): Promise<{ wake: false } | { wake: true; briefSuffix: string; pendingHash?: string }> {
     const { store, logger } = this.#options;
     const state = store.scheduleState(entryId);
     let result: CheckResult;
@@ -226,9 +249,9 @@ export class Scheduler {
       store.recordScheduleCheck(entryId, { hash }, now);
       return { wake: false };
     }
-    store.recordScheduleCheck(entryId, { hash, changed: true, woke: true }, now);
     return {
       wake: true,
+      pendingHash: hash,
       briefSuffix:
         "[This watcher's check output changed since the last run. Current output:]\n" +
         (capForBrief(normalized) || "(empty)"),
@@ -237,7 +260,15 @@ export class Scheduler {
 
   async #reload(): Promise<void> {
     const { schedulePath, store, logger } = this.#options;
-    const content = existsSync(schedulePath) ? readFileSync(schedulePath, "utf8") : "";
+    let content = "";
+    try {
+      content = existsSync(schedulePath) ? readFileSync(schedulePath, "utf8") : "";
+    } catch (error) {
+      logger.error("Could not read SCHEDULE.md", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
     const hash = createHash("sha256").update(content).digest("hex");
     if (hash === this.#contentHash) return;
     this.#contentHash = hash;
@@ -250,10 +281,12 @@ export class Scheduler {
       store.ensureScheduleBaseline(entry.id, now);
     }
     // A partially malformed file may omit entries only temporarily, so prune
-    // orphaned state only after a completely valid parse.
-    const prunedState = errors.length === 0
-      ? store.pruneScheduleState(entries.map((entry) => entry.id))
-      : 0;
+    // orphaned state only after a completely valid parse that still has entries.
+    // An empty file must not wipe completed one-shot identity.
+    const prunedState =
+      errors.length === 0 && entries.length > 0
+        ? store.pruneScheduleState(entries.map((entry) => entry.id))
+        : 0;
     logger.info("Loaded schedule", {
       entries: entries.map((entry) => entry.name),
       errors: errors.length,
@@ -261,14 +294,14 @@ export class Scheduler {
     });
 
     if (errors.length > 0 && hash !== this.#notifiedErrorHash) {
-      this.#notifiedErrorHash = hash;
-      await this.#options.delivery.deliver(
+      const sent = await this.#options.delivery.deliver(
         this.#options.ownerHandle,
         `Heads up — I couldn't read part of SCHEDULE.md, so these entries are inactive until fixed:\n${errors
           .map((error) => `• ${error}`)
           .join("\n")}`,
         "nudge",
       );
+      if (sent) this.#notifiedErrorHash = hash;
     }
   }
 

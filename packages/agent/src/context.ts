@@ -63,7 +63,7 @@ export const IMAGE_TOKENS = 1_000;
  * carry the content). The `vision: "on"` setting overrides for custom
  * endpoints serving models this registry does not know.
  */
-const VISION_MODELS: ReadonlyArray<RegExp> = [/^gpt-4\.1/, /^gpt-5/, /^o[134]/, /^gpt-4o/];
+const VISION_MODELS: ReadonlyArray<RegExp> = [/^gpt-4\.1/, /^gpt-5/, /^o[134]/, /^gpt-4o/, /^grok-/];
 
 export function supportsVision(modelId: string): boolean {
   return VISION_MODELS.some((pattern) => pattern.test(modelId));

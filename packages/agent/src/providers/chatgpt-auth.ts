@@ -7,6 +7,7 @@ import {
   isRecord,
   safeResponseText,
   saveTokenFile,
+  singleflight,
 } from "./oauth.js";
 
 export { getJwtExpiration } from "./oauth.js";
@@ -88,6 +89,10 @@ export class ChatGptAuthManager {
   }
 
   async credentials(): Promise<ChatGptCredentials> {
+    return singleflight(`chatgpt:${this.#authFile}`, () => this.#credentials());
+  }
+
+  async #credentials(): Promise<ChatGptCredentials> {
     const stored = await this.#load();
     let expiration: number | undefined;
     try {

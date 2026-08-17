@@ -103,6 +103,18 @@ Do something.
     expect(one?.legacyId).not.toBe(different?.legacyId);
   });
 
+  it("rejects a check line on a one-shot and invalid calendar dates", () => {
+    const checked = parseSchedule(
+      "## Visa\nwhen: 2026-08-10 09:00 once\nagent: visa\ncheck: probe\nReport.",
+    );
+    expect(checked.entries).toEqual([]);
+    expect(checked.errors[0]).toContain("one-shot");
+
+    const badDay = parseSchedule("## X\nwhen: 2026-02-30 09:00 once\nDo it.");
+    expect(badDay.entries).toEqual([]);
+    expect(badDay.errors[0]).toContain("invalid date");
+  });
+
   it("rejects duplicate entry names because names are persistent identities", () => {
     const { entries, errors } = parseSchedule(
       "## Morning\nwhen: every day at 9:00\nHello\n\n## morning\nwhen: every day at 10:00\nAgain",

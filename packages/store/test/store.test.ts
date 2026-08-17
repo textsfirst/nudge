@@ -441,8 +441,13 @@ describe("NudgeStore", () => {
     const grouped = store.attachmentsForSession(session.id);
     expect(grouped.get(message.id)?.map((a) => a.id)).toEqual([image.id, failed.id]);
 
-    // Deleting the message removes its attachments rows too.
+    store.setCompaction(session.id, "Owner mentioned a vault code.", message.id);
+    // Deleting a compacted message drops attachment rows and clears the fold
+    // so the agent cannot still see the deleted text in the summary.
     store.deleteMessage(message.id);
+    const after = store.sessionById(session.id)!;
+    expect(after.summary).toBeNull();
+    expect(after.compactedThrough).toBe(0);
     expect(store.attachmentById(image.id)).toBeUndefined();
     expect(store.attachmentById(failed.id)).toBeUndefined();
   });

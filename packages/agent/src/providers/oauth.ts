@@ -1,5 +1,19 @@
+import { randomBytes } from "node:crypto";
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+
+const inflight = new Map<string, Promise<unknown>>();
+
+/** Coalesce concurrent work on the same auth file (refresh + health probe). */
+export function singleflight<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const existing = inflight.get(key);
+  if (existing) return existing as Promise<T>;
+  const pending = run().finally(() => {
+    if (inflight.get(key) === pending) inflight.delete(key);
+  });
+  inflight.set(key, pending);
+  return pending;
+}
 
 /** Shared plumbing for the subscription OAuth providers (ChatGPT, Grok). */
 
@@ -23,7 +37,7 @@ export function decodeJwtPayload(jwt: string): Record<string, unknown> {
 /** Atomic owner-only write, so a crash never leaves a partial or readable token file. */
 export async function saveTokenFile(path: string, tokens: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.tmp`;
+  const temporaryPath = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(tokens, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,

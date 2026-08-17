@@ -307,5 +307,11 @@ describe("helpers", () => {
     expect(findUrlSecret("https://example.com/docs?page=2")).toBeNull();
     expect(findUrlSecret("https://example.com/?access_token=zzz")).toContain("access_token");
     expect(findUrlSecret("https://example.com/ghp_0123456789abcdef")).toContain("API key");
+    expect(findUrlSecret("https://alice:hunter2@example.com/private")).toContain("embedded URL");
+    expect(
+      findUrlSecret(
+        "https://s3.amazonaws.com/b/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKID&X-Amz-Signature=dead",
+      ),
+    ).toMatch(/X-Amz-/);
   });
 });

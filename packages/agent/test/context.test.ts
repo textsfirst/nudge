@@ -51,6 +51,8 @@ describe("supportsVision", () => {
     expect(supportsVision("gpt-4.1")).toBe(true);
     expect(supportsVision("llama3.3:70b")).toBe(false);
     expect(supportsVision("scripted-test-model")).toBe(false);
+    expect(supportsVision("grok-4.6")).toBe(true);
+    expect(supportsVision("grok-4.20")).toBe(true);
   });
 });
 

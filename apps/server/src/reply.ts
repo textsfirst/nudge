@@ -1,6 +1,7 @@
 import { SubscriptionAuthError, type Logger, type MediaIngest, type ReplyInput } from "@nudge/agent";
 import type { BatchControls, InboundBatch, SendOptions } from "@nudge/photon";
 import type { NudgeStore } from "@nudge/store";
+import { trackOutbound } from "./delivery.js";
 
 const APOLOGY = "Sorry, I hit a snag on my end. Mind sending that again?";
 
@@ -44,14 +45,19 @@ export function createReplyHandler(deps: {
       signal.throwIfAborted();
       const ledgerId = store.enqueueOutbound(batch.handle, reply, "reply");
       store.markOutbound(ledgerId, "sending");
-      // Per-bubble progress keeps a crash mid-reply from replaying bubbles
-      // that already landed: recovery resumes at the first unconfirmed one.
-      await send(reply, {
-        onChunkSent: (sent) => store.markOutboundProgress(ledgerId, sent),
-      });
-      store.markOutbound(ledgerId, "sent");
-      delivered = true;
-      controls?.stopTyping();
+      const release = trackOutbound(ledgerId);
+      try {
+        // Per-bubble progress keeps a crash mid-reply from replaying bubbles
+        // that already landed: recovery resumes at the first unconfirmed one.
+        await send(reply, {
+          onChunkSent: (sent) => store.markOutboundProgress(ledgerId, sent),
+        });
+        store.markOutbound(ledgerId, "sent");
+        delivered = true;
+        controls?.stopTyping();
+      } finally {
+        release();
+      }
     };
     try {
       const input = await composeInput(batch, media, logger);

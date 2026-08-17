@@ -135,7 +135,7 @@ function FileEditor({ path, onDeleted }: { path: string; onDeleted: () => void }
   const save = () => {
     if (!dirty || data?.readOnly) return;
     setSaving(true);
-    saveFile(path, content)
+    saveFile(path, content, data?.hash)
       .then(() => {
         setError(null);
         setDraft(null);
@@ -259,6 +259,7 @@ function SchedulePreviewPanel({ content }: { content: string }) {
                   day: "numeric",
                   hour: "2-digit",
                   minute: "2-digit",
+                  ...(preview.timeZone ? { timeZone: preview.timeZone } : {}),
                 })
               : "never (already fired)"}
           </p>

@@ -10,6 +10,16 @@ const RESEND_NOTICE = "not sure that went through, so again:";
 const RESUME_NOTICE = "got cut off mid-text - here's the rest:";
 const MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/** Ledger ids whose send is in flight in this process — recover() must not steal them. */
+const liveSends = new Set<number>();
+
+export function trackOutbound(id: number): () => void {
+  liveSends.add(id);
+  return () => {
+    liveSends.delete(id);
+  };
+}
+
 export interface OutboundSender {
   sendToSpace(spaceId: string, text: string, options?: SendOptions): Promise<void>;
 }
@@ -23,6 +33,7 @@ export interface OutboundSender {
  */
 export class DeliveryService {
   #lastMaintenanceAt = 0;
+  readonly #inflight = new Set<number>();
 
   constructor(
     private readonly store: NudgeStore,
@@ -60,6 +71,7 @@ export class DeliveryService {
       }
     }
     for (const entry of this.store.openOutbound()) {
+      if (this.#inflight.has(entry.id) || liveSends.has(entry.id)) continue;
       const space = this.store.spaceFor(entry.handle);
       if (!space) continue;
       // A "sending" entry died mid-send: resume after the confirmed bubbles,
@@ -82,6 +94,8 @@ export class DeliveryService {
     body: string,
     options: SendOptions = {},
   ): Promise<boolean> {
+    if (this.#inflight.has(id)) return false;
+    this.#inflight.add(id);
     const attempt = this.store.markOutbound(id, "sending");
     try {
       await this.sender.sendToSpace(spaceId, body, {
@@ -104,6 +118,8 @@ export class DeliveryService {
         },
       );
       return false;
+    } finally {
+      this.#inflight.delete(id);
     }
   }
 }
