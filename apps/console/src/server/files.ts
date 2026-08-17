@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { MEMORY_LIMITS, validateDataFile } from "@nudge/agent";
+import { fileBudget, validateDataFile } from "@nudge/agent";
 
 /**
  * The owner's file surface over data_dir. Broader than the agent's: the owner
@@ -46,7 +46,7 @@ export function listDataFiles(dataDir: string): FileInfo[] {
         size: stats.size,
         modifiedAt: stats.mtimeMs,
         readOnly: SYSTEM_MANAGED.has(rel),
-        budget: MEMORY_LIMITS[rel] ?? null,
+        budget: fileBudget(rel) ?? null,
       };
     });
 }
@@ -68,7 +68,7 @@ export function readDataFile(dataDir: string, path: string): FileResult<{
       path: check.value.rel,
       content: readFileSync(check.value.abs, "utf8"),
       readOnly: SYSTEM_MANAGED.has(check.value.rel),
-      budget: MEMORY_LIMITS[check.value.rel] ?? null,
+      budget: fileBudget(check.value.rel) ?? null,
     },
   };
 }

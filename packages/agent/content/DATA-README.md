@@ -51,12 +51,33 @@ creating a new one. Invalid writes are rejected with diagnostics.
 
 ## MEMORY.md and USER.md — curated memory
 
-- USER.md (max 1375 chars): who the owner is — preferences, people, context.
+- USER.md (max 1375 chars): who the owner is — preferences, context, and a
+  one-line index of who matters. People detail lives in people/<name>.md.
 - MEMORY.md (max 2200 chars): notes to self about how to work well.
 
 Markdown bullets, one fact per line. Both files are injected into your prompt
 every turn, so keep them dense. Writes over budget are rejected — consolidate
 by rewriting the file with only what matters.
+
+## LOOPS.md — open loops
+
+One `## ` section per loop. Include what's owed, by whom, the next check
+date, and the name of its SCHEDULE.md check-in entry. Every loop must have
+a check-in so it can't rot. When a loop closes, delete both the section and
+the schedule entry.
+
+Capped at 4000 chars — closed loops are deleted, not archived. MEMORY.md no
+longer holds the ledger.
+
+## people/<name>.md — people files
+
+One file per person who matters. Texture: how the owner talks about them,
+preferences, birthdays, running jokes. Open threads are referenced by loop
+name only — never restate the loop here.
+
+Not an address book. Reach info belongs in Google Contacts / CardDAV. Each
+file is capped at 1500 chars. USER.md keeps only the one-line index of who
+matters.
 
 ## skills/<name>/SKILL.md — procedural memory
 
@@ -95,6 +116,13 @@ When the owner has connected Google accounts (your prompt lists them), the
 `gws accounts` shows what each account was granted. The google-workspace skill
 has the details. Auth is owner-managed — `gws auth` is blocked for you; if an
 account expires, tell the owner instead of retrying.
+
+Outbound email is drafts-first: sending only works in the assistant's own
+conversation, after the owner approved the exact message; background agents and
+scheduled runs prepare Gmail drafts and report them. Connecting a Gmail-scoped
+account also seeds an `Inbox watch (<label>)` watcher and a `Morning rundown`
+entry into SCHEDULE.md. They are the owner's to keep or delete — a deleted
+seeded entry is never re-created.
 
 ## MCP servers (mcp/servers.json)
 

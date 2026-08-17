@@ -10,7 +10,30 @@ import { DEFAULT_MAX_BYTES, splitLines, truncateHead } from "./truncate.js";
 export const MEMORY_LIMITS: Record<string, number> = {
   "MEMORY.md": 2_200,
   "USER.md": 1_375,
+  "LOOPS.md": 4_000,
 };
+
+/** Per-file cap for people/<name>.md (not an exact-path MEMORY_LIMITS entry). */
+export const PEOPLE_FILE_LIMIT = 1_500;
+
+/** Character budget for a data-dir-relative path, if the path is capped. */
+export function fileBudget(rel: string): number | undefined {
+  const exact = MEMORY_LIMITS[rel];
+  if (exact !== undefined) return exact;
+  if (isPeopleFile(rel.split(sep))) return PEOPLE_FILE_LIMIT;
+  return undefined;
+}
+
+function isPeopleFile(parts: string[]): boolean {
+  const name = parts[1];
+  return (
+    parts[0] === "people" &&
+    parts.length === 2 &&
+    name !== undefined &&
+    name.endsWith(".md") &&
+    name !== ".md"
+  );
+}
 
 /** list() cap; a data directory this size is already pathological. */
 export const MAX_LIST_ENTRIES = 500;
@@ -184,7 +207,7 @@ export function validateDataFile(rel: string, content: string): string | undefin
     return undefined;
   }
 
-  const limit = MEMORY_LIMITS[rel];
+  const limit = fileBudget(rel);
   if (limit !== undefined && content.length > limit) {
     return (
       `${rel} is capped at ${limit} characters and this write is ${content.length}. ` +
@@ -193,6 +216,12 @@ export function validateDataFile(rel: string, content: string): string | undefin
   }
 
   const parts = rel.split(sep);
+  if (parts[0] === "people") {
+    if (!isPeopleFile(parts)) {
+      return `people files are laid out as people/<name>.md, got "${rel}".`;
+    }
+    return undefined;
+  }
   if (parts[0] === "skills" && parts.at(-1) === "SKILL.md") {
     if (parts.length !== 3 || parts[1] === undefined) {
       return `skills are laid out as skills/<name>/SKILL.md, got "${rel}".`;

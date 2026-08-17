@@ -99,7 +99,9 @@ describe("client + account persistence", () => {
     });
     expect(statSync(googleCredentialsPath(dir, "work")).mode & 0o777).toBe(0o600);
     expect(readGoogleAccounts(dir).map((entry) => entry.label)).toEqual(["work"]);
-    expect(existsSync(join(dir, "skills", GOOGLE_SKILL_NAME, "SKILL.md"))).toBe(true);
+    const skill = readFileSync(join(dir, "skills", GOOGLE_SKILL_NAME, "SKILL.md"), "utf8");
+    expect(skill).toContain("## Outbound mail: drafts first");
+    expect(skill).toContain("gws gmail users drafts create");
   });
 
   it("reconnecting a label replaces it; disconnect revokes and removes", async () => {

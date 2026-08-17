@@ -18,7 +18,7 @@ import { NudgeStore } from "@nudge/store";
 import { loadBootstrap, loadConfig, settingsFromOverrides } from "./config.js";
 import { DeliveryService } from "./delivery.js";
 import { loadWorkspaceEnvironment } from "./env.js";
-import { buildGwsBashEnv, readGoogleAccounts } from "./google.js";
+import { buildGwsBashEnv, readGoogleAccounts, seedInboxJobs } from "./google.js";
 import { buildConnectionProbes, ConnectionHealthMonitor } from "./health.js";
 import { createHttpApp } from "./http.js";
 import type { ProviderHealth } from "./http.js";
@@ -84,6 +84,19 @@ async function main(): Promise<void> {
     }
   }
   const sources = createModelSources(config.provider);
+  // Accounts connected before inbox seeding shipped get their standing email
+  // job here instead of at connect time. Marker-guarded, so this is a no-op
+  // on every boot after the first — and owner deletions stay deleted.
+  for (const account of readGoogleAccounts(config.dataDir)) {
+    try {
+      seedInboxJobs(config.dataDir, account);
+    } catch (error) {
+      logger.warn("Could not seed the inbox job", {
+        account: account.label,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   // Shared by the agent's bash tool and the scheduler's watcher checks, so a
   // check: command sees the same gws/mcp/skills CLIs and secrets the agent does.
   const bashEnv = {

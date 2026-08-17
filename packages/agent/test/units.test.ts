@@ -10,6 +10,7 @@ import {
   FileWorkspace,
   MEMORY_LIMITS,
   MemoryFiles,
+  PEOPLE_FILE_LIMIT,
   SkillsLibrary,
   startOfDayInZone,
 } from "../src/index.js";
@@ -140,6 +141,29 @@ describe("FileWorkspace", () => {
     expect(workspace.read("USER.md")).toBe("- likes espresso");
   });
 
+  it("enforces the LOOPS.md budget", () => {
+    const workspace = new FileWorkspace(tempDir());
+    const under = "## Landlord\nwaiting on a reply\n";
+    expect(workspace.write("LOOPS.md", under)).toContain("Saved");
+    const over = workspace.write("LOOPS.md", "x".repeat(MEMORY_LIMITS["LOOPS.md"]! + 1));
+    expect(over).toContain("capped at 4000");
+    expect(workspace.read("LOOPS.md")).toBe(under);
+  });
+
+  it("enforces people file layout and budget", () => {
+    const workspace = new FileWorkspace(tempDir());
+    const under = "- sister; calls her Sar\n";
+    expect(workspace.write("people/sarah.md", under)).toContain("Saved");
+    const over = workspace.write("people/sarah.md", "x".repeat(PEOPLE_FILE_LIMIT + 1));
+    expect(over).toContain("capped at 1500");
+    expect(workspace.read("people/sarah.md")).toBe(under);
+
+    expect(workspace.write("people/nested/deep.md", "x")).toContain("people/<name>.md");
+    expect(workspace.write("people/notes.txt", "x")).toContain("people/<name>.md");
+    expect(workspace.read("people/nested/deep.md")).toContain("no file");
+    expect(workspace.read("people/notes.txt")).toContain("no file");
+  });
+
   it("lints skill frontmatter and layout", () => {
     const workspace = new FileWorkspace(tempDir());
     expect(workspace.write("skills/deploys/SKILL.md", "no frontmatter")).toContain(
@@ -169,6 +193,30 @@ describe("MemoryFiles", () => {
     expect(rendered).toContain("## Memory");
     expect(rendered.indexOf("About the owner")).toBeLessThan(rendered.indexOf("Notes to self"));
     expect(rendered).toContain("night owl");
+    expect(rendered).not.toContain("Open loops");
+  });
+
+  it("hints at open loops without injecting LOOPS.md", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "LOOPS.md"), "## Landlord\nwaiting\n\n## W-9\ndue Friday\n");
+    const rendered = new MemoryFiles(dir).render();
+    expect(rendered).toContain("## Memory");
+    expect(rendered).toContain("### Open loops (LOOPS.md)");
+    expect(rendered).toContain("2 open loops — read LOOPS.md before follow-ups or a rundown.");
+    expect(rendered).not.toContain("waiting");
+    expect(rendered).not.toContain("due Friday");
+
+    writeFileSync(join(dir, "LOOPS.md"), "## Just one\nstill open\n");
+    expect(new MemoryFiles(dir).render()).toContain("1 open loop —");
+  });
+
+  it("omits the loops hint when LOOPS.md is missing or has no headings", () => {
+    const dir = tempDir();
+    expect(new MemoryFiles(dir).render()).toBe("");
+    writeFileSync(join(dir, "LOOPS.md"), "");
+    expect(new MemoryFiles(dir).render()).toBe("");
+    writeFileSync(join(dir, "LOOPS.md"), "nothing headed\n");
+    expect(new MemoryFiles(dir).render()).toBe("");
   });
 });
 
