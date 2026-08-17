@@ -347,12 +347,33 @@ interface ExtractedParts {
   media: InboundMedia[];
 }
 
+/** Longest quoted excerpt of a tapback's target kept in its projection. */
+const TAPBACK_QUOTE_MAX_CHARS = 140;
+
+/**
+ * Flatten a tapback target's text to one line that is safe inside the
+ * bracketed projection: structural characters (brackets, quotes, control
+ * chars) are stripped so the quote cannot forge projection structure or
+ * reply tokens — the same hygiene the media projections apply to names.
+ */
+function tapbackQuote(text: string): string {
+  const flat = text
+    .replace(/[[\]"\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (flat.length <= TAPBACK_QUOTE_MAX_CHARS) return flat;
+  return `${flat.slice(0, TAPBACK_QUOTE_MAX_CHARS - 1).trimEnd()}…`;
+}
+
 /**
  * Normalize a provider message content into text plus lazy media handles.
- * A `group` (text sent with attachments) is flattened in item order; sub-items
- * we don't support (contacts, reactions, …) are skipped, and a message whose
- * content is entirely unsupported yields undefined so the caller keeps the
- * existing warn-and-drop.
+ * A `group` (text sent with attachments) is flattened in item order; an
+ * inbound `reaction` — a tapback the owner put on a bubble; the provider
+ * only surfaces additions, never removals — projects to a bracketed line
+ * quoting its target, so the model reads the reaction as a reply to that
+ * exact message; sub-items we don't support (contacts, …) are skipped, and
+ * a message whose content is entirely unsupported yields undefined so the
+ * caller keeps the existing warn-and-drop.
  */
 function extractParts(content: unknown): ExtractedParts | undefined {
   if (content === null || typeof content !== "object") return undefined;
@@ -405,6 +426,30 @@ function extractParts(content: unknown): ExtractedParts | undefined {
         media.push(...parts.media);
       }
       return supported ? { text: texts.join("\n"), media } : undefined;
+    }
+    case "reaction": {
+      // Spectrum normalizes native tapback kinds to emoji before this point;
+      // a reaction without one (e.g. a sticker) stays unsupported.
+      if (typeof item.emoji !== "string" || item.emoji.length === 0) return undefined;
+      const target = (item.target ?? undefined) as
+        | { content?: unknown; direction?: unknown }
+        | undefined;
+      const whose =
+        target?.direction === "outbound"
+          ? "your message"
+          : target?.direction === "inbound"
+            ? "their own message"
+            : "an earlier message";
+      // Quote only the target's text. Its media is deliberately dropped: the
+      // reacted-to attachment already had its own turn when it arrived.
+      const quoted = target ? tapbackQuote(extractParts(target.content)?.text ?? "") : "";
+      return {
+        text:
+          quoted.length > 0
+            ? `[tapback ${item.emoji} on ${whose}: "${quoted}"]`
+            : `[tapback ${item.emoji} on ${whose}]`,
+        media: [],
+      };
     }
     default:
       return undefined;

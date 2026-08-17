@@ -45,7 +45,7 @@ So the gaps below are not “build an assistant.” They are the last mile of jo
 | Bounded `MEMORY.md` / `USER.md` | shipped |
 | Skills (agentskills.io + `skills` CLI from skills.sh) | shipped |
 | FTS5 history search | shipped |
-| Outbound tapbacks; inbound voice + images (transcribe, vision) | shipped |
+| Tapbacks in both directions — outbound reactions, inbound tapback-as-approval; inbound voice + images (transcribe, vision) | shipped |
 | `send_file` (images, PDF, text) — never voice | shipped |
 | Google Workspace via `gws` (Gmail, Calendar, Drive, Docs, Sheets, Contacts, Tasks) | shipped |
 | iCloud Calendar via CalDAV skill | shipped |
@@ -79,15 +79,11 @@ Without this, Nudge is a very good texter that *can* open Gmail. Orchid is an EA
 
 **Shape that fits.** A convention + a standing agent, not a new tool schema. Seed an `email` agent and a check-gated `SCHEDULE.md` entry on first Google connect. Hard rule: outbound mail is a Gmail draft until approval. The interaction agent curates; the owner hears only what needs them.
 
-### 2. A tapback is supposed to be the commit
+### 2. A tapback is supposed to be the commit — **shipped 2026-08-17**
 
-**Who has it.** Poke treats iMessage reactions as input.
+**Who has it.** Poke treats iMessage reactions as input. Now Nudge does too.
 
-**What Nudge has.** The approval skill already says any clear yes counts, including 👍. Nudge already *sends* tapbacks. Photon’s inbound path **drops reactions**.
-
-**The gap.** The owner cannot 👍 a “good to send?” and have the send happen. They have to type “yes”.
-
-This is the smallest change with the largest “this is an EA, not a chatbot” effect. Owner reaction on the pending draft executes it. No extra text. Ambiguous reactions (❓, 👎) sharpen or cancel; they do not send.
+**What shipped.** Photon's inbound path now projects an owner tapback into the turn as `[tapback 👍 on your message: "…"]`, quoting the exact bubble it landed on (spectrum only surfaces reaction *additions*, so removing a tapback never triggers anything). The prompt and the approval skill read 👍 on a pending ask as a typed yes, 👎 as cancel, ❓ as “sharpen the ask” — they do not send.
 
 ### 3. Open loops cannot live in a 2,200-character file
 
