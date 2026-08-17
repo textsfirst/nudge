@@ -1,4 +1,4 @@
-export { NudgeAgent, type NudgeAgentOptions, type ReplyInput } from "./agent.js";
+export { GWS_SEND_ENV, NudgeAgent, type NudgeAgentOptions, type ReplyInput } from "./agent.js";
 export { buildImageCaptioner, type ImageCaptionerOptions } from "./captions.js";
 export {
   MediaIngest,
@@ -40,10 +40,12 @@ export {
 export { DATA_README } from "./data-readme.js";
 export { applyEdits, type EditOutcome, type FileEdit } from "./edits.js";
 export {
+  confinePath,
   FileWorkspace,
+  fileBudget,
   MAX_LIST_ENTRIES,
   MEMORY_LIMITS,
-  confinePath,
+  PEOPLE_FILE_LIMIT,
   validateDataFile,
 } from "./files.js";
 export {

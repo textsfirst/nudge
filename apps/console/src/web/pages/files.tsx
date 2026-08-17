@@ -27,7 +27,7 @@ import {
 } from "@/lib/api";
 import { cn, formatBytes } from "@/lib/utils";
 
-const CORE_ORDER = ["SYSTEM.md", "SCHEDULE.md", "MEMORY.md", "USER.md", "README.md"];
+const CORE_ORDER = ["SYSTEM.md", "SCHEDULE.md", "LOOPS.md", "MEMORY.md", "USER.md", "README.md"];
 
 const SKILL_TEMPLATE = `---
 name: NAME

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { parseSchedule } from "@nudge/schedule";
 import {
   chmodSync,
   existsSync,
@@ -318,6 +319,11 @@ export function saveGoogleAccount(
   const rest = readGoogleAccounts(dataDir).filter((entry) => entry.label !== input.label);
   writeGoogleAccounts(dataDir, [...rest, account].sort((a, b) => a.label.localeCompare(b.label)));
   seedGoogleSkill(dataDir);
+  try {
+    seedInboxJobs(dataDir, account);
+  } catch {
+    // Seeding is a bonus on top of the connect; it must never fail one.
+  }
   return account;
 }
 
@@ -341,6 +347,11 @@ export async function removeGoogleAccount(
   }
   rmSync(googleAccountDir(dataDir, label), { recursive: true, force: true });
   writeGoogleAccounts(dataDir, accounts.filter((account) => account.label !== label));
+  try {
+    removeSeededInboxWatch(dataDir, label);
+  } catch {
+    // A leftover watcher fails loudly on its next check; never block a disconnect on it.
+  }
   return true;
 }
 
@@ -461,7 +472,7 @@ export const GOOGLE_SKILL_NAME = "google-workspace";
 const GOOGLE_SKILL = `---
 name: google-workspace
 description: Use the gws CLI (bash) for the owner's Gmail, Calendar, Drive, Docs, Sheets, Contacts, and Tasks
-version: 1
+version: 2
 ---
 
 # Google Workspace via gws
@@ -482,12 +493,26 @@ Accounts may have different services and read-only vs full access — check
 ## High-value commands
 
     gws gmail +triage                 # unread inbox summary
-    gws gmail +send --to a@b.c --subject "Hi" --body "..."
-    gws gmail +reply --message-id ID --body "..."
+    gws gmail +send --to a@b.c --subject "Hi" --body "..."   # see "Outbound mail"
+    gws gmail +reply --message-id ID --body "..."            # see "Outbound mail"
     gws calendar +agenda              # upcoming events, owner's timezone
     gws calendar +insert ...          # create an event
     gws drive +upload ./file.pdf
     gws workflow +standup-report      # meetings + tasks summary
+
+## Outbound mail: drafts first
+
+Sending (+send, +reply, +forward, and raw ...messages/drafts send calls) only
+works in the assistant's own conversation with the owner, after the owner has
+approved the exact message; everywhere else gws refuses (exit 3). Background
+agents and scheduled runs prepare Gmail drafts and report the draft id:
+
+    gws schema gmail.users.drafts.create      # verify the exact shape first
+    gws gmail users drafts create --params '{"message": ...}'
+    gws gmail users drafts send --params '{"id": "..."}'   # after approval
+
+On approval, send the approved draft by id — never recompose — so what goes
+out is exactly what the owner saw.
 
 ## Discovering everything else
 
@@ -505,19 +530,209 @@ Wrap Sheets ranges in single quotes ('Sheet1!A1:C10') — \`!\` breaks bash.
 - Exit code 2 = the account's Google auth expired. Do not retry; tell the
   owner to reconnect it in the console (Connections page).
 - \`gws auth ...\` is owner-managed and blocked for you, by design.
+- A refusal about sending means this turn cannot send by design — create a
+  draft and hand it off instead of retrying.
 - Exit code 1 = the API said no (permissions, bad id); the JSON error says why.
 `;
 
 /**
- * Seed the skill on first connect; write-if-missing so agent or owner edits
- * (and deletions) are respected afterwards.
+ * sha256 of every prior GOOGLE_SKILL revision ever shipped. An on-disk copy
+ * matching one of these was never customized and is safe to replace with the
+ * current text; anything else belongs to the owner or the agent and is kept
+ * forever — the same rule syncBundledContent applies to bundled skills.
  */
-export function seedGoogleSkill(dataDir: string): void {
+const GOOGLE_SKILL_PRIOR_HASHES: ReadonlySet<string> = new Set([
+  // v1: pre drafts-first (no "Outbound mail" section).
+  "e2acecd79d9eb34e261af4df6ade06c72cbb53e9b1afd1928c402af8101aa5a8",
+]);
+
+/**
+ * Seed the skill (on connect) and upgrade it in place when the on-disk copy
+ * is an unmodified prior revision. A customized copy is the owner's or the
+ * agent's and is never touched. Boot passes createIfMissing: false so a
+ * deleted skill is only re-created by a deliberate reconnect, never by a
+ * restart.
+ */
+export function seedGoogleSkill(
+  dataDir: string,
+  options?: { createIfMissing?: boolean; priorHashes?: ReadonlySet<string> },
+): void {
   const dir = join(dataDir, "skills", GOOGLE_SKILL_NAME);
   const path = join(dir, "SKILL.md");
-  if (existsSync(path)) return;
+  if (existsSync(path)) {
+    const current = readFileSync(path, "utf8");
+    if (current === GOOGLE_SKILL) return;
+    const hash = createHash("sha256").update(current).digest("hex");
+    if (!(options?.priorHashes ?? GOOGLE_SKILL_PRIOR_HASHES).has(hash)) return;
+  } else if (options?.createIfMissing === false) {
+    return;
+  }
   mkdirSync(dir, { recursive: true });
   writeFileSync(path, GOOGLE_SKILL);
+}
+
+// -- seeded inbox job -------------------------------------------------------
+
+/**
+ * A Gmail-scoped connect turns the inbox into a standing job by default: a
+ * check-gated SCHEDULE.md watcher per account (all sharing one standing
+ * "email" agent, which materializes on first fire) plus one morning-rundown
+ * entry. The owner turns any of it off by deleting the entry — the marker
+ * below records what was seeded so a deletion is never overridden.
+ */
+
+const GMAIL_SCOPE_PREFIX = "https://www.googleapis.com/auth/gmail.";
+const RUNDOWN_ENTRY_NAME = "Morning rundown";
+const SEEDS_FILE = "seeds.json";
+
+export function inboxWatchEntryName(label: string): string {
+  return `Inbox watch (${label})`;
+}
+
+interface InboxSeeds {
+  rundown: boolean;
+  inboxWatch: string[];
+}
+
+function readInboxSeeds(dataDir: string): InboxSeeds {
+  const none: InboxSeeds = { rundown: false, inboxWatch: [] };
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(join(googleDir(dataDir), SEEDS_FILE), "utf8"),
+    );
+    if (!isRecord(parsed)) return none;
+    return {
+      rundown: parsed.rundown === true,
+      inboxWatch: Array.isArray(parsed.inboxWatch)
+        ? parsed.inboxWatch.filter((label): label is string => typeof label === "string")
+        : [],
+    };
+  } catch {
+    return none;
+  }
+}
+
+function writeInboxSeeds(dataDir: string, seeds: InboxSeeds): void {
+  mkdirSync(googleDir(dataDir), { recursive: true });
+  writeFileSync(
+    join(googleDir(dataDir), SEEDS_FILE),
+    `${JSON.stringify({ version: 1, ...seeds }, null, 2)}\n`,
+  );
+}
+
+function schedulePath(dataDir: string): string {
+  return join(dataDir, "SCHEDULE.md");
+}
+
+/** Section names already present in the file — malformed sections still occupy their name. */
+function scheduleHeadings(markdown: string): Set<string> {
+  const headings = new Set<string>();
+  for (const match of markdown.matchAll(/^##\s+(.+?)\s*$/gm)) {
+    headings.add(match[1]!.toLowerCase());
+  }
+  return headings;
+}
+
+function inboxWatchSection(account: GoogleAccount): string {
+  // The check deliberately has no newer_than: window — a rolling window
+  // changes output whenever mail merely ages out of it, waking the agent on
+  // nothing. The unread inbox only changes when mail arrives or gets handled.
+  const name = inboxWatchEntryName(account.label);
+  return `## ${name}
+when: every 5 minutes
+agent: email
+check: gws -a ${account.label} gmail search "in:inbox is:unread" | sort
+New unread mail on the ${account.label} account (${account.email}). Triage it
+with gws -a ${account.label}: read what arrived, judge what actually matters
+against the owner's interruption budget, and prepare Gmail drafts — never
+send — for anything that needs a reply. Your earlier sweeps are the turns
+above; dedupe against them. Report only what needs the owner (what landed,
+why it matters, which drafts are waiting); if nothing does, say so briefly.`;
+}
+
+const RUNDOWN_SECTION = `## ${RUNDOWN_ENTRY_NAME}
+when: weekdays at 7:30
+Build the owner's morning rundown per the proactive-rhythm skill: calendar,
+what needs them in email (drafts already waiting, via the email agent's
+recent reports and gws), open loops from LOOPS.md. One skimmable message.
+[SILENT] if there's truly nothing worth saying.`;
+
+/**
+ * Seed the inbox watcher (per account) and the morning rundown (once ever)
+ * into SCHEDULE.md. Idempotent and deletion-respecting via the marker file;
+ * appends atomically and never introduces new parse errors — on any doubt it
+ * leaves the file alone and stays unmarked so a later connect retries.
+ */
+export function seedInboxJobs(dataDir: string, account: GoogleAccount): void {
+  if (!account.scopes.some((scope) => scope.startsWith(GMAIL_SCOPE_PREFIX))) return;
+  const seeds = readInboxSeeds(dataDir);
+  const wantWatch = !seeds.inboxWatch.includes(account.label);
+  const wantRundown = !seeds.rundown;
+  if (!wantWatch && !wantRundown) return;
+
+  const path = schedulePath(dataDir);
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const present = scheduleHeadings(existing);
+  const sections: string[] = [];
+  if (wantWatch && !present.has(inboxWatchEntryName(account.label).toLowerCase())) {
+    sections.push(inboxWatchSection(account));
+  }
+  if (wantRundown && !present.has(RUNDOWN_ENTRY_NAME.toLowerCase())) {
+    sections.push(RUNDOWN_SECTION);
+  }
+
+  if (sections.length > 0) {
+    const candidate = existing.trim()
+      ? `${existing.trimEnd()}\n\n${sections.join("\n\n")}\n`
+      : `${sections.join("\n\n")}\n`;
+    // Pre-existing breakage is already the scheduler's (loud) problem; only a
+    // NEW error — which the collision check should have made impossible —
+    // aborts, unmarked, so a later connect retries.
+    if (parseSchedule(candidate).errors.length > parseSchedule(existing).errors.length) {
+      return;
+    }
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, candidate);
+    renameSync(temporary, path);
+  }
+
+  // Name collisions count as seeded too: the owner already has an entry by
+  // that name, and re-seeding over it later would be an override.
+  writeInboxSeeds(dataDir, {
+    rundown: seeds.rundown || wantRundown,
+    inboxWatch: wantWatch ? [...seeds.inboxWatch, account.label] : seeds.inboxWatch,
+  });
+}
+
+/**
+ * On disconnect, retire the account's seeded watcher: its check would fail
+ * every firing and wake the email agent each time. Only the exact seeded
+ * entry is removed (and unmarked, so reconnecting re-seeds); anything the
+ * owner renamed or wrote themselves is left alone. The rundown stays — it is
+ * not account-scoped.
+ */
+function removeSeededInboxWatch(dataDir: string, label: string): void {
+  const seeds = readInboxSeeds(dataDir);
+  if (!seeds.inboxWatch.includes(label)) return;
+  const path = schedulePath(dataDir);
+  if (existsSync(path)) {
+    const existing = readFileSync(path, "utf8");
+    const name = inboxWatchEntryName(label);
+    const sections = existing.split(/^(?=##\s)/m);
+    const kept = sections.filter(
+      (section) => !section.match(/^##\s+(.+?)\s*$/m) || section.match(/^##\s+(.+?)\s*$/m)![1] !== name,
+    );
+    if (kept.length < sections.length) {
+      const candidate = `${kept.join("").trimEnd()}\n`.replace(/^\n+$/, "");
+      const temporary = `${path}.${process.pid}.tmp`;
+      writeFileSync(temporary, candidate);
+      renameSync(temporary, path);
+    }
+  }
+  writeInboxSeeds(dataDir, {
+    rundown: seeds.rundown,
+    inboxWatch: seeds.inboxWatch.filter((entry) => entry !== label),
+  });
 }
 
 // -- helpers ----------------------------------------------------------------

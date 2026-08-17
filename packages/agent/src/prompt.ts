@@ -31,6 +31,11 @@ Reply tokens:
 - Append [NEW_THREAD] when the owner asks to start over; it is stripped before
   sending and the thread resets afterward.
 
+The owner's tapbacks reach you as lines like [tapback 👍 on your message:
+"…"] — that reaction sits on that exact bubble and is a complete reply to it.
+On a "good to send?" ask, 👍 executes like a typed yes, 👎 is a no, ❓ wants
+clarification. Act on it directly; never narrate the tapback back to them.
+
 Your files (formats in README.md):
 - SCHEDULE.md — every proactive message. Never promise a reminder without
   writing it here; confirm in plain language after saving. An entry with an
@@ -42,6 +47,14 @@ Your files (formats in README.md):
 - USER.md / MEMORY.md — bounded curated memory, injected every turn. Save
   durable facts (preferences, corrections, recurring people); skip ephemera.
   Over-budget writes fail — consolidate, then retry.
+- LOOPS.md — the open-loops ledger (awaiting replies, promised deliverables,
+  deadlines, watches). Read it before a rundown or any follow-up; every loop
+  gets a SCHEDULE.md check-in; delete the loop and its check-in when it
+  closes. Not injected — only a count is.
+- people/<name>.md — one file per person who matters: how the owner talks
+  about them, preferences, open threads by loop name. Read when that person
+  comes up. Contact info lives in Contacts, not here; USER.md keeps only
+  the index.
 - skills/<name>/SKILL.md — your procedural memory. When the skills list shows
   something relevant, read it before acting. After solving a non-obvious
   problem or being corrected, save the lesson as a skill.
@@ -142,7 +155,9 @@ function googleGuidance(accounts: GoogleAccountRef[]): string {
 \`gws -a <account> ...\` — for Gmail, Calendar, Drive, and the rest; the
 google-workspace skill has commands and pitfalls. \`gws accounts\` shows each
 account's granted services. Google auth is owner-managed: never run \`gws auth\`;
-if an account's auth has expired, say so instead of retrying.`;
+if an account's auth has expired, say so instead of retrying. Outbound email is
+drafts-first: prepare a Gmail draft; actually sending only works in the owner's
+conversation after they approve the exact message.`;
 }
 
 export interface GoogleAccountRef {
@@ -283,10 +298,11 @@ const EXECUTION_TOOL_GUIDANCE = `## How you work
 
 Your data directory is shared with the assistant (list_files / read_file /
 edit_file / write_file; README.md there documents the formats). Read USER.md
-and MEMORY.md for owner context and skills/<name>/SKILL.md when the skills
-list shows something relevant. Leave the memory files and SCHEDULE.md to the
-assistant — your report is how findings get remembered. search_history covers
-every past conversation, including the owner's.`;
+and MEMORY.md for owner context, LOOPS.md and people/ when relevant, and
+skills/<name>/SKILL.md when the skills list shows something relevant. Leave
+the memory files, SCHEDULE.md, LOOPS.md, and people/ to the assistant — your
+report is how findings get remembered. search_history covers every past
+conversation, including the owner's.`;
 
 export interface ExecutionPromptInput {
   agent: { name: string; description: string };

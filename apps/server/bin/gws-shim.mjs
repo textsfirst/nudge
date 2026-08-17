@@ -48,6 +48,30 @@ if (command[0] === "auth") {
   );
 }
 
+// Outbound mail is drafts-first: Gmail send commands only work in turns Nudge
+// marks with NUDGE_GWS_SEND=1 (the assistant's own conversation, where the
+// owner's approval lives). Everything else — background agents, scheduled
+// runs, watcher checks — can only prepare drafts. Gated before account and
+// binary resolution so the refusal fires no matter what.
+//
+// Threat model: this is a guardrail against model error inside one trust
+// domain, not a security boundary — anything that can run bash can set the
+// env var itself. Its job is to make "send without approval" an explicit,
+// legible act instead of a forgotten step, and to keep turns that process
+// untrusted content (email bodies, web pages) on the drafts path by default.
+if (
+  command[0] === "gmail" &&
+  isSendInvocation(command.slice(1)) &&
+  process.env.NUDGE_GWS_SEND !== "1"
+) {
+  fail(
+    "Sending email is reserved for the assistant in the owner's conversation, after the owner " +
+      "has approved the exact message. Prepare a Gmail draft instead (see the google-workspace " +
+      "skill — gws gmail users drafts create) and report the draft id; the assistant sends " +
+      "that draft once the owner says yes.",
+  );
+}
+
 if (accounts.length === 0) {
   fail(
     "No Google accounts are connected yet. Tell the owner to connect one in the console " +
@@ -115,6 +139,38 @@ function parseArguments(argv) {
     }
   }
   return { account: account ?? process.env.GWS_ACCOUNT, command };
+}
+
+/**
+ * Does this gmail invocation send mail? Rule of record:
+ * - Helper form: a +send/+reply/+forward token anywhere in the invocation.
+ *   Those tokens have no other legitimate meaning, so their position
+ *   relative to flags is not trusted.
+ * - Raw method form: the command path — tokens before the first real flag —
+ *   ends in exactly `send` AND names a sending resource (`messages` or
+ *   `drafts`); covers `users messages send` and `users drafts send`, while
+ *   `gmail search send` (a stray query term) passes because no resource
+ *   token is present. A literal `--` is skipped, not honored as
+ *   end-of-options, so it cannot smuggle the path past the gate.
+ * Flag values (--params JSON, quoted search queries) can legitimately
+ * contain the word "send" and are never treated as path. Drafts creation
+ * (`users drafts create`) always passes: that IS the drafts-first workflow.
+ */
+function isSendInvocation(rest) {
+  if (rest.some((token) => ["+send", "+reply", "+forward"].includes(token))) {
+    return true;
+  }
+  const path = [];
+  for (const token of rest) {
+    if (token === "--") continue;
+    if (token.startsWith("-")) break;
+    path.push(token);
+  }
+  return (
+    path.length > 0 &&
+    path[path.length - 1] === "send" &&
+    (path.includes("messages") || path.includes("drafts"))
+  );
 }
 
 function readAccounts(path) {

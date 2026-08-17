@@ -154,6 +154,109 @@ describe("gws shim", () => {
     expect(result.stderr).toContain('No Google account "nope"');
   });
 
+  describe("send gating", () => {
+    const blocked = [
+      ["gmail", "+send", "--to", "a@b.c", "--subject", "Hi", "--body", "x"],
+      ["gmail", "+reply", "--message-id", "ID", "--body", "x"],
+      ["gmail", "+forward", "--message-id", "ID", "--to", "a@b.c"],
+      ["gmail", "users", "messages", "send", "--params", "{}"],
+      ["gmail", "users", "drafts", "send", "--params", '{"id":"x"}'],
+    ];
+    for (const args of blocked) {
+      it(`blocks "${args.slice(0, 4).join(" ")}" without the send flag`, async () => {
+        const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+        const result = await shim(args, { NUDGE_GOOGLE_DIR: googleDir });
+        expect(result.code).toBe(3);
+        expect(result.stderr).toContain("draft");
+      });
+    }
+
+    it("blocks sends before account resolution, so the refusal wins over label errors", async () => {
+      const googleDir = makeGoogleDir([
+        { label: "personal", email: "p@gmail.com" },
+        { label: "work", email: "w@corp.com" },
+      ]);
+      // No -a with two accounts would normally be an ambiguity error; the gate fires first.
+      const result = await shim(["gmail", "+send", "--to", "a@b.c"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+      });
+      expect(result.code).toBe(3);
+      expect(result.stderr).toContain("draft");
+    });
+
+    it("allows sending when the turn carries NUDGE_GWS_SEND=1", async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const binary = makeFakeGws();
+      const result = await shim(["gmail", "+send", "--to", "a@b.c"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+        NUDGE_GWS_SEND: "1",
+        GWS_BINARY: binary,
+      });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("args:gmail +send --to a@b.c");
+    });
+
+    it("lets drafts creation through without the flag — that is the workflow", async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const binary = makeFakeGws();
+      const result = await shim(["gmail", "users", "drafts", "create", "--params", "{}"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+        GWS_BINARY: binary,
+      });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("args:gmail users drafts create");
+    });
+
+    it('blocks a raw send smuggled behind "--"', async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const result = await shim(["gmail", "--", "users", "messages", "send"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+      });
+      expect(result.code).toBe(3);
+      expect(result.stderr).toContain("draft");
+    });
+
+    it("blocks a send helper hiding behind a flag", async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const result = await shim(["gmail", "--verbose", "+send", "--to", "a@b.c"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+      });
+      expect(result.code).toBe(3);
+      expect(result.stderr).toContain("draft");
+    });
+
+    it('ignores "send" inside flag values and quoted queries', async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const binary = makeFakeGws();
+      const result = await shim(["gmail", "search", "is:unread send", "--params", "{}"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+        GWS_BINARY: binary,
+      });
+      expect(result.code).toBe(0);
+    });
+
+    it('passes a stray "send" path token with no sending resource', async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const binary = makeFakeGws();
+      const result = await shim(["gmail", "search", "send"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+        GWS_BINARY: binary,
+      });
+      expect(result.code).toBe(0);
+    });
+
+    it("only gates the gmail service", async () => {
+      const googleDir = makeGoogleDir([{ label: "personal", email: "p@gmail.com" }]);
+      const binary = makeFakeGws();
+      const result = await shim(["chat", "spaces", "messages", "send", "--params", "{}"], {
+        NUDGE_GOOGLE_DIR: googleDir,
+        GWS_BINARY: binary,
+      });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("args:chat spaces messages send");
+    });
+  });
+
   it("explains when no accounts are connected yet", async () => {
     root = mkdtempSync(join(tmpdir(), "gws-shim-"));
     const googleDir = join(root, "google");

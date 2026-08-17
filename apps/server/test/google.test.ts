@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,6 +17,7 @@ import {
   removeGoogleAccount,
   saveGoogleAccount,
   saveGoogleClient,
+  seedGoogleSkill,
 } from "../src/google.js";
 
 const CLIENT = { clientId: "id-123.apps.googleusercontent.com", clientSecret: "s3cret" };
@@ -99,7 +101,37 @@ describe("client + account persistence", () => {
     });
     expect(statSync(googleCredentialsPath(dir, "work")).mode & 0o777).toBe(0o600);
     expect(readGoogleAccounts(dir).map((entry) => entry.label)).toEqual(["work"]);
-    expect(existsSync(join(dir, "skills", GOOGLE_SKILL_NAME, "SKILL.md"))).toBe(true);
+    const skill = readFileSync(join(dir, "skills", GOOGLE_SKILL_NAME, "SKILL.md"), "utf8");
+    expect(skill).toContain("## Outbound mail: drafts first");
+    expect(skill).toContain("gws gmail users drafts create");
+  });
+
+  it("upgrades an unmodified prior skill revision in place", () => {
+    const dir = makeDataDir();
+    const skillDir = join(dir, "skills", GOOGLE_SKILL_NAME);
+    mkdirSync(skillDir, { recursive: true });
+    const prior = "---\nname: google-workspace\n---\nold shipped text\n";
+    writeFileSync(join(skillDir, "SKILL.md"), prior);
+    const hash = createHash("sha256").update(prior).digest("hex");
+    seedGoogleSkill(dir, { priorHashes: new Set([hash]) });
+    const upgraded = readFileSync(join(skillDir, "SKILL.md"), "utf8");
+    expect(upgraded).toContain("## Outbound mail: drafts first");
+  });
+
+  it("never touches a customized skill copy", () => {
+    const dir = makeDataDir();
+    const skillDir = join(dir, "skills", GOOGLE_SKILL_NAME);
+    mkdirSync(skillDir, { recursive: true });
+    const custom = "---\nname: google-workspace\n---\nmy own notes\n";
+    writeFileSync(join(skillDir, "SKILL.md"), custom);
+    seedGoogleSkill(dir);
+    expect(readFileSync(join(skillDir, "SKILL.md"), "utf8")).toBe(custom);
+  });
+
+  it("does not re-create a deleted skill at boot (createIfMissing: false)", () => {
+    const dir = makeDataDir();
+    seedGoogleSkill(dir, { createIfMissing: false });
+    expect(existsSync(join(dir, "skills", GOOGLE_SKILL_NAME, "SKILL.md"))).toBe(false);
   });
 
   it("reconnecting a label replaces it; disconnect revokes and removes", async () => {

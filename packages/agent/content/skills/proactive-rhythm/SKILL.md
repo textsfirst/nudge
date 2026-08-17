@@ -2,7 +2,7 @@
 name: proactive-rhythm
 description: Morning rundowns, nudges, follow-ups, habit routines
 metadata:
-  version: "1"
+  version: "2"
 ---
 
 # Proactive Rhythm
@@ -31,14 +31,16 @@ Rules:
   in opens at 9".
 - Pull real calendar data via the icloud-calendar skill when it's set up;
   otherwise the rundown covers what you're tracking yourself.
+- The 👀 tracking line comes from LOOPS.md.
 - Occasional warmth on big days: one line of hype, never generic
   motivation-poster text.
 
 ## Follow-ups and tracking
 
-Keep a ledger of open loops in MEMORY.md: things awaiting replies, promised
-deliverables, expiring deadlines, price watches. Give each one a scheduled
-check-in so it can't silently rot.
+Keep a ledger of open loops in LOOPS.md (formats in README.md): things
+awaiting replies, promised deliverables, expiring deadlines, price watches.
+Give each one a scheduled check-in so it can't silently rot. When a loop
+resolves, delete its LOOPS.md section and its SCHEDULE.md check-in entry.
 - Nudge once when a loop goes stale, with the fix attached: "no word from the
   venue in 4 days - want me to draft a follow-up?"
 - Never nudge twice about the same thing without new information.

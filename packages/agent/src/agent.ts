@@ -135,6 +135,13 @@ function extractReaction(text: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Set to "1" on the interaction tool set's bash env only: marks a turn whose
+ * transcript can contain the owner's approval, so the gws shim allows Gmail
+ * sends there and nowhere else (execution agents and scheduled turns draft).
+ */
+export const GWS_SEND_ENV = "NUDGE_GWS_SEND";
+
 /** Execution-agent runs allowed at once; further dispatches queue. */
 const EXECUTION_CONCURRENCY = 3;
 /** Active agents rendered into the roster prompt slot, most recent first. */
@@ -227,6 +234,8 @@ export class NudgeAgent {
   readonly #skills: SkillsLibrary;
   readonly #workspace: FileWorkspace;
   readonly #tools: ToolSet;
+  /** runTask's tool set: interaction-shaped but without the send flag — a cold scheduled turn holds no owner approval. */
+  readonly #scheduledTools: ToolSet;
   readonly #idleRolloverMs: number;
   readonly #budget: CompactionBudget;
   readonly #maxToolSteps: number;
@@ -261,7 +270,20 @@ export class NudgeAgent {
         ? { bash: { cwd: options.dataDir, env: options.bashEnv } }
         : {}),
     };
-    this.#tools = buildTools(toolContext, { dispatchNote: true });
+    // Only the owner-facing interaction set may run gws send commands: its
+    // transcript is where approval actually happens. Execution agents and
+    // scheduled turns get the unflagged env and can only prepare drafts.
+    const interactionContext = toolContext.bash
+      ? {
+          ...toolContext,
+          bash: {
+            ...toolContext.bash,
+            env: { ...options.bashEnv, [GWS_SEND_ENV]: "1" },
+          },
+        }
+      : toolContext;
+    this.#tools = buildTools(interactionContext, { dispatchNote: true });
+    this.#scheduledTools = buildTools(toolContext, { dispatchNote: true });
     this.#executionTools = buildTools(toolContext);
     this.#idleRolloverMs = options.idleRolloverMs ?? 6 * 60 * 60 * 1000;
     // Sources fall back mid-turn on auth failures, so budget for the smallest window among them.
@@ -504,7 +526,9 @@ export class NudgeAgent {
           },
         ],
         tools: {
-          ...this.#tools,
+          // Scheduled turns run the interaction persona but carry no owner
+          // approval in-transcript, so they get the send-flagless tool set.
+          ...this.#scheduledTools,
           ...buildDispatchTool((request) => this.#dispatch(handle, request)),
         },
       });

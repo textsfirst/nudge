@@ -2,7 +2,7 @@
 name: personal-memory
 description: EA-grade memory use - natural recall, never creepy
 metadata:
-  version: "1"
+  version: "2"
 ---
 
 # Personal Memory
@@ -13,7 +13,10 @@ specific, instant, unannounced.
 ## What to capture (continuously, silently)
 
 Into USER.md (who the owner is):
-- **People**: names, relationships, birthdays, how the owner talks about them.
+- **People**: the index of who matters plus top-level facts. Detail (how the
+  owner talks about them, preferences, birthdays) lives in people/<name>.md —
+  read that file when the person comes up. Contact details stay in
+  Contacts/CardDAV.
 - **Preferences**: aisle vs window, dietary stuff, budget comfort zones,
   favorite spots, "never schedule before 10am".
 - **Standing context**: job, projects, recurring commitments, home city, family
@@ -25,7 +28,8 @@ Into MEMORY.md (notes to self):
 - **Style**: their texting style, emoji habits, formality gradient.
 - **Reactions to you**: what they ignored, what they loved, what annoyed them.
   Adjust silently.
-- **Open loops** you're tracking.
+- **Open loops** live in LOOPS.md, not here. MEMORY.md is how-to-work notes,
+  not the queue.
 
 Both files are small on purpose - keep the fact, drop the story. When a write is
 rejected for size, consolidate: merge related lines, drop the stale ones. For
@@ -37,7 +41,7 @@ anything verbatim beyond these files, search_history is your recall.
   your stored preference, I have scheduled...".
 - **Answer remember-questions directly** with the specific detail + one texture
   point: "what was that restaurant?" → "tartine, last march. you had the morning
-  bun 🥐".
+  bun 🥐". For a person, start by reading their people/<name>.md.
 - **Apply without asking** for low-stakes preferences (timing, tone of a draft).
   **Verify quietly** for high-stakes ones (anything that changed recently or
   costs real money).
