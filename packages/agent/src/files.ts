@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { parseSchedule } from "@nudge/schedule";
 import { applyEdits, type FileEdit } from "./edits.js";
@@ -58,7 +66,7 @@ export class FileWorkspace {
     const check = this.#resolve(path);
     if ("error" in check) return check.error;
     if (isHidden(check.rel)) return `Error: ${path} is not writable.`;
-    if (READ_ONLY.has(check.rel)) {
+    if (isReadOnly(check.rel)) {
       return `Error: ${check.rel} is owner/system-maintained and read-only to you.`;
     }
     if (!existsSync(check.abs)) {
@@ -78,7 +86,7 @@ export class FileWorkspace {
     const check = this.#resolve(path);
     if ("error" in check) return check.error;
     if (isHidden(check.rel)) return `Error: ${path} is not writable.`;
-    if (READ_ONLY.has(check.rel)) {
+    if (isReadOnly(check.rel)) {
       return `Error: ${check.rel} is owner/system-maintained and read-only to you.`;
     }
     const problem = validateDataFile(check.rel, content);
@@ -102,17 +110,17 @@ export class FileWorkspace {
   }
 
   #resolve(path: string): { abs: string; rel: string } | { error: string } {
-    const abs = resolve(this.dataDir, path);
-    if (abs !== this.dataDir && !abs.startsWith(this.dataDir + sep)) {
+    const confined = confinePath(this.dataDir, path);
+    if ("error" in confined) {
       return { error: `Error: "${path}" is outside your data directory.` };
     }
-    return { abs, rel: relative(this.dataDir, abs) };
+    return confined;
   }
 
   #walk(dir: string): string[] {
     const files: string[] = [];
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith(".")) continue;
+      if (entry.name.startsWith(".") || entry.isSymbolicLink()) continue;
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
         files.push(...this.#walk(abs));
@@ -152,11 +160,43 @@ function page(content: string, path: string, offset: number, limit?: number): st
 
 function isHidden(rel: string): boolean {
   const parts = rel.split(sep);
-  const base = parts.at(-1) ?? rel;
+  const base = (parts.at(-1) ?? rel).toLowerCase();
   if (parts.some((part) => part.startsWith("."))) return true;
-  if (parts[0] !== undefined && HIDDEN_DIRS.has(parts[0])) return true;
+  if (parts[0] !== undefined && HIDDEN_DIRS.has(parts[0].toLowerCase())) return true;
   if (HIDDEN_BASENAMES.has(base)) return true;
   return HIDDEN_PREFIXES.some((prefix) => base.startsWith(prefix));
+}
+
+function isReadOnly(rel: string): boolean {
+  return [...READ_ONLY].some((name) => name.toLowerCase() === rel.toLowerCase());
+}
+
+/** Resolve `path` under `dataDir`, rejecting traversal and symlink escapes. */
+export function confinePath(
+  dataDir: string,
+  path: string,
+): { abs: string; rel: string } | { error: string } {
+  const root = existsSync(dataDir) ? realpathSync(dataDir) : resolve(dataDir);
+  const abs = resolve(root, path);
+  if (abs !== root && !abs.startsWith(root + sep)) {
+    return { error: "outside" };
+  }
+  if (existsSync(abs)) {
+    if (lstatSync(abs).isSymbolicLink()) return { error: "symlink" };
+    const real = realpathSync(abs);
+    if (real !== root && !real.startsWith(root + sep)) return { error: "outside" };
+  } else {
+    let parent = dirname(abs);
+    while (!existsSync(parent) && parent.startsWith(root)) {
+      parent = dirname(parent);
+    }
+    if (existsSync(parent)) {
+      if (lstatSync(parent).isSymbolicLink()) return { error: "symlink" };
+      const realParent = realpathSync(parent);
+      if (realParent !== root && !realParent.startsWith(root + sep)) return { error: "outside" };
+    }
+  }
+  return { abs, rel: relative(root, abs) };
 }
 
 /**

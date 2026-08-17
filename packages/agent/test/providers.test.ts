@@ -133,3 +133,20 @@ describe("CustomEndpointSource", () => {
     expect(source.isAuthError()).toBe(false);
   });
 });
+
+describe("GrokSubscriptionSource", () => {
+  it("treats HTTP 426 as an auth/config failure", async () => {
+    const { APICallError } = await import("@ai-sdk/provider");
+    const { GrokSubscriptionSource } = await import("../src/index.js");
+    const source = new GrokSubscriptionSource({
+      auth: { credentials: async () => ({ accessToken: "t" }) } as never,
+      model: "grok-4.6",
+    });
+    expect(
+      source.isAuthError(new APICallError({ message: "upgrade", statusCode: 426, url: "x" })),
+    ).toBe(true);
+    expect(
+      source.isAuthError(new APICallError({ message: "busy", statusCode: 503, url: "x" })),
+    ).toBe(false);
+  });
+});

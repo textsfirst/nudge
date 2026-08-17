@@ -95,7 +95,9 @@ export class GrokSubscriptionSource implements ModelSource {
     return (
       error instanceof SubscriptionAuthError ||
       (APICallError.isInstance(error) &&
-        (error.statusCode === 401 || error.statusCode === 403))
+        (error.statusCode === 401 ||
+          error.statusCode === 403 ||
+          error.statusCode === 426))
     );
   }
 }

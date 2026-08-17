@@ -8,6 +8,7 @@ import {
   isRecord,
   safeResponseText,
   saveTokenFile,
+  singleflight,
 } from "./oauth.js";
 
 /**
@@ -104,6 +105,10 @@ export class GrokAuthManager {
   }
 
   async credentials(): Promise<GrokCredentials> {
+    return singleflight(`grok:${this.#authFile}`, () => this.#credentials());
+  }
+
+  async #credentials(): Promise<GrokCredentials> {
     const stored = await this.#load();
     const shouldRefresh =
       effectiveExpiry(stored) <= Date.now() + this.#refreshLeewaySeconds * 1_000;

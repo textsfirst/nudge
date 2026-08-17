@@ -278,7 +278,11 @@ export async function createPhotonTransport(
           });
           continue;
         }
-        if (message.platform.toLowerCase() === "imessage" && sender === config.ownerHandle) {
+        if (
+          message.platform.toLowerCase() === "imessage" &&
+          sender === config.ownerHandle &&
+          !config.isDuplicate(message.id)
+        ) {
           config.rememberSpace(sender, space.id, message.platform);
           // Surface a read receipt a jittered beat after the text arrives —
           // "seen" comes before "typing" in the human rhythm. Best-effort,
@@ -356,7 +360,8 @@ interface ExtractedParts {
  * content is entirely unsupported yields undefined so the caller keeps the
  * existing warn-and-drop.
  */
-function extractParts(content: unknown): ExtractedParts | undefined {
+function extractParts(content: unknown, depth = 0): ExtractedParts | undefined {
+  if (depth > 8) return undefined;
   if (content === null || typeof content !== "object") return undefined;
   const item = content as Record<string, unknown>;
   switch (item.type) {
@@ -400,7 +405,7 @@ function extractParts(content: unknown): ExtractedParts | undefined {
       const media: InboundMedia[] = [];
       let supported = false;
       for (const sub of item.items) {
-        const parts = extractParts((sub as { content?: unknown } | null)?.content);
+        const parts = extractParts((sub as { content?: unknown } | null)?.content, depth + 1);
         if (!parts) continue;
         supported = true;
         if (parts.text.length > 0) texts.push(parts.text);
@@ -408,6 +413,8 @@ function extractParts(content: unknown): ExtractedParts | undefined {
       }
       return supported ? { text: texts.join("\n"), media } : undefined;
     }
+    case "reply":
+      return extractParts(item.content, depth + 1);
     default:
       return undefined;
   }

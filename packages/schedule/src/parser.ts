@@ -116,6 +116,12 @@ export function parseSchedule(markdown: string): ParseResult {
       );
       continue;
     }
+    if (check && when.kind === "once") {
+      errors.push(
+        `"${section.name}": a "check:" line cannot be used with a one-shot — watchers are recurring`,
+      );
+      continue;
+    }
 
     entries.push({
       id: entryId(section.name),
@@ -238,6 +244,17 @@ function validatedCron(pattern: string): WhenSpec {
 }
 
 function validatedOnce(pattern: string): void {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):00$/.exec(pattern);
+  if (!match) {
+    throw new Error(`invalid date "${pattern}"`);
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  if (utc.getUTCFullYear() !== year || utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) {
+    throw new Error(`invalid date "${pattern}"`);
+  }
   try {
     new Cron(pattern, { timezone: "UTC" });
   } catch (error) {

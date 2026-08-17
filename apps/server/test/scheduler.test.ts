@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger, NudgeAgent } from "@nudge/agent";
@@ -206,6 +206,33 @@ describe("Scheduler", () => {
     expect(runTask).toHaveBeenCalledOnce();
   });
 
+  it("does not run or complete a one-shot before a space is known", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nudge-scheduler-"));
+    const schedulePath = join(dir, "SCHEDULE.md");
+    writeFileSync(schedulePath, "## Passport\nwhen: 2026-08-10 09:00 once\nRenew the passport.\n");
+    const store = new NudgeStore(":memory:");
+    const runTask = vi.fn(async () => "remind you");
+    const scheduler = new Scheduler({
+      schedulePath,
+      ownerHandle: OWNER,
+      timeZone: "UTC",
+      store,
+      agent: { runTask, runAgentTask: async () => undefined } as unknown as NudgeAgent,
+      delivery: new DeliveryService(store, { sendToSpace: async () => undefined }, logger),
+      logger,
+      now: () => Date.UTC(2026, 7, 10, 12, 0, 0),
+    });
+    await scheduler.tick();
+    const id = parseSchedule(readFileSync(schedulePath, "utf8")).entries[0]!.id;
+    expect(runTask).not.toHaveBeenCalled();
+    expect(store.scheduleState(id).completed).toBe(false);
+
+    store.rememberSpace(OWNER, "space-1", "imessage");
+    await scheduler.tick();
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(store.scheduleState(id).completed).toBe(true);
+  });
+
   it("completes one-shot entries after firing, even late", async () => {
     const { scheduler, runTask, setNow } = harness(
       "## Passport\nwhen: 2026-08-10 09:00 once\nRenew the passport.",
@@ -309,6 +336,32 @@ describe("DeliveryService", () => {
     expect(sent[0]?.options?.skipChunks).toBe(2);
     expect(sent[0]?.options?.preamble).toBe("got cut off mid-text - here's the rest:");
     expect(store.openOutbound()).toHaveLength(0);
+  });
+
+  it("does not recover a send that is still in flight in this process", async () => {
+    const store = new NudgeStore(":memory:");
+    store.rememberSpace(OWNER, "space-1", "imessage");
+    let release!: () => void;
+    const calls: string[] = [];
+    const delivery = new DeliveryService(
+      store,
+      {
+        sendToSpace: async (_space, text) => {
+          calls.push(text);
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        },
+      },
+      logger,
+    );
+    const first = delivery.deliver(OWNER, "live", "reply");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await delivery.recover();
+    expect(calls).toEqual(["live"]);
+    release();
+    await first;
+    expect(calls).toEqual(["live"]);
   });
 
   it("returns false when no space is known for the handle", async () => {

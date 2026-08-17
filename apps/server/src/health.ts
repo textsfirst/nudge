@@ -102,6 +102,7 @@ export function buildConnectionProbes(input: {
   dataDir: string;
   chatGptAuthFile?: string;
   grokAuthFile?: string;
+  grokClientVersion?: string;
   fetch?: typeof globalThis.fetch;
 }): () => Promise<ProbeResult[]> {
   return async () => {
@@ -142,6 +143,7 @@ export function buildConnectionProbes(input: {
           new GrokAuthManager({
             authFile,
             ...(input.fetch ? { fetch: input.fetch } : {}),
+            ...(input.grokClientVersion ? { clientVersion: input.grokClientVersion } : {}),
           }).credentials(),
         ),
         brokenMessage:

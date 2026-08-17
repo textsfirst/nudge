@@ -539,6 +539,29 @@ describe("inbound media", () => {
     expect(batches[0]?.media[0]?.kind).toBe("file");
   });
 
+  it("does not remember a space for a duplicate delivery", async () => {
+    const rememberSpace = vi.fn();
+    const transport = await createPhotonTransport({
+      ...transportConfig(),
+      rememberSpace,
+      isDuplicate: (id) => id === "old",
+      debounceMs: 0,
+    });
+    const instance = spectrumInstances.at(-1)!;
+    await instance.emit({ ...fakeSpace(), id: "space-a" }, ownerMessage("old"));
+    await transport.flushInbound();
+    expect(rememberSpace).not.toHaveBeenCalled();
+  });
+
+  it("unwraps an iMessage inline reply to its inner text", async () => {
+    const { batches, warnings } = await deliverContents([
+      { type: "reply", content: { type: "text", text: "yes" }, target: { id: "orig" } },
+    ]);
+    expect(warnings).toBe(0);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]?.texts).toEqual(["yes"]);
+  });
+
   it("flattens a text-plus-attachment group in item order", async () => {
     const { batches } = await deliverContents([
       {

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
+import { APICallError } from "@ai-sdk/provider";
 import type { AgentRow, AttachmentRow, MessageRow, NudgeStore, SessionRow } from "@nudge/store";
 import {
   stepCountIs,
@@ -26,7 +27,7 @@ import { createLoopGuard } from "./loop.js";
 import type { MediaRef } from "./media.js";
 import { MemoryFiles } from "./memory.js";
 import { isContextOverflowError, SubscriptionAuthError } from "./providers/errors.js";
-import { truncateTail } from "./truncate.js";
+import { splitLines } from "./truncate.js";
 import { withStreamRetry, type StreamRetryOptions } from "./providers/retry.js";
 import type { McpServerRef } from "./mcp-config.js";
 import {
@@ -1056,39 +1057,53 @@ export class NudgeAgent {
   /**
    * One summarizer for folds and thread carryover. With a previous summary the
    * update prompt merges into it rather than re-summarizing it, so repeated
-   * folds don't erode early facts. Input is capped keeping the newest turns —
-   * the oldest are the ones already covered by the previous summary — so the
-   * summarization call itself can never overflow.
+   * folds don't erode early facts. Oversized folds are summarized in oldest-
+   * first chunks so the cursor never advances over turns the summarizer
+   * never saw.
    */
-  #summarizeText(input: {
+  async #summarizeText(input: {
     previousSummary: string | null;
     transcript: string;
     abortSignal?: AbortSignal;
   }): Promise<string> {
-    const capped = truncateTail(input.transcript, {
-      maxBytes: SUMMARIZER_INPUT_MAX_BYTES,
-      maxLines: Number.MAX_SAFE_INTEGER,
-    });
+    const chunks = chunkTranscript(input.transcript, SUMMARIZER_INPUT_MAX_BYTES);
+    let previous = input.previousSummary;
+    for (const [index, chunk] of chunks.entries()) {
+      previous = await this.#summarizeChunk({
+        previousSummary: previous,
+        transcript: chunk,
+        fresh: index === 0 && !input.previousSummary,
+        ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      });
+    }
+    if (!previous) throw new Error("The summarizer returned an empty summary");
+    return previous;
+  }
+
+  async #summarizeChunk(input: {
+    previousSummary: string | null;
+    transcript: string;
+    abortSignal?: AbortSignal;
+    fresh: boolean;
+  }): Promise<string> {
     const summarizer = this.#options.summarizer;
-    return this.#generate({
-      system: input.previousSummary ? UPDATE_SUMMARY_PROMPT : FRESH_SUMMARY_PROMPT,
+    const result = await this.#generate({
+      system: input.fresh ? FRESH_SUMMARY_PROMPT : UPDATE_SUMMARY_PROMPT,
       messages: [
         {
           role: "user",
           content:
             (input.previousSummary ? `Existing summary:\n${input.previousSummary}\n\n` : "") +
-            `New turns to fold in:\n${capped.truncated ? "[Oldest turns omitted to fit.]\n" : ""}` +
-            capped.text,
+            `New turns to fold in:\n${input.transcript}`,
         },
       ],
       ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       ...(summarizer?.model ? { modelOverride: summarizer.model } : {}),
       ...(summarizer?.modelOptions ? { modelOptions: summarizer.modelOptions } : {}),
-    }).then((result) => {
-      const text = result.text.trim();
-      if (!text) throw new Error("The summarizer returned an empty summary");
-      return text;
     });
+    const text = result.text.trim();
+    if (!text) throw new Error("The summarizer returned an empty summary");
+    return text;
   }
 
   async #generate(params: {
@@ -1204,9 +1219,12 @@ export class NudgeAgent {
           continue;
         }
         if (authFailure && !(error instanceof SubscriptionAuthError)) {
+          const status = APICallError.isInstance(error) ? error.statusCode : undefined;
           throw new SubscriptionAuthError(
-            `Authentication failed for ${source.id}. Reconnect it in the console ` +
-              `(Connections page) and try again.`,
+            status === 426
+              ? `The Grok CLI proxy rejected this client version (HTTP 426). Set provider.grok.client_version on the Settings page.`
+              : `Authentication failed for ${source.id}. Reconnect it in the console ` +
+                `(Connections page) and try again.`,
             { cause: error },
           );
         }
@@ -1262,6 +1280,26 @@ export class NudgeAgent {
     });
     return run;
   }
+}
+
+function chunkTranscript(text: string, maxBytes: number): string[] {
+  const lines = splitLines(text);
+  if (lines.length === 0) return [text];
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    const extra = Buffer.byteLength(line, "utf8") + (current.length > 0 ? 1 : 0);
+    if (current.length > 0 && bytes + extra > maxBytes) {
+      chunks.push(current.join("\n"));
+      current = [];
+      bytes = 0;
+    }
+    current.push(line);
+    bytes += Buffer.byteLength(line, "utf8") + (current.length > 1 ? 1 : 0);
+  }
+  if (current.length > 0) chunks.push(current.join("\n"));
+  return chunks;
 }
 
 /**

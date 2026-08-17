@@ -231,7 +231,12 @@ async function main(): Promise<void> {
         ? { chatGptAuthFile: config.provider.chatGptAuthFile }
         : {}),
       ...(config.provider.selected === "grok-subscription"
-        ? { grokAuthFile: config.provider.grokAuthFile }
+        ? {
+            grokAuthFile: config.provider.grokAuthFile,
+            ...(config.provider.grokClientVersion
+              ? { grokClientVersion: config.provider.grokClientVersion }
+              : {}),
+          }
         : {}),
     }),
   });

@@ -21,13 +21,24 @@ export const KNOWN_SECRETS: ReadonlyArray<Omit<SecretInfo, "set">> = [
 
 const LINE_PATTERN = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
 
+function renderEnvValue(value: string): string {
+  if (/^[A-Za-z0-9_@.:/+=-]*$/.test(value)) return value;
+  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes('"')) return `"${value}"`;
+  throw new Error("Secret values cannot contain both single and double quotes.");
+}
+
 export function readEnvKeys(path: string): Map<string, string> {
   const values = new Map<string, string>();
   if (!existsSync(path)) return values;
   for (const line of readFileSync(path, "utf8").split("\n")) {
     const match = LINE_PATTERN.exec(line);
     if (!match?.[1]) continue;
-    const raw = line.slice(line.indexOf("=") + 1).trim();
+    let raw = line.slice(line.indexOf("=") + 1).trim();
+    if (!(raw.startsWith('"') || raw.startsWith("'"))) {
+      const comment = raw.search(/\s+#/);
+      if (comment >= 0) raw = raw.slice(0, comment).trimEnd();
+    }
     values.set(match[1], raw.replace(/^(["'])(.*)\1$/, "$2"));
   }
   return values;
@@ -53,11 +64,12 @@ export function setEnvValue(path: string, key: string, value: string): void {
   if (value.includes("\n")) {
     throw new Error("Secret values cannot contain newlines.");
   }
-  const rendered = /^[A-Za-z0-9_@.:/+=-]*$/.test(value)
-    ? value
-    : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  const rendered = renderEnvValue(value);
   const lines = existsSync(path) ? readFileSync(path, "utf8").split("\n") : [];
-  const index = lines.findIndex((line) => LINE_PATTERN.exec(line)?.[1] === key);
+  let index = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (LINE_PATTERN.exec(lines[i]!)?.[1] === key) index = i;
+  }
   if (index >= 0) {
     lines[index] = `${key}=${rendered}`;
   } else {
