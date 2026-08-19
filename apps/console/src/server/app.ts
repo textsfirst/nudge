@@ -10,6 +10,7 @@ import {
   type Settings,
 } from "@nudge/server/config";
 import { Elysia } from "elysia";
+import { ConsoleAuth } from "./auth.js";
 import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./connections.js";
 import { ConsoleContext, type ConsoleOptions } from "./context.js";
 import { deleteEnvValue, listSecrets, setEnvValue } from "./env-file.js";
@@ -45,21 +46,124 @@ const INLINE_SAFE_MIME = new Set([
   "audio/x-m4a",
 ]);
 
-/**
- * The console API. Everything is owner-facing and assumes a localhost bind —
- * there is deliberately no auth layer; see index.ts.
- */
+export interface ConsoleSecurityOptions {
+  /** Exact browser origins allowed to reach the API. */
+  allowedOrigins?: string[] | undefined;
+  /** Prebuilt auth manager for startup and focused tests. */
+  auth?: ConsoleAuth | undefined;
+  /** Test-only convenience; production startup persists its generated capability. */
+  authCapability?: string | undefined;
+  secureCookies?: boolean | undefined;
+  /** Share lifecycle ownership with the standalone server. */
+  context?: ConsoleContext | undefined;
+}
+
+/** The authenticated, owner-facing console API. */
 export function createConsoleApp(
-  options: ConsoleOptions & ConnectionsOptions & { adapter?: never } = {},
+  options: ConsoleOptions & ConnectionsOptions & ConsoleSecurityOptions & { adapter?: never } = {},
 ) {
-  const context = new ConsoleContext(options);
+  const context = options.context ?? new ConsoleContext(options);
   const connections = new ConnectionsService(context, options);
+  const auth =
+    options.auth ??
+    new ConsoleAuth(context.dataDir(), {
+      ...(options.authCapability ? { capability: options.authCapability } : {}),
+      ...(options.now ? { now: options.now } : {}),
+      secureCookies: options.secureCookies ?? false,
+    });
+  const allowedOrigins = new Set(
+    options.allowedOrigins ?? ["http://localhost:3100", "http://127.0.0.1:3100", "http://[::1]:3100"],
+  );
+  const allowedHosts = new Set([...allowedOrigins].map((origin) => new URL(origin).host));
+  const now = options.now ?? Date.now;
+  let failedLogins = 0;
+  let loginBlockedUntil = 0;
 
   return (
     new Elysia()
+      .onRequest(({ request, set }) => {
+        set.headers["cache-control"] = "no-store";
+        set.headers["content-security-policy"] =
+          "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+        set.headers["referrer-policy"] = "no-referrer";
+        set.headers["x-content-type-options"] = "nosniff";
+        set.headers["x-frame-options"] = "DENY";
+
+        const url = new URL(request.url);
+        const host = request.headers.get("host") ?? url.host;
+        if (!allowedHosts.has(host)) {
+          set.status = 421;
+          return { error: "Unrecognized console host." };
+        }
+        if (
+          request.headers.get("sec-fetch-site") === "cross-site" &&
+          url.pathname !== "/api/connections/google/callback"
+        ) {
+          set.status = 403;
+          return { error: "Cross-site console requests are not allowed." };
+        }
+        if (isUnsafeMethod(request.method)) {
+          const origin = request.headers.get("origin");
+          if (!origin || !allowedOrigins.has(origin)) {
+            set.status = 403;
+            return { error: "This request did not come from an allowed console origin." };
+          }
+          if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+            set.status = 415;
+            return { error: "Console mutations require application/json." };
+          }
+        }
+      })
+      .onBeforeHandle(({ request, set }) => {
+        const pathname = new URL(request.url).pathname;
+        if (pathname === "/api/auth/status" || pathname === "/api/auth/login") return;
+        const session = auth.session(request);
+        if (!session) {
+          set.status = 401;
+          return { error: "Console authentication required." };
+        }
+        if (isUnsafeMethod(request.method) && !auth.verifyCsrf(session, request.headers.get("x-nudge-csrf"))) {
+          set.status = 403;
+          return { error: "Invalid or missing CSRF token." };
+        }
+      })
       .onError(({ error, set }) => {
         set.status = error instanceof ApiProblem ? error.status : 500;
         return { error: error instanceof Error ? error.message : String(error) };
+      })
+      .onStop(() => context.close())
+
+      // -- authentication --------------------------------------------------
+      .get("/api/auth/status", ({ request }) => {
+        const session = auth.session(request);
+        return session
+          ? { authenticated: true, csrfToken: auth.csrfToken(session) }
+          : { authenticated: false, csrfToken: null };
+      })
+      .post("/api/auth/login", ({ body, set }) => {
+        if (now() < loginBlockedUntil) {
+          set.status = 429;
+          return { error: "Too many failed attempts. Wait 30 seconds and try again." };
+        }
+        const capability = (body as Record<string, unknown> | null)?.capability;
+        if (typeof capability !== "string" || !auth.verifyCapability(capability)) {
+          failedLogins += 1;
+          if (failedLogins >= 10) {
+            failedLogins = 0;
+            loginBlockedUntil = now() + 30_000;
+          }
+          set.status = 401;
+          return { error: "That console access code is not valid." };
+        }
+        failedLogins = 0;
+        loginBlockedUntil = 0;
+        const issued = auth.issueSession();
+        set.headers["set-cookie"] = issued.cookie;
+        return { authenticated: true, csrfToken: issued.csrfToken };
+      })
+      .post("/api/auth/logout", ({ set }) => {
+        set.headers["set-cookie"] = auth.clearCookie();
+        return { authenticated: false };
       })
 
       // -- status ----------------------------------------------------------
@@ -276,12 +380,18 @@ export function createConsoleApp(
       .put("/api/connections/google/client", ({ body }) =>
         connections.saveClient((body ?? {}) as Record<string, unknown>),
       )
-      .post("/api/connections/google/start", ({ body }) =>
-        connections.startGoogle((body ?? {}) as Record<string, unknown>),
-      )
-      .get("/api/connections/google/callback", ({ query }) =>
-        connections.googleCallback(query as Record<string, string | undefined>),
-      )
+      .post("/api/connections/google/start", ({ body, request }) => {
+        const session = auth.session(request)!;
+        return connections.startGoogle(
+          (body ?? {}) as Record<string, unknown>,
+          request.headers.get("origin")!,
+          session.id,
+        );
+      })
+      .get("/api/connections/google/callback", ({ query, request }) => {
+        const session = auth.session(request)!;
+        return connections.googleCallback(query as Record<string, string | undefined>, session.id);
+      })
       .delete("/api/connections/google/:label", async ({ params, set }) => {
         if (!(await connections.disconnectGoogle(params.label))) {
           set.status = 404;
@@ -533,6 +643,10 @@ function stripLeadingTag(content: string): string {
   return content.replace(/^\[[^\]]*\]\n?/, "").trim();
 }
 
+
+function isUnsafeMethod(method: string): boolean {
+  return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : min;

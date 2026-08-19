@@ -32,6 +32,9 @@ const MESSAGE_OVERHEAD_TOKENS = 4;
  */
 const MODEL_WINDOWS: ReadonlyArray<readonly [RegExp, number]> = [
   [/^gpt-4\.1/, 1_000_000],
+  // The gpt-5.6 family (sol/terra/luna) accepts 1.05M-token inputs; 272k is
+  // only a long-context pricing breakpoint there, not a cap.
+  [/^gpt-5\.6/, 1_050_000],
   [/^gpt-5/, 272_000],
   [/^o[34]/, 200_000],
   [/^gpt-4o/, 128_000],

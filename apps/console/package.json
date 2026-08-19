@@ -2,14 +2,16 @@
   "name": "@nudge/console",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web -c magenta,cyan \"pnpm dev:api\" \"pnpm dev:web\"",
+    "dev": "concurrently -k -n api,web -c magenta,cyan \"CONSOLE_UI_ORIGIN=http://localhost:5174 pnpm dev:api\" \"pnpm dev:web\"",
     "dev:api": "tsx watch --conditions=development src/server/index.ts",
     "dev:web": "vite",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "start": "pnpm --filter @nudge/console... build && node dist/server/index.js",
+    "start": "node dist/server/index.js",
+    "auth": "tsx --conditions=development src/server/auth-cli.ts",
     "test": "vitest run"
   },
   "dependencies": {

@@ -167,6 +167,59 @@ describe("loadConfig", () => {
     expect(defaults.provider.grokModel).toBe("grok-4.6");
     expect(defaults.provider.grokClientVersion).toBeUndefined();
   });
+
+  it("defaults the compaction model per provider when unset", () => {
+    const chatgpt = loadConfig(SECRETS, settings(), boot);
+    expect(chatgpt.compactionModel).toBe("gpt-5.6-luna");
+
+    const grok = loadConfig(SECRETS, settings({ "provider.selected": "grok-subscription" }), boot);
+    expect(grok.compactionModel).toBe("grok-4.6");
+
+    // Luna is public API; only custom falls back to the reply model.
+    const openai = loadConfig(
+      { ...SECRETS, OPENAI_API_KEY: "sk-test" },
+      settings({ "provider.selected": "openai-api" }),
+      boot,
+    );
+    expect(openai.compactionModel).toBe("gpt-5.6-luna");
+
+    const custom = loadConfig(
+      SECRETS,
+      settings({
+        "provider.selected": "custom",
+        "provider.custom.base_url": "http://localhost:11434/v1",
+        "provider.custom.model": "llama3.3:70b",
+      }),
+      boot,
+    );
+    expect(custom.compactionModel).toBeUndefined();
+
+    // An explicit setting always wins over the provider default.
+    const pinned = loadConfig(
+      SECRETS,
+      settings({ "agent.compaction_model": "gpt-5.6-sol" }),
+      boot,
+    );
+    expect(pinned.compactionModel).toBe("gpt-5.6-sol");
+  });
+
+  it("sends the priority tier only on the openai-api provider", () => {
+    // compaction_fast_mode defaults on, but only openai-api sells service tiers.
+    const chatgpt = loadConfig(SECRETS, settings({ "model.fast_mode": true }), boot);
+    expect(chatgpt.modelOptions).toEqual({ reasoningEffort: "high" });
+    expect(chatgpt.compactionModelOptions).toEqual({ reasoningEffort: "high" });
+
+    const openai = loadConfig(
+      { ...SECRETS, OPENAI_API_KEY: "sk-test" },
+      settings({ "provider.selected": "openai-api", "model.fast_mode": true }),
+      boot,
+    );
+    expect(openai.modelOptions).toEqual({ reasoningEffort: "high", serviceTier: "priority" });
+    expect(openai.compactionModelOptions).toEqual({
+      reasoningEffort: "high",
+      serviceTier: "priority",
+    });
+  });
 });
 
 describe("secret metadata", () => {

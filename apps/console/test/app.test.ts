@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { NudgeStore } from "@nudge/store";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
+import { json, secureTestOptions } from "./auth-helper.js";
 
 let root: string | undefined;
 
@@ -24,6 +25,7 @@ function makeWorkspace(options: { env?: string } = {}): string {
     "---\nname: demo\ndescription: a demo\n---\nBody.\n",
   );
   writeFileSync(join(root, ".data", "chatgpt-auth.json"), "{}");
+  writeFileSync(join(root, ".data", "console-auth.json"), '{"capability":"secret"}');
   return root;
 }
 
@@ -33,17 +35,7 @@ afterEach(() => {
 });
 
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace() });
-}
-
-async function json(app: ConsoleApp, path: string, init?: RequestInit): Promise<{ status: number; body: any }> {
-  const response = await app.handle(
-    new Request(`http://console.local${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...init?.headers },
-    }),
-  );
-  return { status: response.status, body: await response.json() };
+  return createConsoleApp({ root: makeWorkspace(), ...secureTestOptions });
 }
 
 describe("console API", () => {
@@ -214,9 +206,11 @@ describe("console API", () => {
     expect(paths).toContain("SYSTEM.md");
     expect(paths).toContain("skills/demo/SKILL.md");
     expect(paths).not.toContain("chatgpt-auth.json");
+    expect(paths).not.toContain("console-auth.json");
 
     const hidden = await json(application, "/api/files/content?path=chatgpt-auth.json");
     expect(hidden.status).toBe(403);
+    expect((await json(application, "/api/files/content?path=console-auth.json")).status).toBe(403);
     const outside = await json(application, "/api/files/content?path=../.env");
     expect(outside.status).toBe(400);
   });

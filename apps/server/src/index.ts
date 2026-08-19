@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { join } from "node:path";
 import {
   buildImageCaptioner,
@@ -35,6 +35,7 @@ import { seedMcpSkill } from "./mcp/skill.js";
 import { createReplyHandler } from "./reply.js";
 import { buildCheckRunner, Scheduler } from "./scheduler.js";
 import { createSystemFileReader } from "./system-file.js";
+import { collectStartupIssues, formatStartupIssues } from "./startup.js";
 
 function ensureDataReadme(dataDir: string, logger: ReturnType<typeof createLogger>): void {
   mkdirSync(dataDir, { recursive: true });
@@ -57,10 +58,10 @@ async function main(): Promise<void> {
   const logger = createLogger(boot.logLevel);
   const store = new NudgeStore(boot.dbPath);
   const settings = settingsFromOverrides(store.settingsOverrides());
-  if (!settings.owner_handle) {
-    throw new Error(
-      "owner_handle is not set — open the console's Settings page, set your handle, then start again.",
-    );
+  const startupIssues = collectStartupIssues(process.env, settings);
+  if (startupIssues.length > 0) {
+    store.close();
+    throw new Error(formatStartupIssues(startupIssues));
   }
   const config = loadConfig(process.env, settings, boot);
   ensureDataReadme(config.dataDir, logger);
@@ -141,7 +142,8 @@ async function main(): Promise<void> {
       keepRecentTokens: config.keepRecentTokens,
     },
     summarizer: {
-      model: config.compactionModel,
+      // Absent for openai-api / custom: the summarizer runs on the reply model.
+      ...(config.compactionModel ? { model: config.compactionModel } : {}),
       modelOptions: config.compactionModelOptions,
     },
     maxToolSteps: config.maxToolSteps,
@@ -241,16 +243,26 @@ async function main(): Promise<void> {
   });
 
   const server = createServer(createHttpApp(providerHealth));
-  server.listen(config.port, () => {
-    logger.info("Nudge is listening", {
-      port: config.port,
-      sources: sources.map((source) => source.id),
-      inbound: "photon-stream",
-      timeZone: config.timeZone,
-      providerHealth,
-    });
+  try {
+    await listen(server, config.port);
+  } catch (error) {
+    await transport.stop();
+    store.close();
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EADDRINUSE") {
+      throw new Error(
+        `Port ${config.port} is already in use. Stop the other Nudge process or set PORT=<port> in .env.`,
+      );
+    }
+    throw error;
+  }
+  logger.info("Nudge is listening", {
+    port: config.port,
+    sources: sources.map((source) => source.id),
+    inbound: "photon-stream",
+    timeZone: config.timeZone,
+    providerHealth,
   });
-
   const health = new ConnectionHealthMonitor({
     store,
     delivery,
@@ -273,9 +285,29 @@ async function main(): Promise<void> {
   });
 
   // Redeliver anything the last process died holding, then start the clocks.
-  await delivery.recover();
-  scheduler.start();
-  health.start();
+  try {
+    await delivery.recover();
+    scheduler.start();
+    health.start();
+  } catch (error) {
+    health.stop();
+    scheduler.stop();
+    await Promise.all([closeServer(server), transport.stop()]);
+    store.close();
+    throw error;
+  }
+
+  console.log("\nNudge is ready");
+  console.log(`  Owner:    ${config.ownerHandle}`);
+  console.log(`  Provider: ${config.provider.selected}`);
+  console.log(`  Data:     ${config.dataDir}`);
+  console.log(`  Health:   http://localhost:${config.port}/healthz`);
+  if (!providerHealth.ok) {
+    console.log(
+      "  Status:   running, but provider authentication needs attention in Console → Connections",
+    );
+  }
+  console.log("  Stop:     Ctrl+C\n");
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -284,21 +316,43 @@ async function main(): Promise<void> {
     logger.info("Shutting down", { signal });
     health.stop();
     scheduler.stop();
-    server.close();
-    await transport.stop();
+    await Promise.all([closeServer(server), transport.stop()]);
     store.close();
   };
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  const handleSignal = (signal: string) => {
+    void shutdown(signal).catch((error: unknown) => {
+      logger.error("Shutdown failed", {
+        signal,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      process.exitCode = 1;
+    });
+  };
+  process.once("SIGINT", () => handleSignal("SIGINT"));
+  process.once("SIGTERM", () => handleSignal("SIGTERM"));
+}
+
+function listen(server: Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(port, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+      else resolve();
+    });
+  });
 }
 
 main().catch((error: unknown) => {
-  console.error(
-    JSON.stringify({
-      level: "error",
-      message: "Nudge failed to start",
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
+  console.error(`\nNudge could not start.\n\n${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

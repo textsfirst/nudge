@@ -52,6 +52,7 @@ const sqliteFiles = new Set([
   "nudge.db-journal",
   "nudge.db-shm",
   "nudge.db-wal",
+  "console-auth.json",
 ]);
 
 await cp(source, destination, {

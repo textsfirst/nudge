@@ -99,6 +99,7 @@ describe("FileWorkspace", () => {
   it("blocks traversal, secrets, and runtime state", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "chatgpt-auth.json"), "{\"secret\":true}");
+    writeFileSync(join(dir, "console-auth.json"), "{\"capability\":\"secret\"}");
     writeFileSync(join(dir, "nudge.db"), "sqlite");
     mkdirSync(join(dir, "google", "work"), { recursive: true });
     writeFileSync(join(dir, "google", "work", "credentials.json"), "{\"refresh_token\":\"r\"}");
@@ -106,6 +107,7 @@ describe("FileWorkspace", () => {
 
     expect(workspace.read("../outside.md")).toContain("outside your data directory");
     expect(workspace.read("chatgpt-auth.json")).toContain("not readable");
+    expect(workspace.read("console-auth.json")).toContain("not readable");
     expect(workspace.read("google/work/credentials.json")).toContain("not readable");
     expect(workspace.write("google/notes.md", "x")).toContain("not writable");
     expect(workspace.write("nudge.db", "x")).toContain("not writable");

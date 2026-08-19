@@ -71,6 +71,8 @@ describe("estimateTokens", () => {
 
 describe("contextWindowFor", () => {
   it("resolves known model families to their input caps", () => {
+    expect(contextWindowFor("gpt-5.6-luna")).toBe(1_050_000);
+    expect(contextWindowFor("gpt-5.6-sol")).toBe(1_050_000);
     expect(contextWindowFor("gpt-5.4-mini")).toBe(272_000);
     expect(contextWindowFor("gpt-5-mini")).toBe(272_000);
     expect(contextWindowFor("gpt-4.1")).toBe(1_000_000);

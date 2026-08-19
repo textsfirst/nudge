@@ -1,0 +1,181 @@
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createConsoleApp } from "../src/server/app.js";
+import { ConsoleAuth, rotateConsoleCapability } from "../src/server/auth.js";
+import { TEST_CAPABILITY, TEST_ORIGIN } from "./auth-helper.js";
+
+let root: string | undefined;
+
+function workspace(): string {
+  root = mkdtempSync(join(tmpdir(), "console-auth-"));
+  writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
+  writeFileSync(join(root, ".env"), "PORT=59983\n");
+  mkdirSync(join(root, ".data"), { recursive: true });
+  return root;
+}
+
+afterEach(() => {
+  if (root) rmSync(root, { recursive: true, force: true });
+  root = undefined;
+});
+
+function request(path: string, init?: RequestInit, origin = TEST_ORIGIN): Request {
+  return new Request(`${origin}${path}`, {
+    ...init,
+    headers: {
+      ...(init?.method && init.method !== "GET"
+        ? { "Content-Type": "application/json", Origin: origin }
+        : {}),
+      ...init?.headers,
+    },
+  });
+}
+
+async function login(app: ReturnType<typeof createConsoleApp>, capability = TEST_CAPABILITY) {
+  const response = await app.handle(
+    request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ capability }),
+    }),
+  );
+  const body = (await response.json()) as { csrfToken?: string; error?: string };
+  return {
+    response,
+    body,
+    cookie: response.headers.get("set-cookie")?.split(";", 1)[0] ?? "",
+  };
+}
+
+describe("console authentication", () => {
+  it("generates and persists a mode-0600 capability", () => {
+    const dataDir = join(workspace(), ".data");
+    const first = new ConsoleAuth(dataDir);
+    expect(first.created).toBe(true);
+    expect(first.revealCapability()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(statSync(first.file).mode & 0o777).toBe(0o600);
+
+    const second = new ConsoleAuth(dataDir);
+    expect(second.created).toBe(false);
+    expect(second.revealCapability()).toBe(first.revealCapability());
+  });
+
+  it("rotates the capability and invalidates sessions after reload", () => {
+    const dataDir = join(workspace(), ".data");
+    const before = new ConsoleAuth(dataDir);
+    const session = before.issueSession();
+    const rotated = rotateConsoleCapability(dataDir);
+    expect(rotated).not.toBe(before.revealCapability());
+
+    const after = new ConsoleAuth(dataDir);
+    const authenticated = after.session(
+      new Request(TEST_ORIGIN, { headers: { Cookie: session.cookie.split(";", 1)[0]! } }),
+    );
+    expect(authenticated).toBeNull();
+  });
+
+  it("requires a valid login and sets a hardened session cookie", async () => {
+    const app = createConsoleApp({
+      root: workspace(),
+      allowedOrigins: [TEST_ORIGIN],
+      authCapability: TEST_CAPABILITY,
+    });
+
+    const unauthenticated = await app.handle(request("/api/settings"));
+    expect(unauthenticated.status).toBe(401);
+
+    const wrong = await login(app, "B".repeat(43));
+    expect(wrong.response.status).toBe(401);
+    expect(wrong.body.error).not.toContain(TEST_CAPABILITY);
+
+    const correct = await login(app);
+    expect(correct.response.status).toBe(200);
+    expect(correct.body.csrfToken).toMatch(/^[A-Za-z0-9_-]+$/);
+    const setCookie = correct.response.headers.get("set-cookie")!;
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Lax");
+    expect(setCookie).toContain("Path=/");
+    expect(setCookie).not.toContain(TEST_CAPABILITY);
+
+    const status = await app.handle(
+      request("/api/auth/status", { headers: { Cookie: correct.cookie } }),
+    );
+    expect(await status.json()).toMatchObject({ authenticated: true });
+  });
+
+  it("rejects DNS-rebinding hosts and cross-site browser requests", async () => {
+    const app = createConsoleApp({
+      root: workspace(),
+      allowedOrigins: [TEST_ORIGIN],
+      authCapability: TEST_CAPABILITY,
+    });
+    const rebound = await app.handle(new Request("http://attacker.example/api/auth/status"));
+    expect(rebound.status).toBe(421);
+
+    const crossSite = await app.handle(
+      request("/api/auth/status", { headers: { "Sec-Fetch-Site": "cross-site" } }),
+    );
+    expect(crossSite.status).toBe(403);
+  });
+
+  it("requires an allowed origin, JSON, and CSRF for mutations", async () => {
+    const app = createConsoleApp({
+      root: workspace(),
+      allowedOrigins: [TEST_ORIGIN],
+      authCapability: TEST_CAPABILITY,
+    });
+    const authenticated = await login(app);
+
+    const missingCsrf = await app.handle(
+      request("/api/settings", {
+        method: "PUT",
+        headers: { Cookie: authenticated.cookie },
+        body: JSON.stringify({ settings: {} }),
+      }),
+    );
+    expect(missingCsrf.status).toBe(403);
+
+    const evilOrigin = await app.handle(
+      new Request(`${TEST_ORIGIN}/api/settings`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://evil.example",
+          Cookie: authenticated.cookie,
+          "X-Nudge-CSRF": authenticated.body.csrfToken!,
+        },
+        body: JSON.stringify({ settings: {} }),
+      }),
+    );
+    expect(evilOrigin.status).toBe(403);
+
+    const form = await app.handle(
+      new Request(`${TEST_ORIGIN}/api/settings`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Origin: TEST_ORIGIN,
+          Cookie: authenticated.cookie,
+          "X-Nudge-CSRF": authenticated.body.csrfToken!,
+        },
+        body: "settings=x",
+      }),
+    );
+    expect(form.status).toBe(415);
+
+    const accepted = await app.handle(
+      request("/api/settings", {
+        method: "PUT",
+        headers: {
+          Cookie: authenticated.cookie,
+          "X-Nudge-CSRF": authenticated.body.csrfToken!,
+        },
+        body: JSON.stringify({ settings: {} }),
+      }),
+    );
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get("x-frame-options")).toBe("DENY");
+    expect(accepted.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+  });
+});

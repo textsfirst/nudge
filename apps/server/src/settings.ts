@@ -26,7 +26,7 @@ export const settingsSchema = z.object({
         .default("chatgpt-subscription"),
       chatgpt: z
         .object({
-          model: z.string().min(1).default("gpt-5.4-mini"),
+          model: z.string().min(1).default("gpt-5.6-sol"),
           auth_file: z.string().min(1).default(".data/chatgpt-auth.json"),
         })
         .prefault({}),
@@ -39,7 +39,7 @@ export const settingsSchema = z.object({
         .prefault({}),
       openai: z
         .object({
-          model: z.string().min(1).default("gpt-5-mini"),
+          model: z.string().min(1).default("gpt-5.6-sol"),
         })
         .prefault({}),
       custom: z
@@ -53,7 +53,7 @@ export const settingsSchema = z.object({
     .prefault({}),
   model: z
     .object({
-      reasoning_effort: z.enum(REASONING_EFFORTS).optional(),
+      reasoning_effort: z.enum(REASONING_EFFORTS).default("high"),
       fast_mode: z.boolean().default(false),
     })
     .prefault({}),
@@ -106,8 +106,10 @@ export const settingsSchema = z.object({
       context_window_tokens: z.number().int().min(0).max(2_000_000).default(0),
       compact_at_percent: z.number().min(20).max(95).default(80),
       keep_recent_tokens: z.number().int().min(1_000).max(100_000).default(20_000),
-      // The dedicated summarizer: same provider and auth as replies, its own model.
-      compaction_model: z.string().min(1).default("gpt-5.6-luna"),
+      // The dedicated summarizer: same provider and auth as replies. Empty
+      // picks the provider default (config.ts): gpt-5.6-luna on the OpenAI
+      // providers, grok-4.6 on Grok, the reply model on custom.
+      compaction_model: z.string().min(1).optional(),
       compaction_reasoning_effort: z.enum(REASONING_EFFORTS).default("high"),
       compaction_fast_mode: z.boolean().default(true),
     })
@@ -296,15 +298,14 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "model.reasoning_effort",
         label: "Reasoning effort",
         control: "select",
-        optional: true,
         options: [...REASONING_EFFORTS],
-        help: "Reasoning level for model calls. Empty uses the model's default.",
+        help: "Reasoning level for model calls.",
       },
       {
         path: "model.fast_mode",
         label: "Fast mode",
         control: "boolean",
-        help: "Route model calls through the priority service tier (faster output).",
+        help: "Route model calls through the priority service tier (faster output). Only the openai-api provider supports service tiers; ignored elsewhere.",
       },
     ],
   },
@@ -490,7 +491,9 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "agent.compaction_model",
         label: "Compaction model",
         control: "text",
-        help: "Model that writes compaction and carryover summaries, on the same provider and auth as replies. For the grok-subscription or custom providers, pick a model that provider serves.",
+        optional: true,
+        placeholder: "provider default",
+        help: "Model that writes compaction and carryover summaries, on the same provider and auth as replies. Empty picks the provider default: gpt-5.6-luna on chatgpt-subscription and openai-api, grok-4.6 on grok-subscription, the reply model on custom.",
       },
       {
         path: "agent.compaction_reasoning_effort",
@@ -503,7 +506,7 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "agent.compaction_fast_mode",
         label: "Compaction fast mode",
         control: "boolean",
-        help: "Run summary calls on the priority service tier so folds don't delay replies.",
+        help: "Run summary calls on the priority service tier so folds don't delay replies. Only applies on the openai-api provider.",
       },
     ],
   },

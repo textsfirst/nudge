@@ -3,6 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
+import {
+  authenticatedRequest,
+  json,
+  secureTestOptions,
+  TEST_CAPABILITY,
+  TEST_ORIGIN,
+} from "./auth-helper.js";
 
 let root: string | undefined;
 
@@ -78,21 +85,7 @@ function fetchStub(): typeof fetch {
 }
 
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace(), fetch: fetchStub() });
-}
-
-async function json(
-  application: ConsoleApp,
-  path: string,
-  init?: RequestInit,
-): Promise<{ status: number; body: any }> {
-  const response = await application.handle(
-    new Request(`http://console.local${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...init?.headers },
-    }),
-  );
-  return { status: response.status, body: await response.json() };
+  return createConsoleApp({ root: makeWorkspace(), fetch: fetchStub(), ...secureTestOptions });
 }
 
 describe("connections API", () => {
@@ -111,7 +104,6 @@ describe("connections API", () => {
       method: "POST",
       body: JSON.stringify({
         label: "work",
-        origin: "http://console.local",
         services: [{ id: "gmail", access: "full" }],
       }),
     });
@@ -133,23 +125,22 @@ describe("connections API", () => {
       method: "POST",
       body: JSON.stringify({
         label: "work",
-        origin: "http://console.local",
         services: [{ id: "gmail", access: "full" }, { id: "calendar", access: "readonly" }],
       }),
     });
     expect(started.status).toBe(200);
     const authUrl = new URL(started.body.authUrl);
     expect(authUrl.searchParams.get("redirect_uri")).toBe(
-      "http://console.local/api/connections/google/callback",
+      `${TEST_ORIGIN}/api/connections/google/callback`,
     );
     expect(authUrl.searchParams.get("scope")).toContain("gmail.modify");
     expect(authUrl.searchParams.get("scope")).toContain("calendar.readonly");
 
     const state = authUrl.searchParams.get("state")!;
-    const callback = await application.handle(
-      new Request(
-        `http://console.local/api/connections/google/callback?state=${state}&code=c0de`,
-      ),
+    const callback = await authenticatedRequest(
+      application,
+      `/api/connections/google/callback?state=${state}&code=c0de`,
+      { headers: { "Sec-Fetch-Site": "cross-site" } },
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/connections?connected=work");
@@ -191,7 +182,6 @@ describe("connections API", () => {
       method: "POST",
       body: JSON.stringify({
         label: "Not A Slug",
-        origin: "http://console.local",
         services: [{ id: "gmail", access: "full" }],
       }),
     });
@@ -201,17 +191,58 @@ describe("connections API", () => {
       method: "POST",
       body: JSON.stringify({
         label: "work",
-        origin: "http://console.local",
         services: [{ id: "minesweeper", access: "full" }],
       }),
     });
     expect(badService.status).toBe(422);
 
-    const stale = await application.handle(
-      new Request("http://console.local/api/connections/google/callback?state=unknown&code=c"),
+    const stale = await authenticatedRequest(
+      application,
+      "/api/connections/google/callback?state=unknown&code=c",
+      { headers: { "Sec-Fetch-Site": "cross-site" } },
     );
     expect(stale.status).toBe(302);
     expect(stale.headers.get("location")).toContain("error=");
+  });
+
+  it("binds a Google OAuth state to the session that started it", async () => {
+    const application = app();
+    await json(application, "/api/connections/google/client", {
+      method: "PUT",
+      body: JSON.stringify({ client_id: "cid", client_secret: "cs" }),
+    });
+    const started = await json(application, "/api/connections/google/start", {
+      method: "POST",
+      body: JSON.stringify({
+        label: "work",
+        services: [{ id: "gmail", access: "full" }],
+      }),
+    });
+    const state = new URL(started.body.authUrl).searchParams.get("state")!;
+
+    const secondLogin = await application.handle(
+      new Request(`${TEST_ORIGIN}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: TEST_ORIGIN },
+        body: JSON.stringify({ capability: TEST_CAPABILITY }),
+      }),
+    );
+    const secondCookie = secondLogin.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const callback = await application.handle(
+      new Request(`${TEST_ORIGIN}/api/connections/google/callback?state=${state}&code=c0de`, {
+        headers: { Cookie: secondCookie, "Sec-Fetch-Site": "cross-site" },
+      }),
+    );
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toContain("error=");
+    expect(existsSync(join(root!, ".data", "google", "work", "credentials.json"))).toBe(false);
+
+    const correctSession = await authenticatedRequest(
+      application,
+      `/api/connections/google/callback?state=${state}&code=c0de`,
+      { headers: { "Sec-Fetch-Site": "cross-site" } },
+    );
+    expect(correctSession.headers.get("location")).toBe("/connections?connected=work");
   });
 
   it("runs the ChatGPT device flow and writes the auth file", async () => {
