@@ -15,13 +15,31 @@ export class ApiError extends Error {
   }
 }
 
+let csrfToken: string | null = null;
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const unsafe = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
   const response = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      ...(unsafe && csrfToken ? { "X-Nudge-CSRF": csrfToken } : {}),
+      ...init?.headers,
+    },
   });
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      csrfToken = null;
+      onUnauthorized?.();
+    }
     throw new ApiError(
       typeof body.error === "string" ? body.error : `Request failed (${response.status})`,
       response.status,
@@ -29,6 +47,31 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     );
   }
   return body as T;
+}
+
+export interface AuthStatus {
+  authenticated: boolean;
+  csrfToken: string | null;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const status = await request<AuthStatus>("/api/auth/status");
+  csrfToken = status.authenticated ? status.csrfToken : null;
+  return status;
+}
+
+export async function loginConsole(capability: string): Promise<AuthStatus> {
+  const status = await request<AuthStatus>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ capability }),
+  });
+  csrfToken = status.csrfToken;
+  return status;
+}
+
+export async function logoutConsole(): Promise<void> {
+  await request<{ authenticated: false }>("/api/auth/logout", { method: "POST" });
+  csrfToken = null;
 }
 
 // -- shapes -----------------------------------------------------------------
@@ -544,7 +587,7 @@ export const startGoogleConnect = (input: {
 }) =>
   request<{ authUrl: string; redirectUri: string }>("/api/connections/google/start", {
     method: "POST",
-    body: JSON.stringify({ ...input, origin: window.location.origin }),
+    body: JSON.stringify(input),
   });
 
 export const disconnectGoogle = (label: string) =>

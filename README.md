@@ -85,7 +85,9 @@ No public URL or tunnel is needed: inbound messages arrive over an outbound stre
 
    and set your handle on the console's **Settings** page (`pnpm console`, then Settings → Owner handle). It must exactly match Photon's `message.sender.id`; the server refuses to start until it is set.
 
-3. For a subscription provider — the default `chatgpt-subscription`, or `grok-subscription` (SuperGrok, SuperGrok Heavy, or X Premium+) — authorize once from the console: `pnpm console`, open the **Connections** page, and click Connect — a device-code sign-in you can complete from any browser. There is deliberately no API-key fallback: when subscription auth breaks, Nudge tells you to reconnect instead of silently spending API credits.
+3. Start the console with `pnpm console`. On first run it prints a high-entropy access code; open `http://localhost:5174` and paste the code into the login page. For a subscription provider — the default `chatgpt-subscription`, or `grok-subscription` (SuperGrok, SuperGrok Heavy, or X Premium+) — open **Connections** and click Connect. There is deliberately no API-key fallback: when subscription auth breaks, Nudge tells you to reconnect instead of silently spending API credits.
+
+   The access code is stored in `data_dir/console-auth.json` with owner-only permissions. Run `pnpm console:auth` to show it or `pnpm console:auth rotate` to replace it; restart a running console after rotation.
 
    To use an API key instead: set Provider to `openai-api` in console Settings plus `OPENAI_API_KEY` in `.env`.
 
@@ -117,13 +119,14 @@ A local web app for everything you'd otherwise SSH in for:
 
 ```bash
 pnpm console                          # dev: API on :3100, UI on :5174
+pnpm console:auth                     # show the access code
 pnpm --filter @nudge/console build    # build the UI
 pnpm console:start                    # rebuild, then serve API + UI on :3100
 ```
 
 Google sign-in redirects back to the exact console address in your browser, so register that address (e.g. `http://localhost:3100/api/connections/google/callback` — and the `:5174` variant if you use the dev server) in your OAuth client; the wizard shows the exact string to copy.
 
-The console binds to `127.0.0.1` and has no auth of its own — it edits your secrets and prompt, so reach it remotely only through a tunnel you trust (Tailscale, `ssh -L`). `CONSOLE_PORT` and `CONSOLE_HOST` override the defaults. It reads the same SQLite file as the server (WAL + busy timeout make the two processes safe together).
+The console binds to `127.0.0.1` by default and requires the generated access code. It validates the request Host and Origin, rejects cross-site browser requests, and requires CSRF proof for mutations. `CONSOLE_PORT` and a loopback `CONSOLE_HOST` override the local defaults. SSH port forwarding stays in local mode; direct non-loopback exposure requires `CONSOLE_REMOTE=1`, an exact HTTPS `CONSOLE_PUBLIC_ORIGIN`, and TLS termination. The console reads the same SQLite file as the server (WAL + busy timeout make the two processes safe together).
 
 ## Google accounts (gws)
 
@@ -132,7 +135,7 @@ Nudge can work the owner's Gmail, Calendar, Drive, Docs, Sheets, Contacts, and T
 Setup lives entirely on the console's **Connections** page:
 
 1. **One-time Google Cloud app** — the wizard walks through creating a (free, private) Cloud project, publishing the OAuth consent screen to production (testing mode expires sign-ins after 7 days), enabling the APIs for the services you pick, and creating a **Web application** OAuth client with the redirect URI the wizard displays. Paste the client JSON and you never see this step again.
-2. **Per account** — pick services and access (read-only or full per service), name the account, and sign in with Google. Consent runs in your browser wherever it is — the redirect returns to the console's own origin, so it works over Tailscale or `ssh -L` against a fully headless server (no browser or OS keyring needed there; this is also why Nudge drives the OAuth flow itself instead of `gws auth login`).
+2. **Per account** — pick services and access (read-only or full per service), name the account, and sign in with Google. Consent runs in your browser wherever it is — the redirect returns to the console's validated origin, so it works through `ssh -L` or an HTTPS Tailscale/remote setup against a fully headless server (no browser or OS keyring needed there; this is also why Nudge drives the OAuth flow itself instead of `gws auth login`).
 
 The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; the gws binary setting for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
 
@@ -153,17 +156,17 @@ Settings (console → Settings):
 | `owner_handle` | required | The one handle allowed to talk to Nudge |
 | `timezone` | machine timezone | IANA zone for schedules and midnight rollover |
 | `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `grok-subscription`, `openai-api`, or `custom` |
-| `provider.chatgpt.model` | `gpt-5.4-mini` | Model slug for the ChatGPT subscription endpoint |
+| `provider.chatgpt.model` | `gpt-5.6-sol` | Model slug for the ChatGPT subscription endpoint |
 | `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | ChatGPT OAuth credential file |
 | `provider.grok.model` | `grok-4.6` | Model slug for the Grok subscription (xAI's CLI proxy maps it to its `-build` variant) |
 | `provider.grok.auth_file` | `.data/grok-auth.json` | Grok OAuth credential file |
 | `provider.grok.client_version` | built-in | CLI version header for xAI's proxy; set only when requests fail with HTTP 426 |
-| `provider.openai.model` | `gpt-5-mini` | Standard API model |
+| `provider.openai.model` | `gpt-5.6-sol` | Standard API model |
 | `provider.custom.base_url` | unset | Base URL of an OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1`) |
 | `provider.custom.model` | unset | Model id the custom endpoint expects |
 | `provider.custom.api` | `chat-completions` | API flavor the endpoint implements: `chat-completions` or `responses` |
-| `model.reasoning_effort` | model default | `none` … `max` reasoning level |
-| `model.fast_mode` | `false` | Priority service tier for faster output |
+| `model.reasoning_effort` | `high` | `none` … `max` reasoning level |
+| `model.fast_mode` | `false` | Priority service tier for faster output (openai-api only) |
 | `tools.bash_enabled` | `true` | Set `false` to remove the bash tool |
 | `tools.firecrawl_url` | Firecrawl cloud | Self-hosted Firecrawl endpoint (enables the web tools without a key) |
 | `google.default_account` | sole account | Account label `gws` uses when the agent omits `-a` |
@@ -177,9 +180,9 @@ Settings (console → Settings):
 | `agent.context_window_tokens` | `0` (auto) | Context window for compaction budgeting; `0` auto-detects from the model id |
 | `agent.compact_at_percent` | `80` | Older turns fold into the thread summary at this share of the usable window |
 | `agent.keep_recent_tokens` | `20000` | Recent conversation kept verbatim when older turns are compacted |
-| `agent.compaction_model` | `gpt-5.6-luna` | Model that writes compaction/carryover summaries (same provider and auth as replies) |
+| `agent.compaction_model` | provider default | Model that writes compaction/carryover summaries (same provider and auth as replies); empty picks `gpt-5.6-luna` on chatgpt-subscription and openai-api, `grok-4.6` on grok-subscription, the reply model on custom |
 | `agent.compaction_reasoning_effort` | `high` | Reasoning level for summary calls |
-| `agent.compaction_fast_mode` | `true` | Run summary calls on the priority service tier |
+| `agent.compaction_fast_mode` | `true` | Run summary calls on the priority service tier (openai-api only) |
 
 `.env`:
 
@@ -222,20 +225,33 @@ No manual steps beyond the restart: database migrations run automatically as ord
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.
 - OAuth tokens, API keys, and Photon secrets are never logged. `.env` and `.data` are gitignored.
-- The console binds to localhost only, returns secret names but never values, and applies the same per-file validation and traversal guards as the agent's file tools.
+- The console binds to localhost by default and requires its generated access code. Login exchanges the code for a signed, expiring `HttpOnly`, `SameSite=Lax` session cookie; mutations also require an in-memory CSRF token. Host allowlisting, exact Origin validation, Fetch Metadata checks, and browser security headers defend against DNS rebinding and cross-site requests. Secret values never leave the server.
+- Non-loopback console binding fails closed unless `CONSOLE_REMOTE=1` and an exact HTTPS `CONSOLE_PUBLIC_ORIGIN` are configured. Put remote mode behind TLS; SSH port forwarding can continue to use local mode.
 
 The ChatGPT subscription endpoint and its OAuth contract are not part of the standard public OpenAI API. The implementation follows the current first-party OAuth and account-header behavior in [openai/codex](https://github.com/openai/codex) and is isolated so upstream changes are contained.
 
 ## Commands
 
 ```bash
-pnpm dev              # watch the agent server and the web console together
-pnpm dev:agent        # watch only the agent server
-pnpm start            # rebuild the server and dependencies, then run it
-pnpm console          # watch only the web console (API :3100, UI :5174)
-pnpm console:start    # rebuild the console and dependencies, then serve it on :3100
+pnpm dev              # watch Nudge and the console together
+pnpm dev:nudge        # watch only Nudge (dev:agent remains an alias)
+pnpm dev:console      # watch only the console (console remains an alias)
+pnpm start            # build Nudge and its dependencies, then run it
+pnpm console:start    # build the console and its dependencies, then serve it on :3100
+pnpm console:auth     # show the local console access code
+pnpm console:auth rotate # rotate the code; restart a running console afterward
 pnpm build            # compile all packages
 pnpm typecheck        # build, then type-check all packages
 pnpm test             # run unit tests
 pnpm check            # type-check, test, and build
 ```
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and the required DCO sign-off.
+
+## License
+
+Copyright 2026 the Nudge contributors.
+
+Nudge is licensed under the [Apache License 2.0](LICENSE). Third-party dependencies and material retain their respective licenses and attribution requirements.

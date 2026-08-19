@@ -7,6 +7,7 @@ import {
   FileText,
   KeyRound,
   LayoutDashboard,
+  LogOut,
   MessagesSquare,
   Moon,
   Settings2,
@@ -15,7 +16,7 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { StatusDot } from "@/components/ui/badge";
-import { useStatus } from "@/lib/api";
+import { logoutConsole, useStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -77,15 +78,29 @@ export function Layout() {
                 ? "Server unhealthy"
                 : "Server down"}
           </div>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            aria-label="Toggle theme"
-          >
-            <Sun className="size-4 dark:hidden" />
-            <Moon className="hidden size-4 dark:block" />
-          </button>
+          <div className="flex items-center">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              aria-label="Toggle theme"
+              title="Toggle theme"
+            >
+              <Sun className="size-4 dark:hidden" />
+              <Moon className="hidden size-4 dark:block" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void logoutConsole().finally(() => window.location.reload());
+              }}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              aria-label="Lock console"
+              title="Lock console"
+            >
+              <LogOut className="size-4" />
+            </button>
+          </div>
         </div>
       </aside>
       <main className="min-w-0 flex-1">

@@ -35,6 +35,7 @@ export const GOOGLE_CALLBACK_PATH = "/api/connections/google/callback";
 interface PendingGoogleFlow {
   label: string;
   redirectUri: string;
+  sessionId: string;
   createdAt: number;
 }
 
@@ -121,19 +122,15 @@ export class ConnectionsService {
     return { clientId: client.clientId };
   }
 
-  /**
-   * Begin a connect (or reconnect / scope edit — same flow). The browser's own
-   * origin becomes the redirect URI, which is why this works through any
-   * tunnel: Google sends the user back to the console they were already using.
-   */
-  startGoogle(body: Record<string, unknown>): { authUrl: string; redirectUri: string } {
+  /** Begin a connect using the server-validated browser origin and session. */
+  startGoogle(
+    body: Record<string, unknown>,
+    origin: string,
+    sessionId: string,
+  ): { authUrl: string; redirectUri: string } {
     const label = typeof body.label === "string" ? body.label.trim() : "";
     if (!LABEL_PATTERN.test(label)) {
       throw new ApiProblem(422, "Account labels are short slugs: lowercase letters, digits, dashes (e.g. personal, work).");
-    }
-    const origin = typeof body.origin === "string" ? body.origin.replace(/\/+$/, "") : "";
-    if (!/^https?:\/\/[^\s/]+$/.test(origin)) {
-      throw new ApiProblem(422, "Missing the console origin — reload the page and try again.");
     }
     const services = Array.isArray(body.services) ? body.services : [];
     const scopes: string[] = [];
@@ -153,7 +150,7 @@ export class ConnectionsService {
 
     const state = newOAuthState();
     const redirectUri = `${origin}${GOOGLE_CALLBACK_PATH}`;
-    this.#googleFlows.set(state, { label, redirectUri, createdAt: this.#now() });
+    this.#googleFlows.set(state, { label, redirectUri, sessionId, createdAt: this.#now() });
     return {
       authUrl: googleAuthUrl({ client, redirectUri, scopes, state }),
       redirectUri,
@@ -161,15 +158,22 @@ export class ConnectionsService {
   }
 
   /** OAuth redirect target. Always answers with a redirect back to /connections. */
-  async googleCallback(query: Record<string, string | undefined>): Promise<Response> {
+  async googleCallback(
+    query: Record<string, string | undefined>,
+    sessionId: string,
+  ): Promise<Response> {
     const back = (params: Record<string, string>) =>
       redirectTo(`/connections?${new URLSearchParams(params).toString()}`);
 
     const flow = query.state ? this.#googleFlows.get(query.state) : undefined;
-    if (query.state) this.#googleFlows.delete(query.state);
     if (!flow || this.#now() - flow.createdAt > STATE_TTL_MS) {
+      if (query.state) this.#googleFlows.delete(query.state);
       return back({ error: "This sign-in link expired or was already used — start again." });
     }
+    if (flow.sessionId !== sessionId) {
+      return back({ error: "This sign-in link belongs to a different console session — start again." });
+    }
+    this.#googleFlows.delete(query.state!);
     if (query.error || !query.code) {
       return back({
         error:

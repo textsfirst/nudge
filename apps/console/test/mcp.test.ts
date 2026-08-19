@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
+import { json, secureTestOptions } from "./auth-helper.js";
 
 const FIXTURE = fileURLToPath(
   new URL("../../server/test/fixtures/mcp-fixture-server.mjs", import.meta.url),
@@ -27,21 +28,7 @@ afterEach(() => {
 });
 
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace() });
-}
-
-async function json(
-  app: ConsoleApp,
-  path: string,
-  init?: RequestInit,
-): Promise<{ status: number; body: any }> {
-  const response = await app.handle(
-    new Request(`http://console.local${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...init?.headers },
-    }),
-  );
-  return { status: response.status, body: await response.json() };
+  return createConsoleApp({ root: makeWorkspace(), ...secureTestOptions });
 }
 
 const registryPath = () => join(root!, ".data", "mcp", "servers.json");

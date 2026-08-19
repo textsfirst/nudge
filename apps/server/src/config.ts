@@ -66,6 +66,18 @@ const secretShape = Object.fromEntries(
 
 const secretsSchema = z.object(secretShape);
 
+/**
+ * Compaction-summarizer defaults by provider, applied when
+ * agent.compaction_model is unset; providers not listed fall back to the
+ * reply model (no override reaches the agent).
+ */
+const COMPACTION_MODEL_DEFAULTS: Partial<Record<Settings["provider"]["selected"], string>> = {
+  "chatgpt-subscription": "gpt-5.6-luna",
+  // Luna is the public API's cost tier for exactly this kind of work.
+  "openai-api": "gpt-5.6-luna",
+  "grok-subscription": "grok-4.6",
+};
+
 const blankAsDefault = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === "" ? undefined : value), schema);
 
@@ -117,6 +129,11 @@ export function loadConfig(
     throw new Error(`Invalid .env: ${formatIssues(parsed.error)}`);
   }
   const secrets = parsed.data as SecretValues;
+  // Priority processing is an OpenAI API feature; the subscription backends
+  // and custom endpoints have no service tiers, so fast mode is openai-api only.
+  const priorityTierAvailable = settings.provider.selected === "openai-api";
+  const compactionModel =
+    settings.agent.compaction_model ?? COMPACTION_MODEL_DEFAULTS[settings.provider.selected];
   return {
     ownerHandle: settings.owner_handle,
     spectrum: {
@@ -160,7 +177,9 @@ export function loadConfig(
       ...(settings.model.reasoning_effort
         ? { reasoningEffort: settings.model.reasoning_effort }
         : {}),
-      ...(settings.model.fast_mode ? { serviceTier: "priority" as const } : {}),
+      ...(settings.model.fast_mode && priorityTierAvailable
+        ? { serviceTier: "priority" as const }
+        : {}),
     },
     multimodal: {
       enabled: settings.multimodal.enabled,
@@ -184,10 +203,12 @@ export function loadConfig(
         : {}),
       ...(settings.multimodal.ffmpeg_path ? { ffmpegPath: settings.multimodal.ffmpeg_path } : {}),
     },
-    compactionModel: settings.agent.compaction_model,
+    ...(compactionModel ? { compactionModel } : {}),
     compactionModelOptions: {
       reasoningEffort: settings.agent.compaction_reasoning_effort,
-      ...(settings.agent.compaction_fast_mode ? { serviceTier: "priority" as const } : {}),
+      ...(settings.agent.compaction_fast_mode && priorityTierAvailable
+        ? { serviceTier: "priority" as const }
+        : {}),
     },
     dataDir: boot.dataDir,
     dbPath: boot.dbPath,
