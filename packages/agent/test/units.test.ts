@@ -195,10 +195,15 @@ describe("FileWorkspace", () => {
 });
 
 describe("MemoryFiles", () => {
-  it("renders present files and stays empty otherwise", () => {
+  it("renders present files, with explicit empty markers otherwise", () => {
     const dir = tempDir();
     const memory = new MemoryFiles(dir);
-    expect(memory.render()).toBe("");
+    // Missing files still render the section: a visible blank slot is the
+    // signal that the memory files exist and are waiting to be filled.
+    const empty = memory.render();
+    expect(empty).toContain("## Memory");
+    expect(empty).toContain("### About the owner (USER.md)\n(empty");
+    expect(empty).toContain("### Notes to self (MEMORY.md)\n(empty");
 
     writeFileSync(join(dir, "USER.md"), "- night owl\n");
     writeFileSync(join(dir, "MEMORY.md"), "- check the ledger first\n");
@@ -206,6 +211,7 @@ describe("MemoryFiles", () => {
     expect(rendered).toContain("## Memory");
     expect(rendered.indexOf("About the owner")).toBeLessThan(rendered.indexOf("Notes to self"));
     expect(rendered).toContain("night owl");
+    expect(rendered).not.toContain("(empty");
     expect(rendered).not.toContain("Open loops");
   });
 
@@ -225,11 +231,11 @@ describe("MemoryFiles", () => {
 
   it("omits the loops hint when LOOPS.md is missing or has no headings", () => {
     const dir = tempDir();
-    expect(new MemoryFiles(dir).render()).toBe("");
+    expect(new MemoryFiles(dir).render()).not.toContain("Open loops");
     writeFileSync(join(dir, "LOOPS.md"), "");
-    expect(new MemoryFiles(dir).render()).toBe("");
+    expect(new MemoryFiles(dir).render()).not.toContain("Open loops");
     writeFileSync(join(dir, "LOOPS.md"), "nothing headed\n");
-    expect(new MemoryFiles(dir).render()).toBe("");
+    expect(new MemoryFiles(dir).render()).not.toContain("Open loops");
   });
 });
 

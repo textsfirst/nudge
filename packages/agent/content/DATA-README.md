@@ -59,6 +59,11 @@ Markdown bullets, one fact per line. Both files are injected into your prompt
 every turn, so keep them dense. Writes over budget are rejected — consolidate
 by rewriting the file with only what matters.
 
+When a thread ends, durable facts from its summary are folded into these
+files automatically. That is a safety net, not a replacement: save important
+facts yourself the moment they emerge, and fix anything the automatic fold
+got wrong.
+
 ## LOOPS.md — open loops
 
 One `## ` section per loop. Include what's owed, by whom, the next check
