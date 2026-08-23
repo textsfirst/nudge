@@ -72,7 +72,6 @@ async function main(): Promise<void> {
       createConsoleApp({
         root: context.root,
         auth,
-        allowedOrigins: runtime.allowedOrigins,
         secureCookies: runtime.secureCookies,
         context,
       }),
@@ -81,10 +80,13 @@ async function main(): Promise<void> {
 
   app.listen({ port: runtime.port, hostname: runtime.host }, () => {
     console.log("\nNudge Console is ready");
-    console.log(`  Open: ${runtime.browserUrl}`);
-    if (runtime.browserUrl !== runtime.apiUrl) console.log(`  API:  ${runtime.apiUrl}`);
+    if (runtime.remote) {
+      console.log(`  Listening: ${runtime.host}:${runtime.port}`);
+    } else {
+      console.log(`  Open: http://localhost:${runtime.port}`);
+    }
     console.log(`  Data: ${context.dataDir()}`);
-    if (runtime.remote) console.log("  Mode: remote (HTTPS origin required)");
+    if (runtime.remote) console.log("  Mode: remote (HTTPS proxy required)");
     if (auth.created) {
       console.log("\nFirst-run console access code:");
       console.log(`  ${auth.revealCapability()}`);

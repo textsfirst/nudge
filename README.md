@@ -126,7 +126,7 @@ pnpm console:start                    # rebuild, then serve API + UI on :3100
 
 Google sign-in redirects back to the exact console address in your browser, so register that address (e.g. `http://localhost:3100/api/connections/google/callback` — and the `:5174` variant if you use the dev server) in your OAuth client; the wizard shows the exact string to copy.
 
-The console binds to `127.0.0.1` by default and requires the generated access code. It validates the request Host and Origin, rejects cross-site browser requests, and requires CSRF proof for mutations. `CONSOLE_PORT` and a loopback `CONSOLE_HOST` override the local defaults. SSH port forwarding stays in local mode; direct non-loopback exposure requires `CONSOLE_REMOTE=1`, an exact HTTPS `CONSOLE_PUBLIC_ORIGIN`, and TLS termination. The console reads the same SQLite file as the server (WAL + busy timeout make the two processes safe together).
+The console binds to `127.0.0.1` by default and requires the generated access code. Mutations require CSRF proof and JSON request bodies. `CONSOLE_PORT` and a loopback `CONSOLE_HOST` override the local defaults. SSH port forwarding stays in local mode. Direct non-loopback exposure requires `CONSOLE_REMOTE=1` and should sit behind a TLS proxy. The console reads the same SQLite file as the server (WAL + busy timeout make the two processes safe together).
 
 ## Google accounts (gws)
 
@@ -135,7 +135,7 @@ Nudge can work the owner's Gmail, Calendar, Drive, Docs, Sheets, Contacts, and T
 Setup lives entirely on the console's **Connections** page:
 
 1. **One-time Google Cloud app** — the wizard walks through creating a (free, private) Cloud project, publishing the OAuth consent screen to production (testing mode expires sign-ins after 7 days), enabling the APIs for the services you pick, and creating a **Web application** OAuth client with the redirect URI the wizard displays. Paste the client JSON and you never see this step again.
-2. **Per account** — pick services and access (read-only or full per service), name the account, and sign in with Google. Consent runs in your browser wherever it is — the redirect returns to the console's validated origin, so it works through `ssh -L` or an HTTPS Tailscale/remote setup against a fully headless server (no browser or OS keyring needed there; this is also why Nudge drives the OAuth flow itself instead of `gws auth login`).
+2. **Per account** — pick services and access (read-only or full per service), name the account, and sign in with Google. Consent runs in your browser wherever it is — the redirect returns to the console address, so it works through `ssh -L` or an HTTPS Tailscale/remote setup against a fully headless server (no browser or OS keyring needed there; this is also why Nudge drives the OAuth flow itself instead of `gws auth login`).
 
 The `gws` binary itself must be installed on the machine running Nudge (`brew install googleworkspace-cli` or `npm i -g @googleworkspace/cli`; the gws binary setting for custom locations). Nudge's shim fronts it for the agent: it injects the chosen account's credentials per exec, refuses `gws auth` (connections are owner-managed), adds `gws accounts` for status, and turns auth failures into "tell the owner to reconnect" guidance.
 
@@ -225,8 +225,8 @@ No manual steps beyond the restart: database migrations run automatically as ord
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.
 - OAuth tokens, API keys, and Photon secrets are never logged. `.env` and `.data` are gitignored.
-- The console binds to localhost by default and requires its generated access code. Login exchanges the code for a signed, expiring `HttpOnly`, `SameSite=Lax` session cookie; mutations also require an in-memory CSRF token. Host allowlisting, exact Origin validation, Fetch Metadata checks, and browser security headers defend against DNS rebinding and cross-site requests. Secret values never leave the server.
-- Non-loopback console binding fails closed unless `CONSOLE_REMOTE=1` and an exact HTTPS `CONSOLE_PUBLIC_ORIGIN` are configured. Put remote mode behind TLS; SSH port forwarding can continue to use local mode.
+- The console binds to localhost by default and requires its generated access code. Login exchanges the code for a signed, expiring `HttpOnly`, `SameSite=Lax` session cookie; mutations also require an in-memory CSRF token and JSON request body. Browser security headers remain enabled. Secret values never leave the server.
+- Non-loopback console binding requires `CONSOLE_REMOTE=1`. Put remote mode behind TLS; SSH port forwarding can continue to use local mode.
 
 The ChatGPT subscription endpoint and its OAuth contract are not part of the standard public OpenAI API. The implementation follows the current first-party OAuth and account-header behavior in [openai/codex](https://github.com/openai/codex) and is isolated so upstream changes are contained.
 

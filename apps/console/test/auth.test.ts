@@ -25,9 +25,7 @@ function request(path: string, init?: RequestInit, origin = TEST_ORIGIN): Reques
   return new Request(`${origin}${path}`, {
     ...init,
     headers: {
-      ...(init?.method && init.method !== "GET"
-        ? { "Content-Type": "application/json", Origin: origin }
-        : {}),
+      ...(init?.method && init.method !== "GET" ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
   });
@@ -78,7 +76,6 @@ describe("console authentication", () => {
   it("requires a valid login and sets a hardened session cookie", async () => {
     const app = createConsoleApp({
       root: workspace(),
-      allowedOrigins: [TEST_ORIGIN],
       authCapability: TEST_CAPABILITY,
     });
 
@@ -104,25 +101,23 @@ describe("console authentication", () => {
     expect(await status.json()).toMatchObject({ authenticated: true });
   });
 
-  it("rejects DNS-rebinding hosts and cross-site browser requests", async () => {
+  it("does not restrict request hosts or browser origins", async () => {
     const app = createConsoleApp({
       root: workspace(),
-      allowedOrigins: [TEST_ORIGIN],
       authCapability: TEST_CAPABILITY,
     });
-    const rebound = await app.handle(new Request("http://attacker.example/api/auth/status"));
-    expect(rebound.status).toBe(421);
+    const otherHost = await app.handle(new Request("http://console.example/api/auth/status"));
+    expect(otherHost.status).toBe(200);
 
     const crossSite = await app.handle(
       request("/api/auth/status", { headers: { "Sec-Fetch-Site": "cross-site" } }),
     );
-    expect(crossSite.status).toBe(403);
+    expect(crossSite.status).toBe(200);
   });
 
-  it("requires an allowed origin, JSON, and CSRF for mutations", async () => {
+  it("requires JSON and CSRF for mutations", async () => {
     const app = createConsoleApp({
       root: workspace(),
-      allowedOrigins: [TEST_ORIGIN],
       authCapability: TEST_CAPABILITY,
     });
     const authenticated = await login(app);
@@ -136,7 +131,7 @@ describe("console authentication", () => {
     );
     expect(missingCsrf.status).toBe(403);
 
-    const evilOrigin = await app.handle(
+    const otherOrigin = await app.handle(
       new Request(`${TEST_ORIGIN}/api/settings`, {
         method: "PUT",
         headers: {
@@ -148,7 +143,7 @@ describe("console authentication", () => {
         body: JSON.stringify({ settings: {} }),
       }),
     );
-    expect(evilOrigin.status).toBe(403);
+    expect(otherOrigin.status).toBe(200);
 
     const form = await app.handle(
       new Request(`${TEST_ORIGIN}/api/settings`, {
