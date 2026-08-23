@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { Input, Select, Textarea } from "@/components/ui/input";
 import {
   ApiError,
+  createFile,
   getFileContent,
   previewSchedule,
   saveFile,
@@ -71,8 +72,11 @@ export function SchedulePage() {
   /** Fetch fresh, apply, save — the mutator returns an error string to abort. */
   const mutate = async (change: (fresh: string) => string | { conflict: string }) => {
     let fresh = "";
+    let hash: string | null = null;
     try {
-      fresh = (await getFileContent(SCHEDULE_PATH)).content;
+      const file = await getFileContent(SCHEDULE_PATH);
+      fresh = file.content;
+      hash = file.hash;
     } catch (problem: unknown) {
       if (!(problem instanceof ApiError && problem.status === 404)) throw problem;
     }
@@ -81,7 +85,11 @@ export function SchedulePage() {
       refresh();
       throw new Error(next.conflict);
     }
-    await saveFile(SCHEDULE_PATH, next);
+    if (hash === null) {
+      await createFile(SCHEDULE_PATH, next);
+    } else {
+      await saveFile(SCHEDULE_PATH, next, hash);
+    }
     refresh();
   };
 

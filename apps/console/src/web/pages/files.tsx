@@ -17,6 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   ApiError,
+  createFile,
   deleteFile,
   previewSchedule,
   saveFile,
@@ -133,9 +134,9 @@ function FileEditor({ path, onDeleted }: { path: string; onDeleted: () => void }
   const isCore = CORE_ORDER.includes(path);
 
   const save = () => {
-    if (!dirty || data?.readOnly) return;
+    if (!dirty || !data || data.readOnly) return;
     setSaving(true);
-    saveFile(path, content, data?.hash)
+    saveFile(path, content, data.hash)
       .then(() => {
         setError(null);
         setDraft(null);
@@ -289,7 +290,7 @@ function NewFileDialog({ onCreated }: { onCreated: (path: string) => void }) {
     const content = path.endsWith("SKILL.md")
       ? SKILL_TEMPLATE.replace("NAME", path.split("/")[1] ?? "my-skill")
       : "";
-    saveFile(path, content)
+    createFile(path, content)
       .then(() => {
         setOpen(false);
         setError(null);

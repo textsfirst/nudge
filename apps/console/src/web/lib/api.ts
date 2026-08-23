@@ -131,7 +131,7 @@ export interface FileInfo {
 export interface FileContent {
   path: string;
   content: string;
-  hash?: string;
+  hash: string;
   readOnly: boolean;
   budget: number | null;
 }
@@ -638,10 +638,16 @@ export const deleteSecret = (key: string) =>
 export const getFileContent = (path: string) =>
   request<FileContent>(`/api/files/content?path=${encodeURIComponent(path)}`);
 
-export const saveFile = (path: string, content: string, hash?: string) =>
+export const createFile = (path: string, content: string) =>
   request<{ path: string }>("/api/files/content", {
     method: "PUT",
-    body: JSON.stringify({ path, content, ...(hash ? { hash } : {}) }),
+    body: JSON.stringify({ path, content }),
+  });
+
+export const saveFile = (path: string, content: string, hash: string) =>
+  request<{ path: string }>("/api/files/content", {
+    method: "PUT",
+    body: JSON.stringify({ path, content, hash }),
   });
 
 export const deleteFile = (path: string) =>
