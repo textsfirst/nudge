@@ -217,9 +217,18 @@ describe("console API", () => {
 
   it("lets the owner edit SYSTEM.md but not the system-written README", async () => {
     const application = app();
-    const write = await json(application, "/api/files/content", {
+    // Overwriting an existing file without the hash it was read at is refused —
+    // a console save must never blindly clobber a concurrent agent write.
+    const blind = await json(application, "/api/files/content", {
       method: "PUT",
       body: JSON.stringify({ path: "SYSTEM.md", content: "Be bolder." }),
+    });
+    expect(blind.status).toBe(428);
+
+    const read = await json(application, "/api/files/content?path=SYSTEM.md", { method: "GET" });
+    const write = await json(application, "/api/files/content", {
+      method: "PUT",
+      body: JSON.stringify({ path: "SYSTEM.md", content: "Be bolder.", hash: read.body.hash }),
     });
     expect(write.status).toBe(200);
     expect(readFileSync(join(root!, ".data", "SYSTEM.md"), "utf8")).toBe("Be bolder.");
@@ -233,9 +242,16 @@ describe("console API", () => {
 
   it("applies the agent's validators to owner writes", async () => {
     const application = app();
+    const schedule = await json(application, "/api/files/content?path=SCHEDULE.md", {
+      method: "GET",
+    });
     const badSchedule = await json(application, "/api/files/content", {
       method: "PUT",
-      body: JSON.stringify({ path: "SCHEDULE.md", content: "## Broken\nwhen: whenever\nHi.\n" }),
+      body: JSON.stringify({
+        path: "SCHEDULE.md",
+        content: "## Broken\nwhen: whenever\nHi.\n",
+        hash: schedule.body.hash,
+      }),
     });
     expect(badSchedule.status).toBe(422);
     expect(badSchedule.body.error).toContain("SCHEDULE.md");

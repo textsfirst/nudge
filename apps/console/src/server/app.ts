@@ -277,6 +277,7 @@ export function createConsoleApp(
           record.path,
           record.content,
           typeof record.hash === "string" ? record.hash : undefined,
+          { requireHashForExisting: true },
         );
         if (!result.ok) {
           set.status = result.status;

@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NudgeAgent, SubscriptionAuthError } from "../src/index.js";
@@ -144,10 +144,12 @@ describe("NudgeAgent.reply", () => {
   });
 
   it("rolls the thread after the idle gap, with a carryover summary", async () => {
-    // Script: first reply, then the carryover summary, then the new-thread reply.
+    // Script: first reply, then the carryover summary, then the memory
+    // promotion (no changes), then the new-thread reply.
     const { agent, store, source, setNow } = makeAgent([
       "first reply",
       "the owner planned a trip",
+      "{}",
       "fresh reply",
     ]);
 
@@ -161,7 +163,7 @@ describe("NudgeAgent.reply", () => {
     expect(secondSession.id).not.toBe(firstSession.id);
     expect(secondSession.carryover).toBe("the owner planned a trip");
 
-    const finalCall = promptMessages(source.calls[2]!);
+    const finalCall = promptMessages(source.calls[3]!);
     expect(finalCall[0]?.role).toBe("system");
     expect(finalCall[0]?.text).toContain("Where the previous thread left off");
     expect(finalCall[0]?.text).toContain("the owner planned a trip");
@@ -170,7 +172,7 @@ describe("NudgeAgent.reply", () => {
 
   it("rolls the thread at local midnight even within the idle window", async () => {
     const { agent, store, setNow } = makeAgent(
-      ["night reply", "summary", "morning reply"],
+      ["night reply", "summary", "{}", "morning reply"],
       { idleRolloverMs: 24 * 60 * 60 * 1000 },
     );
     setNow(Date.UTC(2026, 7, 10, 23, 0, 0));
@@ -182,6 +184,141 @@ describe("NudgeAgent.reply", () => {
     const morningSession = store.activeSession(HANDLE)!;
     expect(morningSession.id).not.toBe(nightSession.id);
     expect(nightSession.id).toBeLessThan(morningSession.id);
+  });
+
+  it("chains carryover through consecutive rollovers instead of dropping it after one hop", async () => {
+    const { agent, store, source, setNow } = makeAgent([
+      "r1",
+      "the owner is allergic to shellfish", // first carryover
+      "{}", // promotion: nothing to save
+      "r2",
+      "shellfish allergy; owner joined a gym", // second carryover, merged
+      "{}",
+      "r3",
+    ]);
+
+    await agent.reply(HANDLE, "note: shellfish allergy");
+    setNow(T0 + 7 * 60 * 60 * 1000);
+    await agent.reply(HANDLE, "hi again"); // rollover 1
+    setNow(T0 + 14 * 60 * 60 * 1000);
+    await agent.reply(HANDLE, "hi once more"); // rollover 2
+
+    // The second rollover's summarizer call must receive the first thread's
+    // carryover as the existing summary to merge — a fact stated only in
+    // thread 1 stays reachable in thread 3.
+    const summarizerCall = promptMessages(source.calls[4]!);
+    expect(summarizerCall.at(-1)?.text).toContain("Existing summary:");
+    expect(summarizerCall.at(-1)?.text).toContain("the owner is allergic to shellfish");
+    expect(store.activeSession(HANDLE)!.carryover).toBe(
+      "shellfish allergy; owner joined a gym",
+    );
+    const thirdThreadPrompt = promptMessages(source.calls[6]!)[0];
+    expect(thirdThreadPrompt?.text).toContain("shellfish allergy");
+  });
+
+  it("promotes durable facts into the memory files at rollover", async () => {
+    const { agent, source, setNow, dataDir } = makeAgent([
+      "r1",
+      "the owner is allergic to shellfish",
+      JSON.stringify({ "USER.md": "- Allergic to shellfish" }),
+      "r2",
+    ]);
+
+    await agent.reply(HANDLE, "note: shellfish allergy");
+    setNow(T0 + 7 * 60 * 60 * 1000);
+    await agent.reply(HANDLE, "morning");
+
+    expect(readFileSync(join(dataDir, "USER.md"), "utf8")).toBe("- Allergic to shellfish");
+    // The promotion call saw the thread summary and the current files.
+    const promotionCall = promptMessages(source.calls[2]!);
+    expect(promotionCall[0]?.text).toContain("USER.md");
+    expect(promotionCall.at(-1)?.text).toContain("the owner is allergic to shellfish");
+    expect(promotionCall.at(-1)?.text).toContain("Current USER.md:");
+    // Promotion lands before the new thread's first turn, so its prompt
+    // already carries the fact as curated memory.
+    const nextPrompt = promptMessages(source.calls[3]!)[0];
+    expect(nextPrompt?.text).toContain("### About the owner (USER.md)\n- Allergic to shellfish");
+  });
+
+  it("skips a promotion write when the file changed during the model call", async () => {
+    // The thunk plays the promotion model: before answering, another writer
+    // (console, execution agent) lands an edit. The stale full-file replace
+    // must be skipped, not clobber the newer content.
+    let dir = "";
+    const harness = makeAgent([
+      "r1",
+      "summary",
+      () => {
+        writeFileSync(join(dir, "USER.md"), "- concurrent edit\n");
+        return JSON.stringify({ "USER.md": "- stale promotion" });
+      },
+      "r2",
+    ]);
+    dir = harness.dataDir;
+
+    await harness.agent.reply(HANDLE, "hello");
+    harness.setNow(T0 + 7 * 60 * 60 * 1000);
+    await expect(harness.agent.reply(HANDLE, "morning")).resolves.toBe("r2");
+    expect(readFileSync(join(dir, "USER.md"), "utf8")).toBe("- concurrent edit\n");
+  });
+
+  it("retries the carryover summary once before giving up on both channels", async () => {
+    const { agent, store, setNow, dataDir } = makeAgent([
+      "r1",
+      () => {
+        throw new Error("summarizer down");
+      },
+      "second try summary",
+      JSON.stringify({ "MEMORY.md": "- promoted on retry" }),
+      "r2",
+    ]);
+
+    await agent.reply(HANDLE, "hello");
+    setNow(T0 + 7 * 60 * 60 * 1000);
+    await expect(agent.reply(HANDLE, "morning")).resolves.toBe("r2");
+
+    // The retry saved carryover AND promotion — one blip no longer loses both.
+    expect(store.activeSession(HANDLE)!.carryover).toBe("second try summary");
+    expect(readFileSync(join(dataDir, "MEMORY.md"), "utf8")).toBe("- promoted on retry");
+  });
+
+  it("leaves memory untouched when the promotion reply is malformed", async () => {
+    const { agent, setNow, dataDir } = makeAgent([
+      "r1",
+      "summary",
+      "sorry, no JSON from me today",
+      "r2",
+    ]);
+    await agent.reply(HANDLE, "hello");
+    setNow(T0 + 7 * 60 * 60 * 1000);
+    await expect(agent.reply(HANDLE, "morning")).resolves.toBe("r2");
+    expect(existsSync(join(dataDir, "USER.md"))).toBe(false);
+  });
+
+  it("rejects an over-budget promotion write and keeps the turn alive", async () => {
+    const { agent, setNow, dataDir } = makeAgent([
+      "r1",
+      "summary",
+      JSON.stringify({ "USER.md": "x".repeat(2_000) }), // over the 1375-char cap
+      "r2",
+    ]);
+    await agent.reply(HANDLE, "hello");
+    setNow(T0 + 7 * 60 * 60 * 1000);
+    await expect(agent.reply(HANDLE, "morning")).resolves.toBe("r2");
+    expect(existsSync(join(dataDir, "USER.md"))).toBe(false);
+  });
+
+  it("promotes memory on a [NEW_THREAD] reset even though no carryover is kept", async () => {
+    const { agent, store, dataDir } = makeAgent([
+      "Fresh start. [NEW_THREAD]",
+      "reset summary",
+      JSON.stringify({ "MEMORY.md": "- The owner prefers fresh starts after arguments" }),
+    ]);
+    await expect(agent.reply(HANDLE, "start over please")).resolves.toBe("Fresh start.");
+    expect(store.activeSession(HANDLE)).toBeUndefined();
+    expect(readFileSync(join(dataDir, "MEMORY.md"), "utf8")).toBe(
+      "- The owner prefers fresh starts after arguments",
+    );
   });
 
   // Compaction test geometry: a 24k window has a usable budget of 12k tokens
@@ -529,7 +666,8 @@ describe("NudgeAgent.reply", () => {
   });
 
   it("closes the thread and strips the token on [NEW_THREAD]", async () => {
-    const { agent, store } = makeAgent(["Fresh start it is. [NEW_THREAD]"]);
+    // The reset path still summarizes the dropped thread once, for promotion.
+    const { agent, store } = makeAgent(["Fresh start it is. [NEW_THREAD]", "reset summary", "{}"]);
     await expect(agent.reply(HANDLE, "please start over")).resolves.toBe("Fresh start it is.");
     expect(store.activeSession(HANDLE)).toBeUndefined();
   });

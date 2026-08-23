@@ -146,6 +146,56 @@ describe("FileWorkspace", () => {
     ).toContain("Saved SCHEDULE.md");
   });
 
+  it("guards memory files against being gutted unless the shrink is confirmed", () => {
+    const dir = tempDir();
+    const workspace = new FileWorkspace(dir);
+    const full = "- fact\n".repeat(40); // 280 chars, past the guard floor
+    expect(workspace.write("USER.md", full)).toContain("Saved");
+
+    const gutted = workspace.write("USER.md", "");
+    expect(gutted).toContain("not saved");
+    expect(gutted).toContain("allow_shrink");
+    expect(workspace.read("USER.md")).toBe(full);
+
+    // edit_file can gut a file in one call too — same guard, same flag.
+    const editGut = workspace.edit("USER.md", [{ oldText: full, newText: "x" }]);
+    expect(editGut).toContain("not saved");
+
+    expect(workspace.write("USER.md", "- consolidated", { allowShrink: true })).toContain("Saved");
+    // Uncapped files never trip the guard.
+    expect(workspace.write("notes.md", "n".repeat(400))).toContain("Saved");
+    expect(workspace.write("notes.md", "")).toContain("Saved");
+  });
+
+  it("keeps a hidden .previous backup of memory files across overwrites", () => {
+    const dir = tempDir();
+    const workspace = new FileWorkspace(dir);
+    const first = "- fact one\n".repeat(20);
+    workspace.write("USER.md", first);
+    workspace.write("USER.md", `${first}- fact two\n`);
+
+    expect(readFileSync(join(dir, ".previous", "USER.md"), "utf8")).toBe(first);
+    // The backup is invisible to the file tools — recovery is owner-side.
+    expect(workspace.list()).not.toContain(".previous");
+    expect(workspace.read(".previous/USER.md")).toContain("not readable");
+  });
+
+  it("denies curated-memory writes to the execution-agent workspace build", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "USER.md"), "- fact");
+    const restricted = new FileWorkspace(dir, { curatedReadOnly: true });
+
+    for (const path of ["USER.md", "MEMORY.md", "LOOPS.md", "SCHEDULE.md", "people/sam.md"]) {
+      expect(restricted.write(path, "hijack")).toContain("read-only to you");
+    }
+    expect(restricted.edit("USER.md", [{ oldText: "- fact", newText: "x" }])).toContain(
+      "read-only to you",
+    );
+    // Reads and ordinary files stay open.
+    expect(restricted.read("USER.md")).toBe("- fact");
+    expect(restricted.write("scratch/findings.md", "data")).toContain("Saved");
+  });
+
   it("enforces memory budgets", () => {
     const workspace = new FileWorkspace(tempDir());
     expect(workspace.write("USER.md", "- likes espresso")).toContain("Saved");
@@ -195,10 +245,15 @@ describe("FileWorkspace", () => {
 });
 
 describe("MemoryFiles", () => {
-  it("renders present files and stays empty otherwise", () => {
+  it("renders present files, with explicit empty markers otherwise", () => {
     const dir = tempDir();
     const memory = new MemoryFiles(dir);
-    expect(memory.render()).toBe("");
+    // Missing files still render the section: a visible blank slot is the
+    // signal that the memory files exist and are waiting to be filled.
+    const empty = memory.render();
+    expect(empty).toContain("## Memory");
+    expect(empty).toContain("### About the owner (USER.md)\n(empty");
+    expect(empty).toContain("### Notes to self (MEMORY.md)\n(empty");
 
     writeFileSync(join(dir, "USER.md"), "- night owl\n");
     writeFileSync(join(dir, "MEMORY.md"), "- check the ledger first\n");
@@ -206,6 +261,7 @@ describe("MemoryFiles", () => {
     expect(rendered).toContain("## Memory");
     expect(rendered.indexOf("About the owner")).toBeLessThan(rendered.indexOf("Notes to self"));
     expect(rendered).toContain("night owl");
+    expect(rendered).not.toContain("(empty");
     expect(rendered).not.toContain("Open loops");
   });
 
@@ -225,11 +281,11 @@ describe("MemoryFiles", () => {
 
   it("omits the loops hint when LOOPS.md is missing or has no headings", () => {
     const dir = tempDir();
-    expect(new MemoryFiles(dir).render()).toBe("");
+    expect(new MemoryFiles(dir).render()).not.toContain("Open loops");
     writeFileSync(join(dir, "LOOPS.md"), "");
-    expect(new MemoryFiles(dir).render()).toBe("");
+    expect(new MemoryFiles(dir).render()).not.toContain("Open loops");
     writeFileSync(join(dir, "LOOPS.md"), "nothing headed\n");
-    expect(new MemoryFiles(dir).render()).toBe("");
+    expect(new MemoryFiles(dir).render()).not.toContain("Open loops");
   });
 });
 

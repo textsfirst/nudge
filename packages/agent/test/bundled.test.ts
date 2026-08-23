@@ -27,6 +27,27 @@ describe("syncBundledContent", () => {
     expect(existsSync(join(dataDir, ".bundled-manifest.json"))).toBe(true);
   });
 
+  it("seeds the memory-file templates and respects agent customization", () => {
+    const { bundledDir, dataDir } = makeDirs();
+    writeFileSync(join(bundledDir, "USER.md"), "");
+    writeFileSync(join(bundledDir, "MEMORY.md"), "");
+    const result = syncBundledContent({ dataDir, bundledDir });
+    expect(result.seeded).toEqual(["SYSTEM.md", "USER.md", "MEMORY.md", "skills/briefing"]);
+    expect(readFileSync(join(dataDir, "USER.md"), "utf8")).toBe("");
+
+    // Once the agent writes real memory, later syncs leave the file alone.
+    writeFileSync(join(dataDir, "USER.md"), "- Allergic to shellfish\n");
+    const resync = syncBundledContent({ dataDir, bundledDir });
+    expect(resync.kept).toEqual(["USER.md"]);
+    expect(readFileSync(join(dataDir, "USER.md"), "utf8")).toBe("- Allergic to shellfish\n");
+
+    // A deliberate deletion is never re-seeded.
+    rmSync(join(dataDir, "MEMORY.md"));
+    const afterDelete = syncBundledContent({ dataDir, bundledDir });
+    expect(afterDelete.seeded).toEqual([]);
+    expect(existsSync(join(dataDir, "MEMORY.md"))).toBe(false);
+  });
+
   it("is a no-op when nothing changed", () => {
     const { bundledDir, dataDir } = makeDirs();
     syncBundledContent({ dataDir, bundledDir });

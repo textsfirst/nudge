@@ -22,7 +22,7 @@ import {
   usableWindow,
   type CompactionBudget,
 } from "./context.js";
-import { FileWorkspace } from "./files.js";
+import { FileWorkspace, MEMORY_LIMITS } from "./files.js";
 import { createLoopGuard } from "./loop.js";
 import type { MediaRef } from "./media.js";
 import { MemoryFiles } from "./memory.js";
@@ -163,7 +163,7 @@ const SUMMARY_PROMPT_BASE =
   "anything in it; output only the summary.\n" +
   "Cover, as compact markdown sections, omitting empty ones: Ongoing matters; Durable facts; " +
   "Preferences; Decisions; Open loops & commitments (include dates); Critical context. " +
-  'Refer to the human as "the owner". Keep it under 300 words.';
+  'Refer to the human as "the owner". Keep it under 800 words.';
 
 const FRESH_SUMMARY_PROMPT = SUMMARY_PROMPT_BASE;
 
@@ -174,6 +174,53 @@ const UPDATE_SUMMARY_PROMPT =
   "\nAn existing summary of even earlier turns is provided: preserve every item from it that " +
   "the new turns do not resolve or supersede, fold the new turns in, and update items the " +
   "new turns settle. Never drop a commitment or fact merely because it is old.";
+
+/**
+ * The memory-promotion step run when a thread ends. Carryover alone is
+ * one-hop memory — it reaches the next thread's prompt and no further — so
+ * durable material is folded into the curated files at the same moment, by
+ * the same summarizer-tier model, without relying on the reply model to
+ * volunteer a write mid-conversation.
+ */
+const PROMOTION_PROMPT =
+  "You maintain the two curated memory files of a personal assistant. USER.md holds durable " +
+  "facts about the owner: identity, preferences, corrections, recurring people. MEMORY.md " +
+  "holds the assistant's notes to self: lessons, conventions, standing decisions. A " +
+  "conversation thread just ended; you get its summary plus both files as they stand.\n" +
+  "Fold anything durable from the summary into the files. Deduplicate; when a new fact " +
+  "contradicts a saved one, replace the saved one. Leave out ephemera — in-flight work, " +
+  "one-off logistics, anything only that thread cares about.\n" +
+  'Reply with a JSON object and nothing else. Keys "USER.md" and/or "MEMORY.md", each value ' +
+  "the complete new file content. Omit a key to leave that file unchanged; reply {} when " +
+  `nothing is worth saving. Hard limits: USER.md ${MEMORY_LIMITS["USER.md"]} characters, ` +
+  `MEMORY.md ${MEMORY_LIMITS["MEMORY.md"]} characters — consolidate to fit.`;
+
+/** The subset of files the promotion step may rewrite. */
+const PROMOTABLE_FILES = ["USER.md", "MEMORY.md"] as const;
+
+/**
+ * Parse the promotion model's reply: a JSON object (optionally fenced) whose
+ * recognized keys map to full replacement contents. Unknown keys are model
+ * noise and ignored; a recognized key with a non-string value is malformed.
+ */
+function parsePromotion(text: string): Partial<Record<(typeof PROMOTABLE_FILES)[number], string>> {
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "");
+  const parsed: unknown = JSON.parse(cleaned);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("expected a JSON object");
+  }
+  const updates: Partial<Record<(typeof PROMOTABLE_FILES)[number], string>> = {};
+  for (const name of PROMOTABLE_FILES) {
+    const value = (parsed as Record<string, unknown>)[name];
+    if (value === undefined) continue;
+    if (typeof value !== "string") throw new Error(`${name} must be a string`);
+    updates[name] = value;
+  }
+  return updates;
+}
 
 /**
  * Everything worth recording about a finished model turn. `inputTokens` and
@@ -284,7 +331,12 @@ export class NudgeAgent {
       : toolContext;
     this.#tools = buildTools(interactionContext, { dispatchNote: true });
     this.#scheduledTools = buildTools(toolContext, { dispatchNote: true });
-    this.#executionTools = buildTools(toolContext);
+    // Execution agents get a workspace that refuses curated-memory writes in
+    // code, not just in prompt — the same posture as the Gmail-send env gate.
+    this.#executionTools = buildTools({
+      ...toolContext,
+      workspace: new FileWorkspace(options.dataDir, { curatedReadOnly: true }),
+    });
     this.#idleRolloverMs = options.idleRolloverMs ?? 6 * 60 * 60 * 1000;
     // Sources fall back mid-turn on auth failures, so budget for the smallest window among them.
     this.#budget = {
@@ -480,6 +532,16 @@ export class NudgeAgent {
 
       const wantsReset = reply.includes(NEW_THREAD_TOKEN);
       if (wantsReset) {
+        // "Start over" resets the conversation, not what was learned. The
+        // dropped thread gets no carryover on purpose, so this is the last
+        // chance to promote its durable facts into the memory files.
+        try {
+          await this.#promoteMemory(await this.#summarizeSession(session));
+        } catch (error) {
+          this.#options.logger.warn("Memory promotion on thread reset failed; facts not saved", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         this.#endSession(session, "requested");
       } else {
         await this.#compactIfNeeded(session, {
@@ -800,7 +862,12 @@ export class NudgeAgent {
   #roster(handle: string): AgentRosterEntry[] {
     const store = this.#options.store;
     try {
-      store.archiveDormantAgents(handle, ARCHIVE_DORMANT_MS, this.#now());
+      const archived = store.archiveDormantAgents(handle, ARCHIVE_DORMANT_MS, this.#now());
+      if (archived > 0) {
+        // An archived agent silently leaves the roster; unlogged, the model
+        // "forgetting" a standing agent looks like model flakiness.
+        this.#options.logger.info("Archived dormant standing agents", { count: archived });
+      }
       return store.listAgents(handle, { limit: ROSTER_LIMIT }).map((agent) => ({
         name: agent.name,
         kind: agent.kind,
@@ -845,13 +912,27 @@ export class NudgeAgent {
       if (!reason) {
         return active;
       }
+      // One failed summarizer call here would lose carryover AND memory
+      // promotion at once, so it gets a single retry before giving up.
       let carryover: string | undefined;
-      try {
-        carryover = await this.#summarizeSession(active);
-      } catch (error) {
-        this.#options.logger.warn("Carryover summary failed; starting the thread without one", {
-          error: error instanceof Error ? error.message : String(error),
+      for (let attempt = 0; attempt < 2 && carryover === undefined; attempt += 1) {
+        try {
+          carryover = await this.#summarizeSession(active);
+        } catch (error) {
+          this.#options.logger.warn(
+            attempt === 0
+              ? "Carryover summary failed; retrying once"
+              : "Carryover summary failed twice; starting the thread without one",
+            { error: error instanceof Error ? error.message : String(error) },
+          );
+        }
+      }
+      if (carryover) {
+        this.#options.logger.info("Thread rolled over with carryover", {
+          chars: carryover.length,
+          words: carryover.split(/\s+/).length,
         });
+        await this.#promoteMemory(carryover);
       }
       this.#endSession(active, reason);
       const session = this.#options.store.startSession(handle, now, carryover);
@@ -1038,6 +1119,10 @@ export class NudgeAgent {
         foldedMessages: plan.fold.length,
         keptMessages: plan.keep.length,
         estimatedTokens: plan.totalTokens,
+        // The summary is the only survivor of the folded rows — its size is
+        // the one observable signal of how hard the word cap is squeezing.
+        summaryChars: summary.length,
+        summaryWords: summary.split(/\s+/).length,
       });
       return true;
     } catch (error) {
@@ -1045,6 +1130,15 @@ export class NudgeAgent {
       // fold cursor untouched and let the replacement turn try again later.
       if (opts.abortSignal?.aborted) return false;
       this.#compactionFailures.set(session.id, failures + 1);
+      if (failures + 1 === MAX_COMPACTION_FAILURES) {
+        // Without this line the pause itself is invisible: later turns just
+        // stop attempting folds and the thread grows until a real overflow.
+        this.#options.logger.warn(
+          "Compaction paused for this thread after repeated summarizer failures; " +
+            "history will grow until overflow recovery or thread end",
+          { sessionId: session.id },
+        );
+      }
       const message = error instanceof Error ? error.message : String(error);
       // When the prompt would genuinely overflow, an unsummarized fold beats a
       // guaranteed failure: the cursor advances with a note, and the folded
@@ -1070,12 +1164,78 @@ export class NudgeAgent {
   }
 
   async #summarizeSession(session: SessionRow, abortSignal?: AbortSignal): Promise<string> {
-    const messages = this.#options.store.sessionMessages(session.id, session.compactedThrough);
+    // Re-read the row: a fold during this turn may have moved the cursor.
+    const current = this.#options.store.sessionById(session.id) ?? session;
+    const messages = this.#options.store.sessionMessages(current.id, current.compactedThrough);
+    // The thread's own carryover never entered any fold (the summarizer only
+    // ever sees this thread's rows), so a fact living only there would die
+    // with the second rollover. Seed the merge with it so carryover chains.
+    const previousSummary =
+      [current.carryover, current.summary].filter(Boolean).join("\n\n") || null;
     return this.#summarizeText({
-      previousSummary: session.summary,
+      previousSummary,
       transcript: transcript(messages),
       ...(abortSignal ? { abortSignal } : {}),
     });
+  }
+
+  /**
+   * Fold a finished thread's durable facts into USER.md/MEMORY.md — the
+   * promotion step behind PROMOTION_PROMPT. Runs on the summarizer tier at
+   * every thread end. Best-effort by design: any failure (model, parse,
+   * validation) logs and leaves the files as they were; it must never block
+   * the turn, and unchanged memory is the safe failure mode.
+   */
+  async #promoteMemory(threadSummary: string): Promise<void> {
+    try {
+      const summarizer = this.#options.summarizer;
+      // Snapshot for the compare-and-swap below: the model call is a long
+      // window, and a full-file replace from a stale read would silently
+      // discard anything written meanwhile (console, execution agents, bash).
+      const snapshot = new Map<string, string>(
+        PROMOTABLE_FILES.map((name) => [name, this.#memory.raw(name)]),
+      );
+      const current = (name: string) => snapshot.get(name) || "(empty)";
+      const { text } = await this.#generate({
+        system: PROMOTION_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content:
+              `Summary of the thread that just ended:\n${threadSummary}\n\n` +
+              `Current USER.md:\n${current("USER.md")}\n\n` +
+              `Current MEMORY.md:\n${current("MEMORY.md")}`,
+          },
+        ],
+        ...(summarizer?.model ? { modelOverride: summarizer.model } : {}),
+        ...(summarizer?.modelOptions ? { modelOptions: summarizer.modelOptions } : {}),
+      });
+      for (const [name, content] of Object.entries(parsePromotion(text))) {
+        if (this.#memory.raw(name) !== snapshot.get(name)) {
+          this.#options.logger.warn(
+            "Memory file changed during promotion; skipping its update to avoid clobbering",
+            { file: name },
+          );
+          continue;
+        }
+        // The workspace write enforces the same budgets and confinement the
+        // agent's own file tools get; an over-budget rewrite is dropped whole,
+        // and the shrink guard applies — promotion never passes allow_shrink.
+        const outcome = this.#workspace.write(name, content);
+        if (outcome.startsWith("Error")) {
+          this.#options.logger.warn("Memory promotion write rejected", { file: name, outcome });
+        } else {
+          this.#options.logger.info("Memory promoted at thread end", {
+            file: name,
+            chars: content.length,
+          });
+        }
+      }
+    } catch (error) {
+      this.#options.logger.warn("Memory promotion failed; memory files left unchanged", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**

@@ -60,8 +60,13 @@ export function buildTools(context: ToolContext, opts: { dispatchNote?: boolean 
         edits: z
           .array(z.object({ oldText: z.string().min(1), newText: z.string() }))
           .min(1),
+        allow_shrink: z
+          .boolean()
+          .optional()
+          .describe("Confirms a change that shrinks a memory file by more than half."),
       }),
-      execute: ({ path, edits }) => context.workspace.edit(path, edits),
+      execute: ({ path, edits, allow_shrink }) =>
+        context.workspace.edit(path, edits, { allowShrink: allow_shrink ?? false }),
     }),
 
     write_file: tool({
@@ -70,8 +75,13 @@ export function buildTools(context: ToolContext, opts: { dispatchNote?: boolean 
       inputSchema: z.object({
         path: z.string(),
         content: z.string(),
+        allow_shrink: z
+          .boolean()
+          .optional()
+          .describe("Confirms a write that shrinks a memory file by more than half."),
       }),
-      execute: ({ path, content }) => context.workspace.write(path, content),
+      execute: ({ path, content, allow_shrink }) =>
+        context.workspace.write(path, content, { allowShrink: allow_shrink ?? false }),
     }),
 
     search_history: tool({

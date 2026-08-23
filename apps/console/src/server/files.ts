@@ -92,6 +92,15 @@ export function writeDataFile(
   path: string,
   content: string,
   expectedHash?: string,
+  options: {
+    /**
+     * Editor-route posture: overwriting an existing file without the hash it
+     * was read at is refused, so a console save can never blindly clobber a
+     * concurrent agent write. Off for internal callers (MCP registry) that
+     * carry their own finer-grained race checks.
+     */
+    requireHashForExisting?: boolean;
+  } = {},
 ): FileResult<{
   path: string;
 }> {
@@ -100,14 +109,23 @@ export function writeDataFile(
   if (isSystemManaged(check.value.rel)) {
     return { ok: false, status: 403, error: `${check.value.rel} is system-written; the server regenerates it at boot.` };
   }
-  if (expectedHash && existsSync(check.value.abs)) {
-    const current = contentHash(readFileSync(check.value.abs, "utf8"));
-    if (current !== expectedHash) {
+  if (existsSync(check.value.abs)) {
+    if (!expectedHash && options.requireHashForExisting) {
       return {
         ok: false,
-        status: 409,
-        error: "This file changed since you opened it. Reload and save again.",
+        status: 428,
+        error: "Overwriting an existing file requires the hash it was read at.",
       };
+    }
+    if (expectedHash) {
+      const current = contentHash(readFileSync(check.value.abs, "utf8"));
+      if (current !== expectedHash) {
+        return {
+          ok: false,
+          status: 409,
+          error: "This file changed since you opened it. Reload and save again.",
+        };
+      }
     }
   }
   const problem = validateDataFile(check.value.rel, content);
