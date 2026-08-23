@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Cursor-based Gmail arrivals journal for watcher checks. Nudge prepends this
+# directory to the bash tool's PATH; see gmail-tail.mjs for the mechanics.
+exec node "$(dirname "$0")/gmail-tail.mjs" "$@"

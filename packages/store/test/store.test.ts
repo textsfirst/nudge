@@ -26,10 +26,15 @@ describe("NudgeStore", () => {
   it("tracks watcher check health on schedule state", () => {
     const store = new NudgeStore(":memory:");
     const blank = store.scheduleState("watch-1");
-    expect(blank).toMatchObject({ lastCheckHash: null, checksRun: 0, wakes: 0 });
+    expect(blank).toMatchObject({
+      lastCheckHash: null,
+      checksRun: 0,
+      wakes: 0,
+      lastCheckCommand: null,
+    });
 
-    // Baseline: hash recorded, nobody woken.
-    store.recordScheduleCheck("watch-1", { hash: "aaa" }, 1_000);
+    // Baseline: hash and command recorded, nobody woken.
+    store.recordScheduleCheck("watch-1", { hash: "aaa", command: "probe slots" }, 1_000);
     expect(store.scheduleState("watch-1")).toMatchObject({
       lastCheckHash: "aaa",
       lastCheckAt: 1_000,
@@ -37,6 +42,7 @@ describe("NudgeStore", () => {
       checksRun: 1,
       wakes: 0,
       lastCheckError: null,
+      lastCheckCommand: "probe slots",
     });
 
     // A change wakes and moves the change timestamp.
@@ -57,13 +63,18 @@ describe("NudgeStore", () => {
       wakes: 2,
     });
 
-    // …and the next success clears it.
+    // …and the next success clears it. An omitted command keeps the last one.
     store.recordScheduleCheck("watch-1", { hash: "bbb" }, 4_000);
     expect(store.scheduleState("watch-1")).toMatchObject({
       lastCheckError: null,
       checksRun: 4,
       wakes: 2,
+      lastCheckCommand: "probe slots",
     });
+
+    // An edited command replaces the stored one.
+    store.recordScheduleCheck("watch-1", { hash: "ccc", command: "probe slots --tight" }, 5_000);
+    expect(store.scheduleState("watch-1").lastCheckCommand).toBe("probe slots --tight");
   });
 
   it("creates, finds, and archives execution agents", () => {
@@ -371,7 +382,7 @@ describe("NudgeStore", () => {
       store.close();
 
       const upgraded = new DatabaseSync(path);
-      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+      expect(upgraded.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
       // The dedupe table exists under its post-rename name only.
       expect(
         upgraded
@@ -503,6 +514,23 @@ describe("NudgeStore", () => {
       future.exec("PRAGMA user_version = 999");
       future.close();
       expect(() => new NudgeStore(path)).toThrow(/newer than this Nudge build supports/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates once when two processes open the same file", () => {
+    // The server and console share the database; the second opener must see
+    // the first's migrations as already applied, not re-run their DDL.
+    const dir = mkdtempSync(join(tmpdir(), "nudge-store-shared-"));
+    const path = join(dir, "shared.db");
+    try {
+      const first = new NudgeStore(path);
+      const second = new NudgeStore(path);
+      second.recordScheduleCheck("watch-1", { hash: "aaa", command: "probe" }, 1_000);
+      expect(first.scheduleState("watch-1").lastCheckCommand).toBe("probe");
+      first.close();
+      second.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
