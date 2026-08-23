@@ -51,15 +51,19 @@ export function syncBundledContent(options: SyncBundledOptions): SyncBundledResu
   const result: SyncBundledResult = { seeded: [], updated: [], kept: [] };
   const bundledKeys = new Set<string>();
 
-  const systemSource = join(bundledDir, "SYSTEM.md");
-  if (existsSync(systemSource)) {
-    bundledKeys.add("SYSTEM.md");
+  // SYSTEM.md plus the curated memory files. The memory templates are empty:
+  // seeding them makes the files exist (visible in list_files, editable with
+  // edit_file) while the prompt's empty-state marker does the nudging.
+  for (const name of ["SYSTEM.md", "USER.md", "MEMORY.md"]) {
+    const source = join(bundledDir, name);
+    if (!existsSync(source)) continue;
+    bundledKeys.add(name);
     syncOne({
-      key: "SYSTEM.md",
-      sourceHash: hashFile(systemSource),
-      target: join(options.dataDir, "SYSTEM.md"),
+      key: name,
+      sourceHash: hashFile(source),
+      target: join(options.dataDir, name),
       targetHash: (target) => (existsSync(target) ? hashFile(target) : undefined),
-      copy: (target) => cpSync(systemSource, target),
+      copy: (target) => cpSync(source, target),
       manifest,
       result,
     });

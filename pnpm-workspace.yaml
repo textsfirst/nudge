@@ -4,3 +4,8 @@ packages:
 
 onlyBuiltDependencies:
   - esbuild
+
+# GHSA-8988-4f7v-96qf: unbounded memory allocation in W3C Baggage propagation,
+# fixed in 2.8.0. Transitive via @photon-ai/otel; drop once upstream bumps it.
+overrides:
+  "@opentelemetry/core@<2.8.0": ">=2.8.0"

@@ -1,10 +1,12 @@
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -60,12 +62,66 @@ const HIDDEN_DIRS = new Set(["google"]);
 const READ_ONLY = new Set(["SYSTEM.md", "README.md"]);
 
 /**
+ * The curated files execution agents may read but never write — the code
+ * enforcement behind the prompt's "leave the memory files to the assistant".
+ * (The bash tool is not jailed and can still bypass this; that gap stays
+ * prompt-only, matching bash's documented non-boundary status.)
+ */
+const CURATED_FILES = new Set(["USER.md", "MEMORY.md", "LOOPS.md", "SCHEDULE.md"]);
+
+function isCurated(rel: string): boolean {
+  const parts = rel.split(sep);
+  if (parts[0]?.toLowerCase() === "people") return true;
+  return [...CURATED_FILES].some((name) => name.toLowerCase() === rel.toLowerCase());
+}
+
+/**
+ * A shrink below this size never trips the guard: early files are tiny and
+ * legitimate rewrites of them shouldn't need a flag.
+ */
+const SHRINK_GUARD_MIN_CHARS = 200;
+
+/**
+ * Guard budgeted memory files against being gutted in one write: a model
+ * (or a degraded promotion reply) can otherwise legally replace USER.md
+ * with "" and lose everything. Halving or worse needs an explicit flag.
+ */
+function shrinkProblem(rel: string, previous: string, next: string): string | undefined {
+  if (fileBudget(rel) === undefined) return undefined;
+  if (previous.length < SHRINK_GUARD_MIN_CHARS) return undefined;
+  if (next.length >= previous.length / 2) return undefined;
+  return (
+    `this would shrink ${rel} from ${previous.length} to ${next.length} characters. ` +
+    `If the loss is deliberate (consolidation, the owner asked to forget), retry with ` +
+    `allow_shrink: true; the prior version is kept as a backup.`
+  );
+}
+
+/** Crash-safe replace: a torn write can never leave a truncated file behind. */
+function atomicWrite(abs: string, content: string): void {
+  const temporary = `${abs}.${process.pid}.tmp`;
+  writeFileSync(temporary, content);
+  renameSync(temporary, abs);
+}
+
+export interface WorkspaceWriteOptions {
+  /** Confirms a write that shrinks a budgeted memory file by more than half. */
+  allowShrink?: boolean;
+}
+
+/**
  * The agent's file surface: everything in DATA_DIR except secrets and runtime
  * state, with per-path validation on writes. Files are the API — this replaces
  * the bespoke schedule/skill/memory tools.
  */
 export class FileWorkspace {
-  constructor(private readonly dataDir: string) {}
+  constructor(
+    private readonly dataDir: string,
+    private readonly options: {
+      /** Execution-agent build: curated memory files become read-only. */
+      curatedReadOnly?: boolean;
+    } = {},
+  ) {}
 
   list(): string {
     if (!existsSync(this.dataDir)) return "(no files yet)";
@@ -89,39 +145,76 @@ export class FileWorkspace {
     return page(readFileSync(check.abs, "utf8"), path, options?.offset ?? 1, options?.limit);
   }
 
-  edit(path: string, edits: FileEdit[]): string {
-    const check = this.#resolve(path);
+  edit(path: string, edits: FileEdit[], options: WorkspaceWriteOptions = {}): string {
+    const check = this.#writable(path);
     if ("error" in check) return check.error;
-    if (isHidden(check.rel)) return `Error: ${path} is not writable.`;
-    if (isReadOnly(check.rel)) {
-      return `Error: ${check.rel} is owner/system-maintained and read-only to you.`;
-    }
     if (!existsSync(check.abs)) {
       return `Error: no file "${path}". Files:\n${this.list()}`;
     }
-    const outcome = applyEdits(readFileSync(check.abs, "utf8"), edits);
+    const previous = readFileSync(check.abs, "utf8");
+    const outcome = applyEdits(previous, edits);
     if (!outcome.ok) return outcome.error;
     const problem = validateDataFile(check.rel, outcome.result);
     if (problem) return `Error: not saved. ${problem}`;
+    if (!options.allowShrink) {
+      const shrink = shrinkProblem(check.rel, previous, outcome.result);
+      if (shrink) return `Error: not saved. ${shrink}`;
+    }
 
-    writeFileSync(check.abs, outcome.result);
+    this.#backup(check.rel, check.abs);
+    atomicWrite(check.abs, outcome.result);
     const count = edits.length === 1 ? "1 edit" : `${edits.length} edits`;
     return `Applied ${count} to ${check.rel} (${outcome.result.length} chars).`;
   }
 
-  write(path: string, content: string): string {
-    const check = this.#resolve(path);
+  write(path: string, content: string, options: WorkspaceWriteOptions = {}): string {
+    const check = this.#writable(path);
     if ("error" in check) return check.error;
-    if (isHidden(check.rel)) return `Error: ${path} is not writable.`;
-    if (isReadOnly(check.rel)) {
-      return `Error: ${check.rel} is owner/system-maintained and read-only to you.`;
-    }
     const problem = validateDataFile(check.rel, content);
     if (problem) return `Error: not saved. ${problem}`;
+    if (!options.allowShrink && existsSync(check.abs)) {
+      const shrink = shrinkProblem(check.rel, readFileSync(check.abs, "utf8"), content);
+      if (shrink) return `Error: not saved. ${shrink}`;
+    }
 
     mkdirSync(dirname(check.abs), { recursive: true });
-    writeFileSync(check.abs, content);
+    this.#backup(check.rel, check.abs);
+    atomicWrite(check.abs, content);
     return `Saved ${check.rel} (${content.length} chars).`;
+  }
+
+  /** The shared write gate: confinement, hidden files, read-only sets. */
+  #writable(path: string): { abs: string; rel: string } | { error: string } {
+    const check = this.#resolve(path);
+    if ("error" in check) return check;
+    if (isHidden(check.rel)) return { error: `Error: ${path} is not writable.` };
+    if (isReadOnly(check.rel)) {
+      return { error: `Error: ${check.rel} is owner/system-maintained and read-only to you.` };
+    }
+    if (this.options.curatedReadOnly && isCurated(check.rel)) {
+      return {
+        error:
+          `Error: ${check.rel} is maintained by the assistant and read-only to you. ` +
+          `Put the finding in your report instead.`,
+      };
+    }
+    return check;
+  }
+
+  /**
+   * Keep the prior version of a budgeted memory file under .previous/ before
+   * every overwrite. Dot-prefixed, so it is invisible to the file tools —
+   * recovery is an owner/console operation, not a model loop.
+   */
+  #backup(rel: string, abs: string): void {
+    if (fileBudget(rel) === undefined || !existsSync(abs)) return;
+    try {
+      const target = join(this.dataDir, ".previous", rel);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(abs, target);
+    } catch {
+      // A failed backup never blocks the write itself.
+    }
   }
 
   /**
