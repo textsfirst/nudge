@@ -122,7 +122,7 @@ export class ConnectionsService {
     return { clientId: client.clientId };
   }
 
-  /** Begin a connect using the server-validated browser origin and session. */
+  /** Begin a connect using the browser address and authenticated session. */
   startGoogle(
     body: Record<string, unknown>,
     origin: string,

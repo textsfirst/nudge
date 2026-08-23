@@ -12,7 +12,7 @@
     },
     "console-api": {
       "type": "service",
-      "command": "CONSOLE_HOST=127.0.0.1 CONSOLE_PORT=$PASEO_PORT CONSOLE_UI_ORIGIN=http://localhost:${PASEO_SERVICE_CONSOLE_PORT:-5174} pnpm --filter @nudge/console dev:api",
+      "command": "CONSOLE_HOST=127.0.0.1 CONSOLE_PORT=$PASEO_PORT pnpm --filter @nudge/console dev:api",
       "port": 3100
     },
     "console": {
