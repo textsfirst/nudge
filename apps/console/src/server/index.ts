@@ -10,6 +10,10 @@ import { ConsoleContext } from "./context.js";
 import { resolveConsoleRuntime } from "./startup.js";
 
 const publicDir = resolve(fileURLToPath(new URL("../public", import.meta.url)));
+const releaseDistribution = process.env.NUDGE_DISTRIBUTION === "release";
+const consoleStartCommand = releaseDistribution ? "nudge console" : "pnpm console:start";
+const consoleDevCommand = releaseDistribution ? "nudge console" : "pnpm console";
+const consoleAuthCommand = releaseDistribution ? "nudge auth" : "pnpm console:auth";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -34,7 +38,9 @@ const STATIC_SECURITY_HEADERS = {
 function serveStatic(pathname: string): Response {
   if (!existsSync(join(publicDir, "index.html"))) {
     return new Response(
-      "Console UI is not built. Run `pnpm console:start` to build and start it, or `pnpm console` for development.",
+      releaseDistribution
+        ? "Console UI is missing from this release. Download the edge archive again."
+        : `Console UI is not built. Run \`${consoleStartCommand}\` to build and start it, or \`${consoleDevCommand}\` for development.`,
       {
         status: 503,
         headers: { "Content-Type": "text/plain; charset=utf-8", ...STATIC_SECURITY_HEADERS },
@@ -90,7 +96,7 @@ async function main(): Promise<void> {
       console.log(`  ${auth.revealCapability()}`);
       console.log("\nPaste this code into the login page. It is not part of the URL.");
     } else {
-      console.log("  Access code: stored (run `pnpm console:auth` to show it)");
+      console.log(`  Access code: stored (run \`${consoleAuthCommand}\` to show it)`);
     }
     console.log("  Stop: Ctrl+C\n");
   });
@@ -133,7 +139,7 @@ async function main(): Promise<void> {
 main().catch((error: unknown) => {
   console.error(
     `Nudge Console could not start.\n\n${error instanceof Error ? error.message : String(error)}\n\n` +
-      "Try `pnpm console` for development or check the CONSOLE_* settings in .env.example.",
+      `Try \`${consoleDevCommand}\` or check the CONSOLE_* settings in .env.`,
   );
   process.exitCode = 1;
 });

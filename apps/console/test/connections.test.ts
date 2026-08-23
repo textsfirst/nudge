@@ -16,7 +16,7 @@ let root: string | undefined;
 function makeWorkspace(): string {
   root = mkdtempSync(join(tmpdir(), "console-connections-"));
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "");
+  writeFileSync(join(root, ".env"), "NUDGE_DATA_DIR=.data\n");
   mkdirSync(join(root, ".data"), { recursive: true });
   return root;
 }

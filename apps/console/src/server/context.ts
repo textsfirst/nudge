@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { findWorkspaceRoot } from "@nudge/server/paths";
+import { join } from "node:path";
+import { findWorkspaceRoot, resolveDataDir, resolveDataFile } from "@nudge/server/paths";
 import { defaultSettings, settingsFromOverrides, type Settings } from "@nudge/server/config";
 import { NudgeStore } from "@nudge/store";
 import { readEnvKeys } from "./env-file.js";
@@ -43,7 +43,11 @@ export class ConsoleContext {
   }
 
   dataDir(): string {
-    return resolve(this.root, this.#env("NUDGE_DATA_DIR") ?? ".data");
+    return resolveDataDir(this.root, this.#env("NUDGE_DATA_DIR"), process.env);
+  }
+
+  dataFile(path: string): string {
+    return resolveDataFile(this.dataDir(), path);
   }
 
   serverPort(): number {

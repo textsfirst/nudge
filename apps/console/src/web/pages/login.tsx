@@ -70,7 +70,7 @@ export function LoginPage({ onAuthenticated }: { onAuthenticated: () => void }) 
             </Button>
           </form>
           <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-            Lost the code? In the Nudge checkout, run <code className="font-mono text-foreground">pnpm console:auth</code> to show it or <code className="font-mono text-foreground">pnpm console:auth rotate</code> to replace it.
+            Lost the code? Run the console auth command to show or replace it: <code className="font-mono text-foreground">nudge auth</code> for a release archive, or <code className="font-mono text-foreground">pnpm console:auth</code> in a source checkout.
           </p>
         </CardContent>
       </Card>

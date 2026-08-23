@@ -17,7 +17,7 @@ let root: string | undefined;
 function makeWorkspace(): string {
   root = mkdtempSync(join(tmpdir(), "console-mcp-"));
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "PORT=59983\n");
+  writeFileSync(join(root, ".env"), "NUDGE_DATA_DIR=.data\nPORT=59983\n");
   mkdirSync(join(root, ".data"), { recursive: true });
   return root;
 }
@@ -201,7 +201,10 @@ describe("console MCP API", () => {
 
   it("test-connects a stdio server, resolving ${VAR} from .env", { timeout: SLOW }, async () => {
     const application = app();
-    writeFileSync(join(root!, ".env"), "PORT=59983\nFIXTURE_SECRET=from-env\n");
+    writeFileSync(
+      join(root!, ".env"),
+      "NUDGE_DATA_DIR=.data\nPORT=59983\nFIXTURE_SECRET=from-env\n",
+    );
     await json(application, "/api/mcp/servers/fixture", {
       method: "PUT",
       body: JSON.stringify({

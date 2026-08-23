@@ -14,7 +14,7 @@ const extra: string[] = [];
 function makeWorkspace(): string {
   root = mkdtempSync(join(tmpdir(), "console-skills-"));
   writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "PORT=59983\n");
+  writeFileSync(join(root, ".env"), "NUDGE_DATA_DIR=.data\nPORT=59983\n");
   mkdirSync(join(root, ".data", "skills", "mine"), { recursive: true });
   writeFileSync(
     join(root, ".data", "skills", "mine", "SKILL.md"),

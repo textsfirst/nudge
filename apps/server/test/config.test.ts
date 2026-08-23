@@ -10,12 +10,17 @@ const SECRETS = {
 const ROOT = "/workspace";
 
 describe("loadBootstrap", () => {
-  it("applies defaults when the environment is empty", () => {
-    const boot = loadBootstrap({}, ROOT);
-    expect(boot.dataDir).toBe("/workspace/.data");
-    expect(boot.dbPath).toBe("/workspace/.data/nudge.db");
+  it("puts the default data directory under the user's config directory", () => {
+    const boot = loadBootstrap({ HOME: "/home/nudge" }, ROOT);
+    expect(boot.dataDir).toBe("/home/nudge/.config/nudge");
+    expect(boot.dbPath).toBe("/home/nudge/.config/nudge/nudge.db");
     expect(boot.port).toBe(3_000);
     expect(boot.logLevel).toBe("info");
+  });
+
+  it("honors XDG_CONFIG_HOME for the default data directory", () => {
+    const boot = loadBootstrap({ HOME: "/home/nudge", XDG_CONFIG_HOME: "/var/config" }, ROOT);
+    expect(boot.dataDir).toBe("/var/config/nudge");
   });
 
   it("reads NUDGE_DATA_DIR, PORT, and LOG_LEVEL from the environment", () => {
@@ -39,7 +44,7 @@ describe("loadBootstrap", () => {
 });
 
 describe("loadConfig", () => {
-  const boot = loadBootstrap({}, ROOT);
+  const boot = loadBootstrap({ HOME: "/home/nudge" }, ROOT);
   const settings = (overrides: Record<string, unknown> = {}) =>
     settingsFromOverrides({ owner_handle: "+15551234567", ...overrides });
 
@@ -50,9 +55,12 @@ describe("loadConfig", () => {
     expect(config.provider.openAiApiKey).toBeUndefined();
     expect(config.firecrawl).toBeUndefined();
     expect(config.idleRolloverMs).toBe(6 * 60 * 60 * 1000);
-    expect(config.dataDir).toBe("/workspace/.data");
-    expect(config.dbPath).toBe("/workspace/.data/nudge.db");
-    expect(config.systemFilePath).toBe("/workspace/.data/SYSTEM.md");
+    expect(config.dataDir).toBe("/home/nudge/.config/nudge");
+    expect(config.dbPath).toBe("/home/nudge/.config/nudge/nudge.db");
+    expect(config.systemFilePath).toBe("/home/nudge/.config/nudge/SYSTEM.md");
+    expect(config.provider.chatGptAuthFile).toBe(
+      "/home/nudge/.config/nudge/chatgpt-auth.json",
+    );
     expect(config.port).toBe(3_000);
     expect(config.logLevel).toBe("info");
   });

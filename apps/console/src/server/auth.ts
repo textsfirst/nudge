@@ -177,7 +177,9 @@ function parseStoredAuth(file: string): StoredConsoleAuth {
   } catch (error) {
     throw new Error(
       `Could not read console auth file ${file}: ${error instanceof Error ? error.message : String(error)}. ` +
-        "Fix its permissions/content or run `pnpm console:auth rotate`.",
+        (process.env.NUDGE_DISTRIBUTION === "release"
+          ? "Fix its permissions/content or run `nudge auth rotate`."
+          : "Fix its permissions/content or run `pnpm console:auth rotate`."),
     );
   }
 }

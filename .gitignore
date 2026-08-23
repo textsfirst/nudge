@@ -4,5 +4,6 @@ dist/
 .env.local
 .data/
 coverage/
+/release/
 *.log
 .DS_Store

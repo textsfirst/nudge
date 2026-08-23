@@ -27,13 +27,13 @@ export const settingsSchema = z.object({
       chatgpt: z
         .object({
           model: z.string().min(1).default("gpt-5.6-sol"),
-          auth_file: z.string().min(1).default(".data/chatgpt-auth.json"),
+          auth_file: z.string().min(1).default("chatgpt-auth.json"),
         })
         .prefault({}),
       grok: z
         .object({
           model: z.string().min(1).default("grok-4.6"),
-          auth_file: z.string().min(1).default(".data/grok-auth.json"),
+          auth_file: z.string().min(1).default("grok-auth.json"),
           client_version: z.string().min(1).optional(),
         })
         .prefault({}),
@@ -248,14 +248,14 @@ export const SETTINGS_FORM: SettingsSection[] = [
         path: "provider.chatgpt.auth_file",
         label: "ChatGPT auth file",
         control: "text",
-        help: "Where the ChatGPT sign-in from the Connections page is stored.",
+        help: "Where the ChatGPT sign-in from the Connections page is stored. Relative paths use the data directory.",
       },
       { path: "provider.grok.model", label: "Grok model", control: "text" },
       {
         path: "provider.grok.auth_file",
         label: "Grok auth file",
         control: "text",
-        help: "Where the Grok sign-in from the Connections page is stored.",
+        help: "Where the Grok sign-in from the Connections page is stored. Relative paths use the data directory.",
       },
       {
         path: "provider.grok.client_version",

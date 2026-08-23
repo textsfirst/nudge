@@ -1,0 +1,68 @@
+#!/bin/sh
+
+set -eu
+
+launcher_path="$0"
+while [ -L "$launcher_path" ]; do
+  link_target="$(readlink "$launcher_path")"
+  case "$link_target" in
+    /*) launcher_path="$link_target" ;;
+    *) launcher_path="$(dirname "$launcher_path")/$link_target" ;;
+  esac
+done
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$launcher_path")" && pwd -P)"
+release_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
+node="$release_root/runtime/bin/node"
+
+if [ ! -x "$node" ]; then
+  echo "Nudge's bundled Node runtime is missing or is not executable: $node" >&2
+  exit 1
+fi
+
+export PATH="$release_root/runtime/bin:$release_root/app/apps/server/bin:${PATH:-/usr/bin:/bin}"
+export NUDGE_DISTRIBUTION=release
+export NUDGE_CONSOLE_URL="${NUDGE_CONSOLE_URL:-http://localhost:3100}"
+
+command="${1:-help}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+case "$command" in
+  run|server)
+    exec "$node" "$release_root/app/apps/server/dist/index.js" "$@"
+    ;;
+  console)
+    exec "$node" "$release_root/app/apps/console/dist/server/index.js" "$@"
+    ;;
+  auth)
+    exec "$node" "$release_root/app/apps/console/dist/server/auth-cli.js" "$@"
+    ;;
+  version|--version|-v)
+    version="$(sed -n '1p' "$release_root/VERSION")"
+    commit="$(sed -n '1p' "$release_root/COMMIT")"
+    node_version="$($node --version)"
+    printf 'Nudge %s (%s)\nNode %s\n' "$version" "$commit" "$node_version"
+    ;;
+  help|--help|-h)
+    cat <<'EOF'
+Nudge
+
+Usage:
+  nudge run                  start the iMessage agent server
+  nudge console              start the production console on port 3100
+  nudge auth [show|rotate]   manage the console access code
+  nudge version              show the build commit and Node version
+
+Run Nudge from the directory that holds .env. Runtime state defaults to
+$XDG_CONFIG_HOME/nudge or ~/.config/nudge. The release files can live elsewhere
+and can be replaced without touching that state.
+EOF
+    ;;
+  *)
+    echo "Unknown command: $command" >&2
+    echo "Run 'nudge help' for usage." >&2
+    exit 2
+    ;;
+esac

@@ -14,7 +14,7 @@ function makeWorkspace(options: { env?: string } = {}): string {
   // PORT steers the status probe away from 3000, where a real dev server may be listening.
   writeFileSync(
     join(root, ".env"),
-    `PORT=59983\n${options.env ?? "SPECTRUM_PROJECT_ID=p1\n# a comment\n"}`,
+    `NUDGE_DATA_DIR=.data\nPORT=59983\n${options.env ?? "SPECTRUM_PROJECT_ID=p1\n# a comment\n"}`,
   );
   mkdirSync(join(root, ".data", "skills", "demo"), { recursive: true });
   writeFileSync(join(root, ".data", "SYSTEM.md"), "Be helpful.");

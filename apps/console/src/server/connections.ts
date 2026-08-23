@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { runChatGptDeviceLogin, runGrokDeviceLogin } from "@nudge/agent";
 import {
   exchangeGoogleCode,
@@ -298,12 +297,12 @@ export class ConnectionsService {
 
   #chatGptAuthFile(): string {
     const settings = this.#context.settings().settings;
-    return resolve(this.#context.root, settings.provider.chatgpt.auth_file);
+    return this.#context.dataFile(settings.provider.chatgpt.auth_file);
   }
 
   #grokAuthFile(): string {
     const settings = this.#context.settings().settings;
-    return resolve(this.#context.root, settings.provider.grok.auth_file);
+    return this.#context.dataFile(settings.provider.grok.auth_file);
   }
 
   #chatGptStatus(): { connected: boolean; accountId: string | null; updatedAt: string | null } {
