@@ -43,12 +43,13 @@ jobs:
         run: git diff --exit-code
 
   audit:
-    name: Dependency audit (advisory)
+    name: Dependency audit
     runs-on: ubuntu-latest
-    # Non-blocking for now: a known moderate advisory in the OpenTelemetry
-    # dependency path (see OPEN_SOURCE_LAUNCH_AUDIT.md, item 12) would fail
-    # this job. Make it blocking once that upgrade lands.
-    continue-on-error: true
+    # Blocking, per the plan: the OpenTelemetry advisory (GHSA-8988-4f7v-96qf)
+    # that kept this advisory-only is resolved by a pnpm override pinning
+    # @opentelemetry/core@<2.8.0 to 2.10.0 — the exporters at ^0.218.0 pin the
+    # vulnerable 2.7.1 exactly, so no upstream range allows the patched line.
+    # Drop the override when @photon-ai/otel moves past the 0.218 exporters.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
