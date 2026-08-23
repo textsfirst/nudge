@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
 import { json, secureTestOptions } from "./auth-helper.js";
+import { makeWorkspace, writeWorkspaceEnv } from "./workspace.js";
 
 const FIXTURE = fileURLToPath(
   new URL("../../server/test/fixtures/mcp-fixture-server.mjs", import.meta.url),
@@ -14,21 +14,9 @@ const SLOW = 30_000;
 
 let root: string | undefined;
 
-function makeWorkspace(): string {
-  root = mkdtempSync(join(tmpdir(), "console-mcp-"));
-  writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "NUDGE_DATA_DIR=.data\nPORT=59983\n");
-  mkdirSync(join(root, ".data"), { recursive: true });
-  return root;
-}
-
-afterEach(() => {
-  if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined;
-});
-
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace(), ...secureTestOptions });
+  root = makeWorkspace({ prefix: "console-mcp-", env: "PORT=59983\n" });
+  return createConsoleApp({ root, ...secureTestOptions });
 }
 
 const registryPath = () => join(root!, ".data", "mcp", "servers.json");
@@ -201,10 +189,7 @@ describe("console MCP API", () => {
 
   it("test-connects a stdio server, resolving ${VAR} from .env", { timeout: SLOW }, async () => {
     const application = app();
-    writeFileSync(
-      join(root!, ".env"),
-      "NUDGE_DATA_DIR=.data\nPORT=59983\nFIXTURE_SECRET=from-env\n",
-    );
+    writeWorkspaceEnv(root!, "PORT=59983\nFIXTURE_SECRET=from-env\n");
     await json(application, "/api/mcp/servers/fixture", {
       method: "PUT",
       body: JSON.stringify({

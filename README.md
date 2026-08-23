@@ -66,7 +66,7 @@ No public URL or tunnel is needed: inbound messages arrive over an outbound stre
 
 ## Edge release
 
-Every push to `main` replaces the rolling [Edge release](https://github.com/textsfirst/nudge/releases/tag/edge). It contains compiled server code, the production console, production dependencies, and a pinned Node runtime. Archives are published for Linux x64, Linux arm64, and macOS arm64. Each archive's `BUILD.json` records its exact source commit.
+Every push to `main` replaces the rolling [Edge release](https://github.com/textsfirst/nudge/releases/tag/edge). It contains compiled server code, the production console, production dependencies, and a pinned Node runtime. Archives are published for Linux x64, Linux arm64, and macOS arm64. Edge builds are versioned `<base>-edge.<N>` (for example `0.1.0-edge.42`, where `N` is the CI run number); each archive's `BUILD.json` records the version and its exact source commit.
 
 Download and extract the archive for your machine, then create the configuration directory:
 
@@ -85,7 +85,7 @@ cd "${XDG_CONFIG_HOME:-$HOME/.config}/nudge"
 /path/to/extracted-nudge/bin/nudge run
 ```
 
-To update, extract the new Edge archive and point your service at its `bin/nudge`. The archive never contains runtime state, so replacing it does not touch your configuration or history.
+To update, run `/path/to/extracted-nudge/bin/nudge update`: it downloads the latest Edge archive, verifies its checksum, and swaps the release directory in place. `bin/nudge update --check` reports whether a newer build exists without downloading anything. (Extracting the new archive yourself and pointing your service at its `bin/nudge` still works too.) The archive never contains runtime state, so updating does not touch your configuration or history.
 
 ## Setup
 
@@ -246,7 +246,11 @@ mv .data "$nudge_config_root/nudge"
 
 Run those commands from the checkout that contains `.data`. If `.env` explicitly sets `NUDGE_DATA_DIR=.data`, remove that line after the move. If you saved a custom provider auth path beginning with `.data/`, change it to the bare filename on the Settings page. Installations that already set `NUDGE_DATA_DIR` can keep their current directory and do not need to move anything.
 
+If the updated server already started once before you did the move, it created a fresh data directory at the new location, and the `test ! -e` line above fails. Look inside `$nudge_config_root/nudge` first: a directory the server just created holds only a new `nudge.db` and the seeded `README.md`, with none of your memory files or skills. If that is all it contains, delete it and run the move again. If you used the agent or changed settings after that accidental start, that new state is in the new directory — merge the two by hand, starting from the old `.data` and copying over anything you did after the switch.
+
 ### Updating a source install
+
+Coming from a version that kept its data in the checkout's `.data` directory? Do the move above **before** restarting — otherwise the updated server starts a fresh, empty database at the new default location while your history, memory, and provider tokens stay behind in `.data`.
 
 ```bash
 git pull

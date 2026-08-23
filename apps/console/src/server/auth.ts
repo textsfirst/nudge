@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { dirname, join } from "node:path";
+import { distributionCommands } from "@nudge/server/distribution";
 
 export const CONSOLE_AUTH_FILE = "console-auth.json";
 export const CONSOLE_SESSION_COOKIE = "nudge_console_session";
@@ -177,9 +178,7 @@ function parseStoredAuth(file: string): StoredConsoleAuth {
   } catch (error) {
     throw new Error(
       `Could not read console auth file ${file}: ${error instanceof Error ? error.message : String(error)}. ` +
-        (process.env.NUDGE_DISTRIBUTION === "release"
-          ? "Fix its permissions/content or run `nudge auth rotate`."
-          : "Fix its permissions/content or run `pnpm console:auth rotate`."),
+        `Fix its permissions/content or run \`${distributionCommands().auth} rotate\`.`,
     );
   }
 }

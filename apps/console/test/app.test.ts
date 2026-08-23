@@ -1,21 +1,19 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { NudgeStore } from "@nudge/store";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
 import { json, secureTestOptions } from "./auth-helper.js";
+import { makeWorkspace } from "./workspace.js";
 
 let root: string | undefined;
 
-function makeWorkspace(options: { env?: string } = {}): string {
-  root = mkdtempSync(join(tmpdir(), "console-"));
-  writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
+function seededWorkspace(options: { env?: string } = {}): string {
   // PORT steers the status probe away from 3000, where a real dev server may be listening.
-  writeFileSync(
-    join(root, ".env"),
-    `NUDGE_DATA_DIR=.data\nPORT=59983\n${options.env ?? "SPECTRUM_PROJECT_ID=p1\n# a comment\n"}`,
-  );
+  root = makeWorkspace({
+    prefix: "console-",
+    env: `PORT=59983\n${options.env ?? "SPECTRUM_PROJECT_ID=p1\n# a comment\n"}`,
+  });
   mkdirSync(join(root, ".data", "skills", "demo"), { recursive: true });
   writeFileSync(join(root, ".data", "SYSTEM.md"), "Be helpful.");
   writeFileSync(join(root, ".data", "README.md"), "system manual");
@@ -29,13 +27,8 @@ function makeWorkspace(options: { env?: string } = {}): string {
   return root;
 }
 
-afterEach(() => {
-  if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined;
-});
-
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace(), ...secureTestOptions });
+  return createConsoleApp({ root: seededWorkspace(), ...secureTestOptions });
 }
 
 describe("console API", () => {

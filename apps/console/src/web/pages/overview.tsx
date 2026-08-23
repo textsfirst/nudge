@@ -20,7 +20,7 @@ export function OverviewPage() {
       label: "Nudge server",
       ok: data.serverUp && data.serverHealthy,
       detail: !data.serverUp
-        ? data.serverError ?? `Not responding on port ${data.serverPort} — start it with \`pnpm dev\``
+        ? data.serverError ?? `Not responding on port ${data.serverPort} — start it with \`${data.serverCommand}\``
         : !data.serverHealthy
           ? `Running on port ${data.serverPort}, but unhealthy: ${data.serverError ?? "check server logs"}`
           : data.serverError

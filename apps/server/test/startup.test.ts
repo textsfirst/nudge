@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { settingsFromOverrides } from "../src/config.js";
 import { collectStartupIssues, formatStartupIssues } from "../src/startup.js";
 
@@ -7,8 +7,14 @@ const READY_ENV = {
   SPECTRUM_PROJECT_SECRET: "secret",
 };
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("Nudge startup preflight", () => {
   it("collects first-run setup problems into one actionable report", () => {
+    // Pin the source distribution: an ambient NUDGE_DISTRIBUTION would flip the wording.
+    vi.stubEnv("NUDGE_DISTRIBUTION", undefined);
     const issues = collectStartupIssues({}, settingsFromOverrides({}));
     expect(issues.map((issue) => issue.message)).toEqual([
       "Owner handle is not configured.",
@@ -20,6 +26,14 @@ describe("Nudge startup preflight", () => {
     expect(message).toContain("Console → Settings");
     expect(message).toContain("Console → Secrets");
     expect(message).toContain("pnpm console");
+  });
+
+  it("tells release installs to start the console with the nudge CLI", () => {
+    vi.stubEnv("NUDGE_DISTRIBUTION", "release");
+    const issues = collectStartupIssues({}, settingsFromOverrides({}));
+    const message = formatStartupIssues(issues, "http://localhost:5174");
+    expect(message).toContain("nudge console");
+    expect(message).not.toContain("pnpm console");
   });
 
   it("passes a configured subscription setup", () => {

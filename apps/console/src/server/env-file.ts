@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { SECRET_SPECS } from "@nudge/server/config";
 
 /**
@@ -28,9 +28,25 @@ function renderEnvValue(value: string): string {
   throw new Error("Secret values cannot contain both single and double quotes.");
 }
 
+/**
+ * Parse cache keyed on mtime+size (size guards sub-ms mtime granularity), so
+ * repeat reads cost one stat and any write — ours or an external editor's —
+ * invalidates naturally. Callers must treat the returned map as read-only.
+ */
+const parseCache = new Map<string, { mtimeMs: number; size: number; values: Map<string, string> }>();
+
 export function readEnvKeys(path: string): Map<string, string> {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return new Map();
+  }
+  const cached = parseCache.get(path);
+  if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+    return cached.values;
+  }
   const values = new Map<string, string>();
-  if (!existsSync(path)) return values;
   for (const line of readFileSync(path, "utf8").split("\n")) {
     const match = LINE_PATTERN.exec(line);
     if (!match?.[1]) continue;
@@ -41,6 +57,7 @@ export function readEnvKeys(path: string): Map<string, string> {
     }
     values.set(match[1], raw.replace(/^(["'])(.*)\1$/, "$2"));
   }
+  parseCache.set(path, { mtimeMs: stats.mtimeMs, size: stats.size, values });
   return values;
 }
 

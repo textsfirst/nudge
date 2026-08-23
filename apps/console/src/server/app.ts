@@ -9,6 +9,7 @@ import {
   settingsSchema,
   type Settings,
 } from "@nudge/server/config";
+import { distributionCommands } from "@nudge/server/distribution";
 import { Elysia } from "elysia";
 import { ConsoleAuth } from "./auth.js";
 import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./connections.js";
@@ -192,6 +193,7 @@ export function createConsoleApp(
           settingsError,
           ownerHandle: snapshot.settings.owner_handle || null,
           serverPort: port,
+          serverCommand: distributionCommands().run,
           serverUp: server.reachable,
           serverHealthy: server.healthy,
           serverError: server.error ?? (!server.reachable ? localStartupError : null),

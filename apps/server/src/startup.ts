@@ -1,4 +1,5 @@
 import type { Settings } from "./config.js";
+import { distributionCommands } from "./distribution.js";
 
 export interface StartupIssue {
   message: string;
@@ -49,8 +50,7 @@ export function formatStartupIssues(
   issues: StartupIssue[],
   consoleUrl = process.env.NUDGE_CONSOLE_URL || "http://localhost:5174",
 ): string {
-  const consoleCommand =
-    process.env.NUDGE_DISTRIBUTION === "release" ? "nudge console" : "pnpm console";
+  const consoleCommand = distributionCommands().console;
   const list = issues
     .map((issue, index) => `${index + 1}. ${issue.message}\n   ${issue.action}`)
     .join("\n");

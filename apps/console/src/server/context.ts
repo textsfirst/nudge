@@ -36,14 +36,20 @@ export class ConsoleContext {
     return join(this.root, ".env");
   }
 
+  /**
+   * Workspace .env merged under the process environment (process.env wins) —
+   * the same precedence the server gets from dotenv with `override: false`.
+   */
+  environment(): NodeJS.ProcessEnv {
+    return { ...Object.fromEntries(readEnvKeys(this.envPath)), ...process.env };
+  }
+
   #env(key: string): string | undefined {
-    const fromProcess = process.env[key];
-    if (fromProcess !== undefined) return fromProcess || undefined;
-    return readEnvKeys(this.envPath).get(key) || undefined;
+    return this.environment()[key] || undefined;
   }
 
   dataDir(): string {
-    return resolveDataDir(this.root, this.#env("NUDGE_DATA_DIR"), process.env);
+    return resolveDataDir(this.root, this.#env("NUDGE_DATA_DIR"), this.environment());
   }
 
   dataFile(path: string): string {
