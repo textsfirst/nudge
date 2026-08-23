@@ -240,6 +240,48 @@ describe("NudgeAgent.reply", () => {
     expect(nextPrompt?.text).toContain("### About the owner (USER.md)\n- Allergic to shellfish");
   });
 
+  it("skips a promotion write when the file changed during the model call", async () => {
+    // The thunk plays the promotion model: before answering, another writer
+    // (console, execution agent) lands an edit. The stale full-file replace
+    // must be skipped, not clobber the newer content.
+    let dir = "";
+    const harness = makeAgent([
+      "r1",
+      "summary",
+      () => {
+        writeFileSync(join(dir, "USER.md"), "- concurrent edit\n");
+        return JSON.stringify({ "USER.md": "- stale promotion" });
+      },
+      "r2",
+    ]);
+    dir = harness.dataDir;
+
+    await harness.agent.reply(HANDLE, "hello");
+    harness.setNow(T0 + 7 * 60 * 60 * 1000);
+    await expect(harness.agent.reply(HANDLE, "morning")).resolves.toBe("r2");
+    expect(readFileSync(join(dir, "USER.md"), "utf8")).toBe("- concurrent edit\n");
+  });
+
+  it("retries the carryover summary once before giving up on both channels", async () => {
+    const { agent, store, setNow, dataDir } = makeAgent([
+      "r1",
+      () => {
+        throw new Error("summarizer down");
+      },
+      "second try summary",
+      JSON.stringify({ "MEMORY.md": "- promoted on retry" }),
+      "r2",
+    ]);
+
+    await agent.reply(HANDLE, "hello");
+    setNow(T0 + 7 * 60 * 60 * 1000);
+    await expect(agent.reply(HANDLE, "morning")).resolves.toBe("r2");
+
+    // The retry saved carryover AND promotion — one blip no longer loses both.
+    expect(store.activeSession(HANDLE)!.carryover).toBe("second try summary");
+    expect(readFileSync(join(dataDir, "MEMORY.md"), "utf8")).toBe("- promoted on retry");
+  });
+
   it("leaves memory untouched when the promotion reply is malformed", async () => {
     const { agent, setNow, dataDir } = makeAgent([
       "r1",
