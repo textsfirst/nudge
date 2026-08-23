@@ -634,11 +634,37 @@ function scheduleHeadings(markdown: string): Set<string> {
 }
 
 function inboxWatchSection(account: GoogleAccount): string {
-  // The check deliberately has no newer_than: window — a rolling window
-  // changes output whenever mail merely ages out of it, waking the agent on
-  // nothing. The unread inbox only changes when mail arrives or gets handled.
+  // The check is gmail-tail's arrivals journal, not an inbox snapshot: its
+  // output changes exactly when mail arrives (Gmail history cursor), so the
+  // agent never wakes because the owner merely read or archived something,
+  // and mail handled on another device before the sweep is still seen.
   const name = inboxWatchEntryName(account.label);
   return `## ${name}
+when: every 5 minutes
+agent: email
+check: gmail-tail ${account.label}
+New mail arrived on the ${account.label} account (${account.email}) — the
+last lines of the check output are the arrivals journal, newest last; the
+ones you have not seen before are what landed. A [gap] line means arrivals
+may have been missed — sweep the inbox with gws to catch up. Triage with
+gws -a ${account.label}: read what arrived, judge what actually matters
+against the owner's interruption budget, and prepare Gmail drafts — never
+send — for anything that needs a reply. Report only what needs the owner
+(what landed, why it matters, which drafts are waiting); if nothing does,
+say so briefly.`;
+}
+
+/**
+ * Every prior revision of the seeded inbox-watch section, reconstructed per
+ * account. An on-disk section still matching one of these verbatim was never
+ * customized and is safe to upgrade in place; anything else belongs to the
+ * owner or the agent and is kept forever — the same rule seedGoogleSkill
+ * applies to its prior hashes.
+ */
+function priorInboxWatchSections(account: GoogleAccount): string[] {
+  const name = inboxWatchEntryName(account.label);
+  // v1: snapshot check — hash of the current unread inbox.
+  const v1 = `## ${name}
 when: every 5 minutes
 agent: email
 check: gws -a ${account.label} gmail search "in:inbox is:unread" | sort
@@ -648,6 +674,48 @@ against the owner's interruption budget, and prepare Gmail drafts — never
 send — for anything that needs a reply. Your earlier sweeps are the turns
 above; dedupe against them. Report only what needs the owner (what landed,
 why it matters, which drafts are waiting); if nothing does, say so briefly.`;
+  return [v1];
+}
+
+/**
+ * Upgrade seeded inbox-watch entries whose text is still an unmodified prior
+ * revision to the current section. Runs at boot; a customized or renamed
+ * entry is never touched, and the scheduler's command-change re-baseline
+ * keeps the swap silent. Returns the labels upgraded.
+ */
+export function upgradeSeededInboxWatches(dataDir: string): string[] {
+  const seeds = readInboxSeeds(dataDir);
+  const path = schedulePath(dataDir);
+  if (!existsSync(path)) return [];
+  const accounts = readGoogleAccounts(dataDir).filter((account) =>
+    seeds.inboxWatch.includes(account.label),
+  );
+  if (accounts.length === 0) return [];
+
+  const existing = readFileSync(path, "utf8");
+  let candidate = existing;
+  const upgraded: string[] = [];
+  for (const account of accounts) {
+    const sections = candidate.split(/^(?=##\s)/m);
+    const index = sections.findIndex((section) =>
+      priorInboxWatchSections(account).some((prior) => section.trim() === prior.trim()),
+    );
+    if (index === -1) continue;
+    const trailing = /\s*$/.exec(sections[index]!)?.[0] ?? "\n";
+    sections[index] = `${inboxWatchSection(account)}${trailing}`;
+    candidate = sections.join("");
+    upgraded.push(account.label);
+  }
+  if (upgraded.length === 0) return [];
+  // The current template must not parse worse than what it replaces; on any
+  // doubt leave the file alone — the old watcher keeps working.
+  if (parseSchedule(candidate).errors.length > parseSchedule(existing).errors.length) {
+    return [];
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, candidate);
+  renameSync(temporary, path);
+  return upgraded;
 }
 
 const RUNDOWN_SECTION = `## ${RUNDOWN_ENTRY_NAME}

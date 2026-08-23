@@ -24,6 +24,7 @@ import {
   readGoogleAccounts,
   seedGoogleSkill,
   seedInboxJobs,
+  upgradeSeededInboxWatches,
 } from "./google.js";
 import { buildConnectionProbes, ConnectionHealthMonitor } from "./health.js";
 import { createHttpApp } from "./http.js";
@@ -113,6 +114,22 @@ async function main(): Promise<void> {
     } catch (error) {
       logger.warn("Could not seed the inbox job", {
         account: account.label,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (googleAccounts.length > 0) {
+    // Seeded inbox watchers still on an unmodified prior revision move to the
+    // current check (the gmail-tail arrivals journal); customized or renamed
+    // entries are never touched, and the scheduler's command-change
+    // re-baseline keeps the swap silent.
+    try {
+      const upgraded = upgradeSeededInboxWatches(config.dataDir);
+      if (upgraded.length > 0) {
+        logger.info("Upgraded seeded inbox watchers", { accounts: upgraded });
+      }
+    } catch (error) {
+      logger.warn("Could not upgrade the seeded inbox watchers", {
         error: error instanceof Error ? error.message : String(error),
       });
     }

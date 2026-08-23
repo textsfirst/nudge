@@ -181,8 +181,12 @@ export class Scheduler {
         // accumulated memory, and its report reaches the owner through the
         // interaction loop's curation — no direct delivery from here.
         await agent.runAgentTask(ownerHandle, entry.name, prompt, entry.agent);
-        if (pendingHash) {
-          store.recordScheduleCheck(entry.id, { hash: pendingHash, changed: true, woke: true }, now);
+        if (pendingHash && entry.check) {
+          store.recordScheduleCheck(
+            entry.id,
+            { hash: pendingHash, changed: true, woke: true, command: entry.check },
+            now,
+          );
         }
       } else {
         const text = await agent.runTask(ownerHandle, entry.name, entry.prompt);
@@ -209,8 +213,11 @@ export class Scheduler {
   /**
    * Run an entry's check and decide whether to wake its agent. Wake on a
    * changed output or a failed command (a watcher that breaks must surface,
-   * not go dark); stay silent on the first sight (baseline) and on an
-   * unchanged output. Health counters land in schedule_state either way.
+   * not go dark); stay silent on the first sight (baseline), on an unchanged
+   * output, and on the first run of an edited check command — a hash is only
+   * comparable to output of the same command, so an edit re-baselines instead
+   * of waking the agent on an apples-to-oranges diff. Health counters land in
+   * schedule_state either way.
    */
   async #runCheckGate(
     entryId: string,
@@ -227,7 +234,7 @@ export class Scheduler {
     }
     if (!result.ok) {
       const output = capForBrief(result.output) || "(no output)";
-      store.recordScheduleCheck(entryId, { error: output, woke: true }, now);
+      store.recordScheduleCheck(entryId, { error: output, woke: true, command }, now);
       logger.warn("A watcher check failed; waking its agent with the error", { entryId });
       return {
         wake: true,
@@ -239,14 +246,20 @@ export class Scheduler {
     }
     const normalized = result.output.trim();
     const hash = createHash("sha256").update(normalized).digest("hex");
-    if (state.lastCheckHash === null) {
-      // First sight: baseline silently, mirroring the scheduler's no-back-fill rule.
-      store.recordScheduleCheck(entryId, { hash }, now);
-      logger.info("Watcher baseline recorded", { entryId });
+    if (state.lastCheckHash === null || state.lastCheckCommand !== command) {
+      // First sight — of the entry or of an edited check command: baseline
+      // silently, mirroring the scheduler's no-back-fill rule.
+      store.recordScheduleCheck(entryId, { hash, command }, now);
+      logger.info(
+        state.lastCheckHash === null
+          ? "Watcher baseline recorded"
+          : "Watcher check command changed; re-baselined",
+        { entryId },
+      );
       return { wake: false };
     }
     if (state.lastCheckHash === hash) {
-      store.recordScheduleCheck(entryId, { hash }, now);
+      store.recordScheduleCheck(entryId, { hash, command }, now);
       return { wake: false };
     }
     return {

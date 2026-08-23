@@ -156,6 +156,8 @@ export interface ScheduleStateRow {
   wakes: number;
   /** The last check failure's message; null after any success. */
   lastCheckError: string | null;
+  /** The check command the stored hash belongs to; a changed command re-baselines. */
+  lastCheckCommand: string | null;
 }
 
 export interface OutboundRow {
@@ -188,7 +190,7 @@ export interface TurnProgressRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CURRENT_SCHEMA_VERSION = 10;
+const CURRENT_SCHEMA_VERSION = 11;
 
 const INITIAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -382,6 +384,14 @@ const MIGRATIONS: readonly Migration[] = [
     // follows. Migration 1 always creates the old table, so the rename is
     // unconditional for fresh and upgraded databases alike.
     db.exec("ALTER TABLE processed_webhooks RENAME TO processed_messages");
+  },
+  (db) => {
+    // A check hash is only comparable to output of the same command, so the
+    // command is stored alongside it: when a watcher's check: line is edited,
+    // the gate re-baselines silently instead of waking the agent on an
+    // apples-to-oranges diff. NULL (pre-upgrade rows) reads as "unknown
+    // command" and re-baselines once, which is the safe direction.
+    db.exec("ALTER TABLE schedule_state ADD COLUMN last_check_command TEXT");
   },
 ];
 
@@ -1021,6 +1031,7 @@ export class NudgeStore {
         checksRun: 0,
         wakes: 0,
         lastCheckError: null,
+        lastCheckCommand: null,
       };
     }
     return {
@@ -1034,6 +1045,7 @@ export class NudgeStore {
       checksRun: requiredNumber(row, "checks_run"),
       wakes: requiredNumber(row, "wakes"),
       lastCheckError: nullableString(row, "last_check_error"),
+      lastCheckCommand: nullableString(row, "last_check_command"),
     };
   }
 
@@ -1045,7 +1057,7 @@ export class NudgeStore {
    */
   recordScheduleCheck(
     entryId: string,
-    result: { hash?: string; changed?: boolean; error?: string; woke?: boolean },
+    result: { hash?: string; changed?: boolean; error?: string; woke?: boolean; command?: string },
     at = Date.now(),
   ): void {
     this.#db.prepare("INSERT OR IGNORE INTO schedule_state (entry_id) VALUES (?)").run(entryId);
@@ -1057,7 +1069,8 @@ export class NudgeStore {
            last_check_at = ?,
            last_check_hash = COALESCE(?, last_check_hash),
            last_change_at = CASE WHEN ? THEN ? ELSE last_change_at END,
-           last_check_error = ?
+           last_check_error = ?,
+           last_check_command = COALESCE(?, last_check_command)
          WHERE entry_id = ?`,
       )
       .run(
@@ -1067,6 +1080,7 @@ export class NudgeStore {
         result.changed ? 1 : 0,
         at,
         result.error ?? null,
+        result.command ?? null,
         entryId,
       );
   }

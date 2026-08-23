@@ -8,6 +8,7 @@ import {
   removeGoogleAccount,
   saveGoogleAccount,
   seedInboxJobs,
+  upgradeSeededInboxWatches,
 } from "../src/google.js";
 import type { GoogleAccount } from "../src/google.js";
 
@@ -51,11 +52,11 @@ describe("seedInboxJobs", () => {
 
     const watch = entries.find((entry) => entry.name === "Inbox watch (work)");
     expect(watch?.agent).toBe("email");
-    expect(watch?.check).toContain('gws -a work gmail search "in:inbox is:unread"');
-    expect(watch?.check).toContain("| sort");
+    expect(watch?.check).toBe("gmail-tail work");
     expect(watch?.when).toEqual({ kind: "cron", pattern: "*/5 * * * *" });
     expect(watch?.prompt).toContain("w@corp.com");
     expect(watch?.prompt).toContain("never\nsend");
+    expect(watch?.prompt).toContain("[gap]");
 
     const rundown = entries.find((entry) => entry.name === "Morning rundown");
     expect(rundown?.agent).toBeNull();
@@ -162,6 +163,81 @@ describe("seedInboxJobs", () => {
       "Inbox watch (work)",
       "Morning rundown",
     ]);
+  });
+});
+
+describe("upgradeSeededInboxWatches", () => {
+  /** The seeded section exactly as v1 shipped it — the upgrade's match target. */
+  function v1Section(label: string, email: string): string {
+    return `## Inbox watch (${label})
+when: every 5 minutes
+agent: email
+check: gws -a ${label} gmail search "in:inbox is:unread" | sort
+New unread mail on the ${label} account (${email}). Triage it
+with gws -a ${label}: read what arrived, judge what actually matters
+against the owner's interruption budget, and prepare Gmail drafts — never
+send — for anything that needs a reply. Your earlier sweeps are the turns
+above; dedupe against them. Report only what needs the owner (what landed,
+why it matters, which drafts are waiting); if nothing does, say so briefly.`;
+  }
+
+  /** A connected "work" account whose SCHEDULE.md still carries the given text. */
+  function legacyInstall(dir: string, scheduleText: string): void {
+    saveGoogleAccount(dir, {
+      label: "work",
+      client: CLIENT,
+      tokens: { refreshToken: "r1", email: "w@corp.com", grantedScopes: [GMAIL_MODIFY] },
+    });
+    writeFileSync(join(dir, "SCHEDULE.md"), scheduleText);
+  }
+
+  it("upgrades a pristine v1 section in place", () => {
+    const dir = makeDataDir();
+    legacyInstall(
+      dir,
+      `${v1Section("work", "w@corp.com")}\n\n## Owner entry\nwhen: every day at 9:00\nkeep me\n`,
+    );
+
+    expect(upgradeSeededInboxWatches(dir)).toEqual(["work"]);
+    const { entries, errors } = parseSchedule(schedule(dir));
+    expect(errors).toEqual([]);
+    expect(entries.map((entry) => entry.name)).toEqual(["Inbox watch (work)", "Owner entry"]);
+    const watch = entries.find((entry) => entry.name === "Inbox watch (work)");
+    expect(watch?.check).toBe("gmail-tail work");
+    expect(watch?.prompt).toContain("w@corp.com");
+  });
+
+  it("never touches a customized or renamed section", () => {
+    const dir = makeDataDir();
+    const customized = v1Section("work", "w@corp.com").replace(
+      "say so briefly.",
+      "say so briefly. Also always check spam.",
+    );
+    legacyInstall(dir, `${customized}\n`);
+    expect(upgradeSeededInboxWatches(dir)).toEqual([]);
+    expect(schedule(dir)).toContain('gws -a work gmail search "in:inbox is:unread"');
+
+    const renamed = v1Section("work", "w@corp.com").replace(
+      "## Inbox watch (work)",
+      "## My mail",
+    );
+    writeFileSync(join(dir, "SCHEDULE.md"), `${renamed}\n`);
+    expect(upgradeSeededInboxWatches(dir)).toEqual([]);
+    expect(schedule(dir)).toContain("## My mail");
+  });
+
+  it("is a no-op without a schedule file or seeded labels", () => {
+    const dir = makeDataDir();
+    expect(upgradeSeededInboxWatches(dir)).toEqual([]);
+  });
+
+  it("is idempotent — the upgraded section no longer matches", () => {
+    const dir = makeDataDir();
+    legacyInstall(dir, `${v1Section("work", "w@corp.com")}\n`);
+    expect(upgradeSeededInboxWatches(dir)).toEqual(["work"]);
+    const once = schedule(dir);
+    expect(upgradeSeededInboxWatches(dir)).toEqual([]);
+    expect(schedule(dir)).toBe(once);
   });
 });
 

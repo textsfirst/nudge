@@ -122,7 +122,9 @@ conversation, after the owner approved the exact message; background agents and
 scheduled runs prepare Gmail drafts and report them. Connecting a Gmail-scoped
 account also seeds an `Inbox watch (<label>)` watcher and a `Morning rundown`
 entry into SCHEDULE.md. They are the owner's to keep or delete — a deleted
-seeded entry is never re-created.
+seeded entry is never re-created. The watcher's check, `gmail-tail <account>`,
+prints that account's mail-arrivals journal (newest last) and also works
+directly in bash; the watchers skill has the details.
 
 ## MCP servers (mcp/servers.json)
 

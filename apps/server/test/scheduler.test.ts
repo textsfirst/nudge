@@ -153,6 +153,37 @@ describe("Scheduler", () => {
     expect(health.lastChangeAt).not.toBeNull();
   });
 
+  it("re-baselines silently when the check command is edited", async () => {
+    const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe slots\nSlots changed.";
+    const { scheduler, schedulePath, store, runAgentTask, setNow } = harness(WATCHER, null, [
+      { ok: true, output: "none open\n" },
+      { ok: true, output: "slots: 0\n" }, // new command, new output shape
+      { ok: true, output: "slots: 2\n" },
+    ]);
+
+    await scheduler.tick();
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick(); // baseline under the original command
+    expect(runAgentTask).not.toHaveBeenCalled();
+
+    // The owner (or the agent) tightens the check. Different command, so its
+    // output is not comparable — the next firing must re-baseline, not wake.
+    writeFileSync(
+      schedulePath,
+      "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe slots --tight\nSlots changed.",
+    );
+    setNow(Date.UTC(2026, 7, 11, 13, 0, 30));
+    await scheduler.tick();
+    expect(runAgentTask).not.toHaveBeenCalled();
+
+    setNow(Date.UTC(2026, 7, 12, 13, 0, 30));
+    await scheduler.tick(); // a real change under the new command wakes
+    expect(runAgentTask).toHaveBeenCalledOnce();
+
+    const entryId = parseSchedule(WATCHER).entries[0]!.id;
+    expect(store.scheduleState(entryId).lastCheckCommand).toBe("probe slots --tight");
+  });
+
   it("wakes the watcher's agent when the check command fails", async () => {
     const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe\nSlots changed.";
     const { scheduler, runAgentTask, setNow } = harness(WATCHER, null, [
