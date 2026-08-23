@@ -1,0 +1,171 @@
+#!/bin/sh
+# Nudge installer: curl -fsSL https://textsfirst.com/install | sh
+#
+# Installs the latest edge build into ${NUDGE_INSTALL_DIR:-~/.local/share/nudge}
+# and symlinks the launcher into ${NUDGE_BIN_DIR:-~/.local/bin}. Re-running it
+# updates an existing install in place.
+
+set -eu
+
+releases_page="https://github.com/textsfirst/nudge/releases"
+
+case "$(uname -s)" in
+  Linux)
+    platform="linux"
+    case "$(uname -m)" in
+      x86_64) arch="x64" ;;
+      aarch64|arm64) arch="arm64" ;;
+      *)
+        echo "Unsupported Linux architecture: $(uname -m)." >&2
+        echo "Prebuilt archives cover x86_64 and arm64; see $releases_page" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  Darwin)
+    platform="macos"
+    case "$(uname -m)" in
+      arm64) arch="arm64" ;;
+      x86_64)
+        echo "There is no Intel mac build of Nudge; archives cover Apple silicon only." >&2
+        echo "See $releases_page" >&2
+        exit 1
+        ;;
+      *)
+        echo "Unsupported mac architecture: $(uname -m). See $releases_page" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "Unsupported platform: $(uname -s)." >&2
+    echo "Prebuilt archives cover Linux (x64, arm64) and macOS (Apple silicon); see $releases_page" >&2
+    exit 1
+    ;;
+esac
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "The Nudge installer needs curl, which is not on PATH." >&2
+  exit 1
+fi
+if ! command -v tar >/dev/null 2>&1; then
+  echo "The Nudge installer needs tar, which is not on PATH." >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  checksum_cmd="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  checksum_cmd="shasum -a 256"
+else
+  echo "The Nudge installer needs sha256sum or shasum to verify downloads." >&2
+  exit 1
+fi
+
+asset="nudge-edge-$platform-$arch.tar.gz"
+download_base="${NUDGE_INSTALL_BASE_URL:-https://github.com/textsfirst/nudge/releases/download/edge}"
+install_dir="${NUDGE_INSTALL_DIR:-$HOME/.local/share/nudge}"
+bin_dir="${NUDGE_BIN_DIR:-$HOME/.local/bin}"
+
+# Reads "key": "value" out of a BUILD.json without assuming node is on PATH.
+build_json_field() {
+  sed -n 's/^[[:space:]]*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | sed -n '1p'
+}
+
+# Stage next to the install dir so the final mv stays on one filesystem.
+install_parent="$(dirname "$install_dir")"
+mkdir -p "$install_parent"
+if ! staging="$(mktemp -d "$install_parent/.nudge-install.XXXXXX")"; then
+  echo "Could not create a staging directory under $install_parent." >&2
+  exit 1
+fi
+trap 'rm -rf "$staging"' EXIT
+
+echo "Downloading $download_base/$asset"
+if ! curl -fL --progress-bar --retry 2 -o "$staging/$asset" "$download_base/$asset"; then
+  echo "Could not download $download_base/$asset." >&2
+  echo "Check your network access and that the edge release has a $platform-$arch archive." >&2
+  exit 1
+fi
+if ! curl -fsSL --retry 2 -o "$staging/SHA256SUMS" "$download_base/SHA256SUMS"; then
+  echo "Could not download $download_base/SHA256SUMS." >&2
+  exit 1
+fi
+if ! grep " $asset\$" "$staging/SHA256SUMS" > "$staging/checksum.txt"; then
+  echo "The edge release's SHA256SUMS does not list $asset." >&2
+  exit 1
+fi
+if ! (cd "$staging" && $checksum_cmd -c checksum.txt >/dev/null 2>&1); then
+  echo "Checksum verification failed for $asset; nothing was installed." >&2
+  exit 1
+fi
+
+mkdir "$staging/extract"
+tar -xzf "$staging/$asset" -C "$staging/extract"
+new_bundle=""
+for entry in "$staging/extract"/nudge-*; do
+  if [ -d "$entry" ]; then
+    new_bundle="$entry"
+    break
+  fi
+done
+if [ -z "$new_bundle" ]; then
+  echo "The downloaded archive does not contain a nudge-* release directory." >&2
+  exit 1
+fi
+new_version="$(build_json_field "$new_bundle/BUILD.json" version)"
+if [ -z "$new_version" ]; then
+  new_version="unknown"
+fi
+
+if [ -f "$install_dir/BUILD.json" ]; then
+  old_version="$(build_json_field "$install_dir/BUILD.json" version)"
+  backup="$install_dir.old.$$"
+  mv "$install_dir" "$backup"
+  if ! mv "$new_bundle" "$install_dir"; then
+    mv "$backup" "$install_dir"
+    echo "The install failed while swapping release directories; the previous install was restored." >&2
+    exit 1
+  fi
+  rm -rf "$backup"
+  echo "Updated ${old_version:-unknown} → $new_version"
+elif [ -d "$install_dir" ]; then
+  if [ -n "$(ls -A "$install_dir")" ]; then
+    echo "$install_dir already exists but does not look like a Nudge install (no BUILD.json)." >&2
+    echo "Move it aside, or set NUDGE_INSTALL_DIR to install somewhere else." >&2
+    exit 1
+  fi
+  rmdir "$install_dir"
+  mv "$new_bundle" "$install_dir"
+  echo "Installed Nudge $new_version to $install_dir"
+elif [ -e "$install_dir" ]; then
+  echo "$install_dir exists and is not a directory. Move it aside, or set NUDGE_INSTALL_DIR." >&2
+  exit 1
+else
+  mv "$new_bundle" "$install_dir"
+  echo "Installed Nudge $new_version to $install_dir"
+fi
+
+mkdir -p "$bin_dir"
+ln -sf "$install_dir/bin/nudge" "$bin_dir/nudge"
+echo "Linked $bin_dir/nudge"
+case ":$PATH:" in
+  *":$bin_dir:"*) ;;
+  *)
+    echo "$bin_dir is not on your PATH. Add it with:"
+    echo "  export PATH=\"$bin_dir:\$PATH\""
+    ;;
+esac
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/nudge"
+if [ ! -e "$config_dir/.env" ]; then
+  mkdir -p "$config_dir"
+  cp "$install_dir/.env.example" "$config_dir/.env"
+  chmod 600 "$config_dir/.env"
+  echo "Created $config_dir/.env — put your Photon credentials there."
+fi
+
+echo ""
+echo "Nudge $new_version is installed. Next:"
+echo "  cd $config_dir && nudge console   # finish setup at http://localhost:3100"
+echo "  nudge run                         # start the agent server (same directory)"
+echo "  nudge update                      # update to the latest edge build"

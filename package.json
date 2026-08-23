@@ -18,7 +18,9 @@
     "console:auth": "pnpm --filter @nudge/console auth",
     "release:pack": "pnpm build && bash scripts/release/package.sh",
     "release:smoke": "bash scripts/release/smoke.sh",
-    "build": "pnpm -r build",
+    "build": "pnpm -r --filter=!@nudge/web build",
+    "site:dev": "pnpm --filter @nudge/web dev",
+    "site:build": "pnpm --filter @nudge/web build",
     "typecheck": "pnpm build && pnpm -r typecheck",
     "test": "pnpm -r test",
     "check": "pnpm typecheck && pnpm test"
