@@ -519,6 +519,23 @@ describe("NudgeStore", () => {
     }
   });
 
+  it("migrates once when two processes open the same file", () => {
+    // The server and console share the database; the second opener must see
+    // the first's migrations as already applied, not re-run their DDL.
+    const dir = mkdtempSync(join(tmpdir(), "nudge-store-shared-"));
+    const path = join(dir, "shared.db");
+    try {
+      const first = new NudgeStore(path);
+      const second = new NudgeStore(path);
+      second.recordScheduleCheck("watch-1", { hash: "aaa", command: "probe" }, 1_000);
+      expect(first.scheduleState("watch-1").lastCheckCommand).toBe("probe");
+      first.close();
+      second.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("lists sessions newest-first with counts and previews", () => {
     const store = new NudgeStore(":memory:");
     const first = store.startSession(HANDLE, 1_000);

@@ -184,6 +184,59 @@ describe("Scheduler", () => {
     expect(store.scheduleState(entryId).lastCheckCommand).toBe("probe slots --tight");
   });
 
+  it("re-baselines silently after an edited command's first run fails", async () => {
+    const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe slots\nSlots changed.";
+    const { scheduler, schedulePath, runAgentTask, setNow } = harness(WATCHER, null, [
+      { ok: true, output: "none open\n" },
+      { ok: false, output: "exit 1: flag error" }, // the edited command's debut
+      { ok: true, output: "slots: 0\n" },
+      { ok: true, output: "slots: 2\n" },
+    ]);
+
+    await scheduler.tick();
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick(); // baseline under the original command
+    writeFileSync(
+      schedulePath,
+      "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe slots --tight\nSlots changed.",
+    );
+    setNow(Date.UTC(2026, 7, 11, 13, 0, 30));
+    await scheduler.tick(); // failure surfaces
+    expect(runAgentTask).toHaveBeenCalledOnce();
+
+    // The failure must not have claimed the old hash for the new command:
+    // the first success under it re-baselines instead of diffing.
+    setNow(Date.UTC(2026, 7, 12, 13, 0, 30));
+    await scheduler.tick();
+    expect(runAgentTask).toHaveBeenCalledOnce();
+
+    setNow(Date.UTC(2026, 7, 13, 13, 0, 30));
+    await scheduler.tick(); // a real change under the new command still wakes
+    expect(runAgentTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-wakes with the same change when the agent run crashes", async () => {
+    const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe slots\nSlots changed.";
+    const { scheduler, runAgentTask, setNow } = harness(WATCHER, null, [
+      { ok: true, output: "none open\n" },
+      { ok: true, output: "2 slots open\n" },
+      { ok: true, output: "2 slots open\n" },
+    ]);
+    runAgentTask.mockRejectedValueOnce(new Error("model unavailable"));
+
+    await scheduler.tick();
+    setNow(Date.UTC(2026, 7, 10, 13, 0, 30));
+    await scheduler.tick(); // baseline
+    setNow(Date.UTC(2026, 7, 11, 13, 0, 30));
+    await scheduler.tick(); // change wakes, but the agent run crashes
+    expect(runAgentTask).toHaveBeenCalledOnce();
+
+    // The hash was not recorded, so the same still-changed output wakes again.
+    setNow(Date.UTC(2026, 7, 12, 13, 0, 30));
+    await scheduler.tick();
+    expect(runAgentTask).toHaveBeenCalledTimes(2);
+  });
+
   it("wakes the watcher's agent when the check command fails", async () => {
     const WATCHER = "## Slots\nwhen: every day at 13:00\nagent: visa\ncheck: probe\nSlots changed.";
     const { scheduler, runAgentTask, setNow } = harness(WATCHER, null, [

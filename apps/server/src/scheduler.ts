@@ -234,7 +234,11 @@ export class Scheduler {
     }
     if (!result.ok) {
       const output = capForBrief(result.output) || "(no output)";
-      store.recordScheduleCheck(entryId, { error: output, woke: true, command }, now);
+      // No command recorded: the stored command must stay paired with the
+      // stored hash. If an edited command fails on its first run, the next
+      // success still sees a command change and re-baselines silently instead
+      // of diffing the new output against the old command's hash.
+      store.recordScheduleCheck(entryId, { error: output, woke: true }, now);
       logger.warn("A watcher check failed; waking its agent with the error", { entryId });
       return {
         wake: true,

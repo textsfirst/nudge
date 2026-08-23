@@ -1,8 +1,8 @@
 // gmail-tail — a cursor-based Gmail arrivals journal, built for watcher checks.
 //
-// Prints the tail of an append-only journal of inbox arrivals for one
-// connected account, advancing a persisted Gmail history cursor
-// (users.history.list) on every run. The output is monotone: it changes
+// Prints the tail of a rotating journal of inbox arrivals (the newest ~200
+// lines are kept) for one connected account, advancing a persisted Gmail
+// history cursor (users.history.list) on every run. The output is monotone: it changes
 // exactly when new mail has arrived — never when the owner merely reads or
 // archives — so a hash-diffing watcher gate wakes its agent precisely on
 // arrivals, and mail handled on another device before the sweep is still
@@ -38,10 +38,14 @@ const EXIT_API = 1;
 const EXIT_AUTH = 2;
 const EXIT_USAGE = 3;
 
-/** Journal lines printed per run — the watcher brief is capped at ~4k chars. */
-const TAIL_LINES = 20;
-/** Arrivals detailed (From/Subject fetched) per run; the rest get a [more] line. */
-const DETAIL_CAP = 25;
+/**
+ * Journal lines printed per run — the watcher brief is capped at ~4k chars.
+ * Kept above DETAIL_CAP + 1 so one sweep's detailed lines always fit; a sweep
+ * that outgrows even this gets a [burst] marker as its last (visible) line.
+ */
+const TAIL_LINES = 25;
+/** Arrivals detailed (From/Subject fetched) per sweep; the rest land id-only. */
+const DETAIL_CAP = 20;
 /** Journal rotation: beyond MAX lines, keep the newest KEEP. */
 const JOURNAL_MAX_LINES = 400;
 const JOURNAL_KEEP_LINES = 200;
@@ -144,16 +148,34 @@ async function sweep({ label, credentialsPath, statePath, journalPath }) {
 
   const seen = journalIds(journalPath);
   const fresh = [...added.keys()].filter((id) => !seen.has(id));
-  const detailed = fresh.slice(0, DETAIL_CAP);
   const lines = [];
-  for (const id of detailed) {
-    const line = await describeMessage(token, id);
-    if (line) lines.push(line);
+  const runStamp = stamp(Date.now());
+  const detailed = fresh.slice(0, DETAIL_CAP);
+  // Small parallel chunks: 20 sequential lookups on a slow day would blow the
+  // scheduler's 30s check deadline; five at a time stays polite and fast.
+  for (let index = 0; index < detailed.length; index += 5) {
+    const chunk = detailed.slice(index, index + 5);
+    const described = await Promise.all(
+      chunk.map(async (id) => ({ id, line: await describeMessage(token, id) })),
+    );
+    for (const { id, line } of described) {
+      // A 404 means the message was hard-deleted since the sweep began; the
+      // arrival still happened, so it still gets a (stable) journal line.
+      lines.push(line ?? `${runStamp}\t${id}\t(deleted before the sweep)`);
+    }
   }
   lines.sort();
-  if (fresh.length > detailed.length) {
+  // Past the detail cap, arrivals are journaled id-only — every id lands in
+  // the journal, so nothing is silently dropped and an interrupted sweep
+  // still dedupes. The agent fetches headers by id with gws when it cares.
+  for (const id of fresh.slice(DETAIL_CAP)) {
+    lines.push(`${runStamp}\t${id}\t(burst — headers not fetched)`);
+  }
+  if (lines.length > TAIL_LINES) {
+    // More than the printed tail can show; the marker goes last so the count
+    // is always visible even when the lines themselves scrolled past.
     lines.push(
-      `[more] ${fresh.length - detailed.length} further arrivals this sweep — list them with gws`,
+      `[burst] ${fresh.length} arrivals this sweep — read google/${label}/inbox-journal.log for the full list`,
     );
   }
   appendJournal(journalPath, lines);
@@ -282,7 +304,7 @@ function printTail(label, journalPath) {
   const lines = journalLines(journalPath);
   const tail = lines.slice(-TAIL_LINES);
   process.stdout.write(
-    `# ${label} inbox arrivals — newest last; full journal: google/${label}/inbox-journal.log\n` +
+    `# ${label} inbox arrivals — newest last; journal: google/${label}/inbox-journal.log\n` +
       (tail.length > 0 ? `${tail.join("\n")}\n` : ""),
   );
 }
@@ -307,7 +329,6 @@ function acquireLock(lockPath) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       mkdirSync(lockPath);
-      return { release: () => rmdirSync(lockPath, { recursive: false }) };
     } catch {
       try {
         if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
@@ -319,6 +340,23 @@ function acquireLock(lockPath) {
       }
       return undefined;
     }
+    // fail() exits the process, which skips finally blocks — release on the
+    // exit event too, so an error path never strands the lock until the
+    // stale steal. The handler is idempotent; release() also detaches it.
+    const remove = () => {
+      try {
+        rmdirSync(lockPath, { recursive: false });
+      } catch {
+        // already released
+      }
+    };
+    process.once("exit", remove);
+    return {
+      release: () => {
+        process.removeListener("exit", remove);
+        remove();
+      },
+    };
   }
   return undefined;
 }
@@ -326,12 +364,22 @@ function acquireLock(lockPath) {
 // -- helpers ----------------------------------------------------------------
 
 function resolveLabel(argv) {
-  const positional = argv.filter((argument) => !argument.startsWith("-"));
-  if (positional.length > 1) fail("Usage: gmail-tail [label]");
-  if (positional[0]) return positional[0];
-  const fallback = process.env.NUDGE_GOOGLE_DEFAULT_ACCOUNT;
-  if (fallback) return fallback;
+  const option = argv.find((argument) => argument.startsWith("-"));
+  if (option) fail(`Unknown option "${option}". Usage: gmail-tail [label]`);
+  if (argv.length > 1) fail("Usage: gmail-tail [label]");
+  // Labels resolve strictly through the registry, mirroring the gws shim: an
+  // explicit label must be a connected account (which also rules out path
+  // traversal), and an invalid configured default is ignored, not trusted.
   const accounts = readAccounts();
+  const explicit = argv[0];
+  if (explicit) {
+    if (!accounts.some((account) => account.label === explicit)) {
+      fail(`No Google account "${explicit}". Available: ${labels() || "(none)"}.`);
+    }
+    return explicit;
+  }
+  const fallback = process.env.NUDGE_GOOGLE_DEFAULT_ACCOUNT;
+  if (fallback && accounts.some((account) => account.label === fallback)) return fallback;
   if (accounts.length === 1) return accounts[0].label;
   fail(
     accounts.length === 0

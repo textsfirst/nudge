@@ -1053,7 +1053,9 @@ export class NudgeStore {
    * Record one watcher check execution. `changed` marks the output as
    * differing from the previous hash (advancing the change timestamp), and
    * `error` marks a failed command — hash untouched, so recovery compares
-   * against the last good output.
+   * against the last good output. Pass `command` only together with `hash`:
+   * the stored pair is what the gate's command-change re-baseline compares,
+   * so a command must never be recorded against another command's hash.
    */
   recordScheduleCheck(
     entryId: string,
@@ -1311,29 +1313,42 @@ export class NudgeStore {
 
 type Row = Record<string, unknown>;
 
-function migrate(db: DatabaseSync): void {
-  const row = db.prepare("PRAGMA user_version").get();
-  const current = requiredNumber(row ?? {}, "user_version");
-  if (!Number.isInteger(current) || current < 0) {
-    throw new Error(`Invalid SQLite schema version ${current}`);
-  }
-  if (current > CURRENT_SCHEMA_VERSION) {
-    throw new Error(
-      `Database schema version ${current} is newer than this Nudge build supports ` +
-        `(${CURRENT_SCHEMA_VERSION}). Upgrade Nudge before opening it.`,
-    );
-  }
+/** A version problem, as opposed to a migration step failing. */
+class SchemaVersionError extends Error {}
 
-  for (let version = current + 1; version <= CURRENT_SCHEMA_VERSION; version += 1) {
-    const migration = MIGRATIONS[version - 1];
-    if (!migration) throw new Error(`Missing SQLite migration ${version}`);
+function migrate(db: DatabaseSync): void {
+  // The server and console open the same file, so two processes can race a
+  // migration. Each step re-reads the version inside BEGIN IMMEDIATE (which
+  // takes the write lock): the loser of the race sees the winner's bump and
+  // skips the step instead of re-running its DDL against the migrated schema.
+  for (;;) {
     db.exec("BEGIN IMMEDIATE");
+    let version = 0;
     try {
+      const row = db.prepare("PRAGMA user_version").get();
+      const current = requiredNumber(row ?? {}, "user_version");
+      if (!Number.isInteger(current) || current < 0) {
+        throw new SchemaVersionError(`Invalid SQLite schema version ${current}`);
+      }
+      if (current > CURRENT_SCHEMA_VERSION) {
+        throw new SchemaVersionError(
+          `Database schema version ${current} is newer than this Nudge build supports ` +
+            `(${CURRENT_SCHEMA_VERSION}). Upgrade Nudge before opening it.`,
+        );
+      }
+      if (current === CURRENT_SCHEMA_VERSION) {
+        db.exec("COMMIT");
+        return;
+      }
+      version = current + 1;
+      const migration = MIGRATIONS[version - 1];
+      if (!migration) throw new Error(`Missing SQLite migration ${version}`);
       migration(db);
       db.exec(`PRAGMA user_version = ${version}`);
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
+      if (error instanceof SchemaVersionError) throw error;
       throw new Error(`SQLite migration ${version} failed`, { cause: error });
     }
   }

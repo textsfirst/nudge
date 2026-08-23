@@ -28,6 +28,8 @@ interface Fake {
   added: { id: string; labelIds: string[] }[];
   messages: Record<string, FakeMessage>;
   historyStatus?: number;
+  /** When set, history responses page through this list via pageToken. */
+  historyPages?: object[];
   tokenStatus?: number;
   tokenBody?: object;
   requests: string[];
@@ -52,6 +54,11 @@ function fakeServer(fake: Fake): Promise<Server> {
     if (url.startsWith("/gmail/v1/users/me/history")) {
       if (fake.historyStatus) {
         json(fake.historyStatus, { error: { message: "history says no" } });
+        return;
+      }
+      if (fake.historyPages) {
+        const token = new URL(url, "http://x").searchParams.get("pageToken");
+        json(200, fake.historyPages[token ? Number(token) : 0]!);
         return;
       }
       json(200, {
@@ -139,6 +146,7 @@ function makeGoogleDir(labels: string[]): string {
 async function tail(
   args: string[],
   googleDir: string | undefined,
+  extraEnv: Record<string, string> = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const port = (server?.address() as AddressInfo | undefined)?.port;
   const base = port !== undefined ? `http://127.0.0.1:${port}` : "http://127.0.0.1:1";
@@ -149,6 +157,7 @@ async function tail(
         ...(googleDir ? { NUDGE_GOOGLE_DIR: googleDir } : {}),
         GMAIL_TAIL_API_BASE: base,
         GMAIL_TAIL_TOKEN_URL: `${base}/token`,
+        ...extraEnv,
       },
     });
     return { code: 0, stdout, stderr };
@@ -256,7 +265,7 @@ describe("gmail-tail", () => {
     expect(state(googleDir, "work").historyId).toBe("2000");
   });
 
-  it("caps per-sweep detail with a [more] line", async () => {
+  it("journals a burst in full: detail cap, id-only overflow, visible [burst] marker", async () => {
     const fake = newFake();
     server = await fakeServer(fake);
     const googleDir = makeGoogleDir(["work"]);
@@ -276,9 +285,48 @@ describe("gmail-tail", () => {
       };
     }
     const swept = await tail(["work"], googleDir);
-    expect(swept.stdout).toContain("[more] 5 further arrivals this sweep");
+    // The marker is the last line, so the count survives even though the
+    // sweep is bigger than the printed tail.
+    expect(swept.stdout.trimEnd().endsWith(
+      "[burst] 30 arrivals this sweep — read google/work/inbox-journal.log for the full list",
+    )).toBe(true);
     const journal = readFileSync(join(googleDir, "work", "inbox-journal.log"), "utf8");
-    expect(journal.split("\n").filter((line) => line.includes("\tm")).length).toBe(25);
+    const lines = journal.split("\n");
+    // Every arrival is journaled: 20 detailed, 10 id-only.
+    expect(lines.filter((line) => line.includes("hello ")).length).toBe(20);
+    expect(lines.filter((line) => line.includes("(burst — headers not fetched)")).length).toBe(10);
+    for (let index = 0; index < 30; index += 1) {
+      expect(journal).toContain(`\tm${index}\t`);
+    }
+
+    // A repeat of the same history (crash before the cursor saved) must not
+    // re-journal the id-only overflow either.
+    const again = await tail(["work"], googleDir);
+    expect(again.stdout).toBe(swept.stdout);
+  });
+
+  it("skips the [burst] marker when a sweep still fits the tail", async () => {
+    const fake = newFake();
+    server = await fakeServer(fake);
+    const googleDir = makeGoogleDir(["work"]);
+    await tail(["work"], googleDir);
+
+    fake.historyId = "1010";
+    fake.added = Array.from({ length: 22 }, (_, index) => ({
+      id: `m${index}`,
+      labelIds: ["INBOX"],
+    }));
+    for (const entry of fake.added) {
+      fake.messages[entry.id] = {
+        labelIds: ["INBOX"],
+        internalDate: "1755950000000",
+        from: "a@b.c",
+        subject: `hello ${entry.id}`,
+      };
+    }
+    const swept = await tail(["work"], googleDir);
+    expect(swept.stdout).not.toContain("[burst]");
+    expect(swept.stdout).toContain("(burst — headers not fetched)"); // the 2 id-only lines
   });
 
   it("exits 2 with a reconnect message on dead auth", async () => {
@@ -302,6 +350,73 @@ describe("gmail-tail", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("list Gmail history");
     expect(state(googleDir, "work").historyId).toBe("1000");
+  });
+
+  it("walks paginated history and stores the final page's cursor", async () => {
+    const fake = newFake();
+    server = await fakeServer(fake);
+    const googleDir = makeGoogleDir(["work"]);
+    await tail(["work"], googleDir);
+
+    fake.historyPages = [
+      {
+        historyId: "1005",
+        nextPageToken: "1",
+        history: [{ id: "1002", messagesAdded: [{ message: { id: "m1", labelIds: ["INBOX"] } }] }],
+      },
+      {
+        historyId: "1010",
+        history: [{ id: "1008", messagesAdded: [{ message: { id: "m2", labelIds: ["INBOX"] } }] }],
+      },
+    ];
+    for (const id of ["m1", "m2"]) {
+      fake.messages[id] = {
+        labelIds: ["INBOX"],
+        internalDate: "1755950000000",
+        from: "a@b.c",
+        subject: `page ${id}`,
+      };
+    }
+    const swept = await tail(["work"], googleDir);
+    expect(swept.stdout).toContain("page m1");
+    expect(swept.stdout).toContain("page m2");
+    expect(state(googleDir, "work").historyId).toBe("1010");
+  });
+
+  it("journals an arrival hard-deleted before the sweep instead of dropping it", async () => {
+    const fake = newFake();
+    server = await fakeServer(fake);
+    const googleDir = makeGoogleDir(["work"]);
+    await tail(["work"], googleDir);
+
+    fake.historyId = "1010";
+    fake.added = [{ id: "gone1", labelIds: ["INBOX"] }]; // no metadata: GET 404s
+    const swept = await tail(["work"], googleDir);
+    expect(swept.code).toBe(0);
+    expect(swept.stdout).toContain("\tgone1\t(deleted before the sweep)");
+  });
+
+  it("rejects unknown options and labels outside the registry", async () => {
+    const fake = newFake();
+    server = await fakeServer(fake);
+    const googleDir = makeGoogleDir(["work"]);
+
+    const flagged = await tail(["--tight", "work"], googleDir);
+    expect(flagged.code).toBe(3);
+    expect(flagged.stderr).toContain('Unknown option "--tight"');
+
+    const traversal = await tail(["../work"], googleDir);
+    expect(traversal.code).toBe(3);
+    expect(traversal.stderr).toContain('No Google account "../work"');
+  });
+
+  it("ignores a configured default that names no connected account", async () => {
+    const fake = newFake();
+    server = await fakeServer(fake);
+    const googleDir = makeGoogleDir(["work"]);
+    const result = await tail([], googleDir, { NUDGE_GOOGLE_DEFAULT_ACCOUNT: "ghost" });
+    expect(result.code).toBe(0); // falls through to the single connected account
+    expect(result.stdout).toContain("# work inbox arrivals");
   });
 
   it("resolves the only account without an argument, refuses ambiguity", async () => {
