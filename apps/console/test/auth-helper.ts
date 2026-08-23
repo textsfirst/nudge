@@ -11,7 +11,6 @@ interface TestSession {
 const sessions = new WeakMap<object, TestSession>();
 
 export const secureTestOptions = {
-  allowedOrigins: [TEST_ORIGIN],
   authCapability: TEST_CAPABILITY,
 } as const;
 
@@ -23,8 +22,6 @@ export async function testSession(app: ConsoleApp): Promise<TestSession> {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Origin: TEST_ORIGIN,
-        "Sec-Fetch-Site": "same-origin",
       },
       body: JSON.stringify({ capability: TEST_CAPABILITY }),
     }),
@@ -51,8 +48,6 @@ export async function authenticatedRequest(
       ...init,
       headers: {
         "Content-Type": "application/json",
-        Origin: TEST_ORIGIN,
-        "Sec-Fetch-Site": "same-origin",
         Cookie: session.cookie,
         ...(unsafe ? { "X-Nudge-CSRF": session.csrfToken } : {}),
         ...init?.headers,

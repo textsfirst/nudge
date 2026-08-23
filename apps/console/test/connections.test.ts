@@ -128,7 +128,6 @@ describe("connections API", () => {
     const callback = await authenticatedRequest(
       application,
       `/api/connections/google/callback?state=${state}&code=c0de`,
-      { headers: { "Sec-Fetch-Site": "cross-site" } },
     );
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/connections?connected=work");
@@ -187,7 +186,6 @@ describe("connections API", () => {
     const stale = await authenticatedRequest(
       application,
       "/api/connections/google/callback?state=unknown&code=c",
-      { headers: { "Sec-Fetch-Site": "cross-site" } },
     );
     expect(stale.status).toBe(302);
     expect(stale.headers.get("location")).toContain("error=");
@@ -211,14 +209,14 @@ describe("connections API", () => {
     const secondLogin = await application.handle(
       new Request(`${TEST_ORIGIN}/api/auth/login`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Origin: TEST_ORIGIN },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ capability: TEST_CAPABILITY }),
       }),
     );
     const secondCookie = secondLogin.headers.get("set-cookie")!.split(";", 1)[0]!;
     const callback = await application.handle(
       new Request(`${TEST_ORIGIN}/api/connections/google/callback?state=${state}&code=c0de`, {
-        headers: { Cookie: secondCookie, "Sec-Fetch-Site": "cross-site" },
+        headers: { Cookie: secondCookie },
       }),
     );
     expect(callback.status).toBe(302);
@@ -228,7 +226,6 @@ describe("connections API", () => {
     const correctSession = await authenticatedRequest(
       application,
       `/api/connections/google/callback?state=${state}&code=c0de`,
-      { headers: { "Sec-Fetch-Site": "cross-site" } },
     );
     expect(correctSession.headers.get("location")).toBe("/connections?connected=work");
   });

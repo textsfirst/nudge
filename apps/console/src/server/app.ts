@@ -48,8 +48,6 @@ const INLINE_SAFE_MIME = new Set([
 ]);
 
 export interface ConsoleSecurityOptions {
-  /** Exact browser origins allowed to reach the API. */
-  allowedOrigins?: string[] | undefined;
   /** Prebuilt auth manager for startup and focused tests. */
   auth?: ConsoleAuth | undefined;
   /** Test-only convenience; production startup persists its generated capability. */
@@ -72,10 +70,6 @@ export function createConsoleApp(
       ...(options.now ? { now: options.now } : {}),
       secureCookies: options.secureCookies ?? false,
     });
-  const allowedOrigins = new Set(
-    options.allowedOrigins ?? ["http://localhost:3100", "http://127.0.0.1:3100", "http://[::1]:3100"],
-  );
-  const allowedHosts = new Set([...allowedOrigins].map((origin) => new URL(origin).host));
   const now = options.now ?? Date.now;
   let failedLogins = 0;
   let loginBlockedUntil = 0;
@@ -90,25 +84,7 @@ export function createConsoleApp(
         set.headers["x-content-type-options"] = "nosniff";
         set.headers["x-frame-options"] = "DENY";
 
-        const url = new URL(request.url);
-        const host = request.headers.get("host") ?? url.host;
-        if (!allowedHosts.has(host)) {
-          set.status = 421;
-          return { error: "Unrecognized console host." };
-        }
-        if (
-          request.headers.get("sec-fetch-site") === "cross-site" &&
-          url.pathname !== "/api/connections/google/callback"
-        ) {
-          set.status = 403;
-          return { error: "Cross-site console requests are not allowed." };
-        }
         if (isUnsafeMethod(request.method)) {
-          const origin = request.headers.get("origin");
-          if (!origin || !allowedOrigins.has(origin)) {
-            set.status = 403;
-            return { error: "This request did not come from an allowed console origin." };
-          }
           if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
             set.status = 415;
             return { error: "Console mutations require application/json." };
@@ -387,7 +363,7 @@ export function createConsoleApp(
         const session = auth.session(request)!;
         return connections.startGoogle(
           (body ?? {}) as Record<string, unknown>,
-          request.headers.get("origin")!,
+          request.headers.get("origin") ?? new URL(request.url).origin,
           session.id,
         );
       })

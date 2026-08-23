@@ -8,7 +8,7 @@
     "node": ">=22.5"
   },
   "scripts": {
-    "dev": "concurrently -k -n nudge,console-api,console-web -c blue,magenta,cyan \"pnpm --filter @nudge/server dev\" \"CONSOLE_UI_ORIGIN=http://localhost:5174 pnpm --filter @nudge/console dev:api\" \"pnpm --filter @nudge/console dev:web\"",
+    "dev": "concurrently -k -n nudge,console-api,console-web -c blue,magenta,cyan \"pnpm --filter @nudge/server dev\" \"pnpm --filter @nudge/console dev:api\" \"pnpm --filter @nudge/console dev:web\"",
     "dev:nudge": "pnpm --filter @nudge/server dev",
     "dev:agent": "pnpm dev:nudge",
     "dev:console": "pnpm --filter @nudge/console dev",
