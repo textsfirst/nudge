@@ -11,9 +11,9 @@ describe("settingsFromOverrides", () => {
     const settings = settingsFromOverrides({});
     expect(settings.owner_handle).toBe("");
     expect(settings.provider.selected).toBe("chatgpt-subscription");
-    expect(settings.provider.chatgpt.auth_file).toBe(".data/chatgpt-auth.json");
+    expect(settings.provider.chatgpt.auth_file).toBe("chatgpt-auth.json");
     expect(settings.provider.grok.model).toBe("grok-4.6");
-    expect(settings.provider.grok.auth_file).toBe(".data/grok-auth.json");
+    expect(settings.provider.grok.auth_file).toBe("grok-auth.json");
     expect(settings.provider.grok.client_version).toBeUndefined();
     expect(settings.tools.bash_enabled).toBe(true);
     expect(settings.threads.debounce_ms).toBe(250);

@@ -5,16 +5,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
 import { json, secureTestOptions } from "./auth-helper.js";
+import { makeWorkspace } from "./workspace.js";
 
 const SLOW = 30_000;
 
 let root: string | undefined;
 const extra: string[] = [];
 
-function makeWorkspace(): string {
-  root = mkdtempSync(join(tmpdir(), "console-skills-"));
-  writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "PORT=59983\n");
+function seededWorkspace(): string {
+  root = makeWorkspace({ prefix: "console-skills-", env: "PORT=59983\n" });
   mkdirSync(join(root, ".data", "skills", "mine"), { recursive: true });
   writeFileSync(
     join(root, ".data", "skills", "mine", "SKILL.md"),
@@ -24,13 +23,11 @@ function makeWorkspace(): string {
 }
 
 afterEach(() => {
-  if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined;
   for (const dir of extra.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace(), ...secureTestOptions });
+  return createConsoleApp({ root: seededWorkspace(), ...secureTestOptions });
 }
 
 /** A committed local git repo holding one installable skill. */

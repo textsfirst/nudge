@@ -1,0 +1,128 @@
+name: Edge release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Queue instead of cancel: the publish job's tag move, notes edit, and asset
+# uploads are not atomic, so an in-flight run must never be killed mid-publish.
+# GitHub still collapses queued runs to the newest one.
+concurrency:
+  group: edge-release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: 24.19.0
+  PNPM_VERSION: 10.30.3
+
+jobs:
+  # Source verification is ci.yml's job; it runs on the same push. Repeating
+  # it here would only delay the platform builds.
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build edge archive
+        env:
+          NUDGE_RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          version="$(node -p "require('./package.json').version")-edge.${GITHUB_RUN_NUMBER}"
+          pnpm release:pack "$version" release
+
+      - name: Smoke test archive
+        run: bash scripts/release/smoke.sh release/nudge-edge-${{ matrix.target }}.tar.gz
+
+      - name: Save archive for publishing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nudge-edge-${{ matrix.target }}
+          path: release/nudge-edge-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish rolling edge release
+    needs: build
+    # The edge tag and release notes advertise a build of main; never let a
+    # workflow_dispatch from another ref publish under that label.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: nudge-edge-*
+          path: release
+          merge-multiple: true
+
+      - name: Write checksums and release notes
+        run: |
+          version="$(node -p "require('./package.json').version")-edge.${GITHUB_RUN_NUMBER}"
+          cd release
+          sha256sum nudge-edge-*.tar.gz | sort -k2 > SHA256SUMS
+          printf '%s\n' "$version" > VERSION
+          printf '%s\n\n%s\n%s\n\n%s\n' \
+            'Automated build of `main`.' \
+            "Version: \`${version}\`" \
+            "Source commit: \`${GITHUB_SHA}\`" \
+            'This rolling prerelease is replaced after every push to `main`. Verify downloads with `SHA256SUMS`; each archive also contains `BUILD.json`.' \
+            > RELEASE-NOTES.md
+
+      - name: Move edge tag and publish assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -f edge "$GITHUB_SHA"
+          git push origin refs/tags/edge --force
+
+          if gh release view edge >/dev/null 2>&1; then
+            gh release edit edge \
+              --title 'Edge release' \
+              --notes-file release/RELEASE-NOTES.md \
+              --prerelease
+          else
+            gh release create edge \
+              --title 'Edge release' \
+              --notes-file release/RELEASE-NOTES.md \
+              --prerelease
+          fi
+
+          gh release upload edge release/nudge-edge-*.tar.gz release/SHA256SUMS release/VERSION --clobber

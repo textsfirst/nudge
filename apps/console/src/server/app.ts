@@ -9,6 +9,7 @@ import {
   settingsSchema,
   type Settings,
 } from "@nudge/server/config";
+import { distributionCommands } from "@nudge/server/distribution";
 import { Elysia } from "elysia";
 import { ConsoleAuth } from "./auth.js";
 import { ApiProblem, ConnectionsService, type ConnectionsOptions } from "./connections.js";
@@ -150,7 +151,7 @@ export function createConsoleApp(
         const missingSecrets = listSecrets(context.envPath)
           .filter((secret) => secret.required && !secret.set)
           .map((secret) => secret.key);
-        const authError = await subscriptionAuthError(context.root, snapshot.settings);
+        const authError = await subscriptionAuthError(context, snapshot.settings);
         const settingsError =
           snapshot.error ??
           (snapshot.settings.owner_handle === ""
@@ -168,6 +169,7 @@ export function createConsoleApp(
           settingsError,
           ownerHandle: snapshot.settings.owner_handle || null,
           serverPort: port,
+          serverCommand: distributionCommands().run,
           serverUp: server.reachable,
           serverHealthy: server.healthy,
           serverError: server.error ?? (!server.reachable ? localStartupError : null),
@@ -676,15 +678,18 @@ async function probe(url: string): Promise<{
   }
 }
 
-async function subscriptionAuthError(root: string, settings: Settings): Promise<string | null> {
+async function subscriptionAuthError(
+  context: ConsoleContext,
+  settings: Settings,
+): Promise<string | null> {
   try {
     if (settings.provider.selected === "chatgpt-subscription") {
       await new ChatGptAuthManager({
-        authFile: resolve(root, settings.provider.chatgpt.auth_file),
+        authFile: context.dataFile(settings.provider.chatgpt.auth_file),
       }).validateStored();
     } else if (settings.provider.selected === "grok-subscription") {
       await new GrokAuthManager({
-        authFile: resolve(root, settings.provider.grok.auth_file),
+        authFile: context.dataFile(settings.provider.grok.auth_file),
       }).validateStored();
     }
     return null;

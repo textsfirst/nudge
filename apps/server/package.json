@@ -11,6 +11,11 @@
       "development": "./src/config.ts",
       "default": "./dist/config.js"
     },
+    "./distribution": {
+      "types": "./dist/distribution.d.ts",
+      "development": "./src/distribution.ts",
+      "default": "./dist/distribution.js"
+    },
     "./paths": {
       "types": "./dist/paths.d.ts",
       "development": "./src/paths.ts",

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { runChatGptDeviceLogin, runGrokDeviceLogin } from "@nudge/agent";
+import type { Settings } from "@nudge/server/config";
+import { resolveDataFile } from "@nudge/server/paths";
 import {
   exchangeGoogleCode,
   findGwsBinary,
@@ -88,11 +89,11 @@ export class ConnectionsService {
     return {
       chatgpt: {
         selected: settings.provider.selected,
-        ...this.#chatGptStatus(),
+        ...this.#chatGptStatus(this.#chatGptAuthFile(settings, dataDir)),
       },
       grok: {
         selected: settings.provider.selected,
-        ...this.#grokStatus(),
+        ...this.#grokStatus(this.#grokAuthFile(settings, dataDir)),
       },
       google: {
         clientConfigured: client !== undefined,
@@ -218,7 +219,10 @@ export class ConnectionsService {
     const prompt = await new Promise<{ verificationUrl: string; userCode: string }>(
       (resolvePrompt, rejectPrompt) => {
         runChatGptDeviceLogin({
-          authFile: this.#chatGptAuthFile(),
+          authFile: this.#chatGptAuthFile(
+            this.#context.settings().settings,
+            this.#context.dataDir(),
+          ),
           fetch: this.#fetch,
           onPrompt: (details) => {
             this.#chatGptFlows.set(flowId, { status: "pending", ...details });
@@ -256,11 +260,12 @@ export class ConnectionsService {
   /** Same device-code choreography as startChatGpt, against auth.x.ai. */
   async startGrok(): Promise<{ flowId: string; verificationUrl: string; userCode: string }> {
     const flowId = newOAuthState();
-    const clientVersion = this.#context.settings().settings.provider.grok.client_version;
+    const settings = this.#context.settings().settings;
+    const clientVersion = settings.provider.grok.client_version;
     const prompt = await new Promise<{ verificationUrl: string; userCode: string }>(
       (resolvePrompt, rejectPrompt) => {
         runGrokDeviceLogin({
-          authFile: this.#grokAuthFile(),
+          authFile: this.#grokAuthFile(settings, this.#context.dataDir()),
           fetch: this.#fetch,
           ...(clientVersion ? { clientVersion } : {}),
           onPrompt: (details) => {
@@ -296,18 +301,15 @@ export class ConnectionsService {
     return this.#grokFlows.get(flowId);
   }
 
-  #chatGptAuthFile(): string {
-    const settings = this.#context.settings().settings;
-    return resolve(this.#context.root, settings.provider.chatgpt.auth_file);
+  #chatGptAuthFile(settings: Settings, dataDir: string): string {
+    return resolveDataFile(dataDir, settings.provider.chatgpt.auth_file);
   }
 
-  #grokAuthFile(): string {
-    const settings = this.#context.settings().settings;
-    return resolve(this.#context.root, settings.provider.grok.auth_file);
+  #grokAuthFile(settings: Settings, dataDir: string): string {
+    return resolveDataFile(dataDir, settings.provider.grok.auth_file);
   }
 
-  #chatGptStatus(): { connected: boolean; accountId: string | null; updatedAt: string | null } {
-    const path = this.#chatGptAuthFile();
+  #chatGptStatus(path: string): { connected: boolean; accountId: string | null; updatedAt: string | null } {
     if (!existsSync(path)) return { connected: false, accountId: null, updatedAt: null };
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -323,8 +325,7 @@ export class ConnectionsService {
     }
   }
 
-  #grokStatus(): { connected: boolean; account: string | null; updatedAt: string | null } {
-    const path = this.#grokAuthFile();
+  #grokStatus(path: string): { connected: boolean; account: string | null; updatedAt: string | null } {
     if (!existsSync(path)) return { connected: false, account: null, updatedAt: null };
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));

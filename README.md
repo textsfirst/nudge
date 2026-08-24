@@ -27,7 +27,7 @@ Writes are validated per path and rejected with diagnostics the model can act on
 
 Every turn's system prompt is assembled from five slots, stable content first so prompt-prefix caching survives: **SYSTEM.md** (yours) → generated tool guidance → memory snapshot → skills list → current local time. It is frozen per thread and re-read only at rollover.
 
-### Files you own (in `data_dir`, default `.data/`)
+### Files you own (in `data_dir`, default `$XDG_CONFIG_HOME/nudge` or `~/.config/nudge`)
 
 - **SYSTEM.md** — the entire base system prompt: who Nudge is, voice, rules. The agent reads it and never writes it. Missing file → a built-in default.
 - **SCHEDULE.md** — every proactive message, one `##` section per entry:
@@ -57,15 +57,39 @@ Every turn's system prompt is assembled from five slots, stable content first so
 
 ## Requirements
 
-- Node.js 22.5+ (Nudge uses the built-in `node:sqlite`)
-- pnpm 10
 - A Photon Cloud project and iMessage line
 - Either a ChatGPT or Grok subscription (authorized from the console's Connections page), or an OpenAI API key
 - Optional: the [`gws` CLI](https://github.com/googleworkspace/cli) plus a Google Cloud OAuth client for Google account access (see "Google accounts")
+- Source installs also need Node.js 22.5+ and pnpm 10. Edge archives include a pinned Node runtime.
 
 No public URL or tunnel is needed: inbound messages arrive over an outbound streaming connection to Photon Cloud.
 
+## Edge release
+
+Every push to `main` replaces the rolling [Edge release](https://github.com/textsfirst/nudge/releases/tag/edge). It contains compiled server code, the production console, production dependencies, and a pinned Node runtime. Archives are published for Linux x64, Linux arm64, and macOS arm64. Edge builds are versioned `<base>-edge.<N>` (for example `0.1.0-edge.42`, where `N` is the CI run number); each archive's `BUILD.json` records the version and its exact source commit.
+
+Download and extract the archive for your machine, then create the configuration directory:
+
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/nudge"
+cd "${XDG_CONFIG_HOME:-$HOME/.config}/nudge"
+cp /path/to/extracted-nudge/.env.example .env
+$EDITOR .env
+/path/to/extracted-nudge/bin/nudge console
+```
+
+Open `http://localhost:3100` and finish setup. Run the agent server separately from the same directory:
+
+```bash
+cd "${XDG_CONFIG_HOME:-$HOME/.config}/nudge"
+/path/to/extracted-nudge/bin/nudge run
+```
+
+To update, run `/path/to/extracted-nudge/bin/nudge update`: it downloads the latest Edge archive, verifies its checksum, and swaps the release directory in place. `bin/nudge update --check` reports whether a newer build exists without downloading anything. (Extracting the new archive yourself and pointing your service at its `bin/nudge` still works too.) The archive never contains runtime state, so updating does not touch your configuration or history.
+
 ## Setup
+
+These steps install Nudge from source. Edge users can use the shorter process above.
 
 1. Install dependencies and create local configuration:
 
@@ -93,7 +117,7 @@ No public URL or tunnel is needed: inbound messages arrive over an outbound stre
 
    To use any other OpenAI-compatible endpoint (OpenRouter, Ollama, vLLM, LM Studio, a proxy): set Provider to `custom` in console Settings, fill in the custom base URL and model id, and — if the endpoint needs one — set `CUSTOM_API_KEY` in `.env`. Most compatible servers implement the Chat Completions API (the default); switch the API flavor to `responses` only when the endpoint supports it. For model ids the context-window registry does not recognize, set `agent.context_window_tokens` explicitly.
 
-4. Optionally create `.data/SYSTEM.md` (personality/rules) and `.data/SCHEDULE.md` (proactive messages). Both work from the first boot without them.
+4. Optionally create `SYSTEM.md` and `SCHEDULE.md` in `data_dir`. Both work from the first boot without them.
 
 5. Start everything:
 
@@ -157,9 +181,9 @@ Settings (console → Settings):
 | `timezone` | machine timezone | IANA zone for schedules and midnight rollover |
 | `provider.selected` | `chatgpt-subscription` | `chatgpt-subscription`, `grok-subscription`, `openai-api`, or `custom` |
 | `provider.chatgpt.model` | `gpt-5.6-sol` | Model slug for the ChatGPT subscription endpoint |
-| `provider.chatgpt.auth_file` | `.data/chatgpt-auth.json` | ChatGPT OAuth credential file |
+| `provider.chatgpt.auth_file` | `chatgpt-auth.json` | ChatGPT OAuth credential file, relative to `data_dir` |
 | `provider.grok.model` | `grok-4.6` | Model slug for the Grok subscription (xAI's CLI proxy maps it to its `-build` variant) |
-| `provider.grok.auth_file` | `.data/grok-auth.json` | Grok OAuth credential file |
+| `provider.grok.auth_file` | `grok-auth.json` | Grok OAuth credential file, relative to `data_dir` |
 | `provider.grok.client_version` | built-in | CLI version header for xAI's proxy; set only when requests fail with HTTP 426 |
 | `provider.openai.model` | `gpt-5.6-sol` | Standard API model |
 | `provider.custom.base_url` | unset | Base URL of an OpenAI-compatible endpoint (e.g. `http://localhost:11434/v1`) |
@@ -192,7 +216,7 @@ Settings (console → Settings):
 | `OPENAI_API_KEY` | Optional key for the `openai-api` provider (transcription falls back to it too) |
 | `CUSTOM_API_KEY` | Optional key for the custom provider endpoint (omit for keyless local servers) |
 | `FIRECRAWL_API_KEY` | Enables `web_search` / `web_extract`; tools are hidden when unset |
-| `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, skills/ (default `.data`) |
+| `NUDGE_DATA_DIR` | Bootstrap: data directory holding the SQLite DB, SYSTEM.md, SCHEDULE.md, and skills. Defaults to `$XDG_CONFIG_HOME/nudge` or `~/.config/nudge`. |
 | `PORT` | Bootstrap: HTTP port (default `3000`, e.g. Paseo's per-worktree ports) |
 | `LOG_LEVEL` | Bootstrap: `debug`, `info`, `warn`, or `error` (default `info`) |
 
@@ -209,6 +233,25 @@ Use a single server process: the scheduler's claims, inbound dedupe, and debounc
 
 ## Updating
 
+### Moving an existing `.data` directory
+
+The default data directory changed from the checkout's `.data` directory to `$XDG_CONFIG_HOME/nudge`, or `~/.config/nudge` when `XDG_CONFIG_HOME` is unset. This is a hard cut. Stop the server and console, then move the old directory before starting the updated version:
+
+```bash
+nudge_config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+mkdir -p "$nudge_config_root"
+test ! -e "$nudge_config_root/nudge"
+mv .data "$nudge_config_root/nudge"
+```
+
+Run those commands from the checkout that contains `.data`. If `.env` explicitly sets `NUDGE_DATA_DIR=.data`, remove that line after the move. If you saved a custom provider auth path beginning with `.data/`, change it to the bare filename on the Settings page. Installations that already set `NUDGE_DATA_DIR` can keep their current directory and do not need to move anything.
+
+If the updated server already started once before you did the move, it created a fresh data directory at the new location, and the `test ! -e` line above fails. Look inside `$nudge_config_root/nudge` first: a directory the server just created holds only a new `nudge.db` and the seeded `README.md`, with none of your memory files or skills. If that is all it contains, delete it and run the move again. If you used the agent or changed settings after that accidental start, that new state is in the new directory — merge the two by hand, starting from the old `.data` and copying over anything you did after the switch.
+
+### Updating a source install
+
+Coming from a version that kept its data in the checkout's `.data` directory? Do the move above **before** restarting — otherwise the updated server starts a fresh, empty database at the new default location while your history, memory, and provider tokens stay behind in `.data`.
+
 ```bash
 git pull
 pnpm install
@@ -224,7 +267,7 @@ No manual steps beyond the restart: database migrations run automatically as ord
 - Only the exact configured owner handle reaches the model; proactive sends go only to spaces the owner already messaged from.
 - The agent's file access is confined to `data_dir` with path-traversal guards; OAuth tokens (including everything under `google/`) and the database are excluded from both reads and writes. SYSTEM.md and README.md are read-only to the agent. Skills, SCHEDULE.md, and the memory files are agent-writable by design and live as plain markdown you can audit.
 - Google access runs through the gws shim: per-account credentials are injected per exec (never exported into the agent's environment), `gws auth` is refused, and disconnecting an account revokes its token with Google. With bash enabled the shim is a guardrail, not a sandbox — the hard boundary remains `tools.bash_enabled`.
-- OAuth tokens, API keys, and Photon secrets are never logged. `.env` and `.data` are gitignored.
+- OAuth tokens, API keys, and Photon secrets are never logged. `.env` and the legacy `.data` directory are gitignored.
 - The console binds to localhost by default and requires its generated access code. Login exchanges the code for a signed, expiring `HttpOnly`, `SameSite=Lax` session cookie; mutations also require an in-memory CSRF token and JSON request body. Browser security headers remain enabled. Secret values never leave the server.
 - Non-loopback console binding requires `CONSOLE_REMOTE=1`. Put remote mode behind TLS; SSH port forwarding can continue to use local mode.
 
@@ -240,6 +283,7 @@ pnpm start            # build Nudge and its dependencies, then run it
 pnpm console:start    # build the console and its dependencies, then serve it on :3100
 pnpm console:auth     # show the local console access code
 pnpm console:auth rotate # rotate the code; restart a running console afterward
+pnpm release:pack edge release # build an edge archive for the current platform
 pnpm build            # compile all packages
 pnpm typecheck        # build, then type-check all packages
 pnpm test             # run unit tests

@@ -16,7 +16,11 @@
     "start": "pnpm --filter @nudge/server... build && pnpm --filter @nudge/server start",
     "console:start": "pnpm --filter @nudge/console... build && pnpm --filter @nudge/console start",
     "console:auth": "pnpm --filter @nudge/console auth",
-    "build": "pnpm -r build",
+    "release:pack": "pnpm build && bash scripts/release/package.sh",
+    "release:smoke": "bash scripts/release/smoke.sh",
+    "build": "pnpm -r --filter=!@nudge/web build",
+    "site:dev": "pnpm --filter @nudge/web dev",
+    "site:build": "pnpm --filter @nudge/web build",
     "typecheck": "pnpm build && pnpm -r typecheck",
     "test": "pnpm -r test",
     "check": "pnpm typecheck && pnpm test"

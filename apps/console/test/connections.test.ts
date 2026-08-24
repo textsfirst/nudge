@@ -1,7 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createConsoleApp, type ConsoleApp } from "../src/server/app.js";
 import {
   authenticatedRequest,
@@ -10,21 +9,9 @@ import {
   TEST_CAPABILITY,
   TEST_ORIGIN,
 } from "./auth-helper.js";
+import { makeWorkspace } from "./workspace.js";
 
 let root: string | undefined;
-
-function makeWorkspace(): string {
-  root = mkdtempSync(join(tmpdir(), "console-connections-"));
-  writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "");
-  mkdirSync(join(root, ".data"), { recursive: true });
-  return root;
-}
-
-afterEach(() => {
-  if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined;
-});
 
 function jwt(payload: Record<string, unknown>): string {
   return `h.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.s`;
@@ -85,7 +72,8 @@ function fetchStub(): typeof fetch {
 }
 
 function app(): ConsoleApp {
-  return createConsoleApp({ root: makeWorkspace(), fetch: fetchStub(), ...secureTestOptions });
+  root = makeWorkspace({ prefix: "console-connections-" });
+  return createConsoleApp({ root, fetch: fetchStub(), ...secureTestOptions });
 }
 
 describe("connections API", () => {

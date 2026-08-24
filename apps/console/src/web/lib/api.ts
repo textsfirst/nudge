@@ -83,6 +83,8 @@ export interface Status {
   settingsError: string | null;
   ownerHandle: string | null;
   serverPort: number;
+  /** Command that starts the Nudge server for this install (release vs source). */
+  serverCommand: string;
   serverUp: boolean;
   serverHealthy: boolean;
   serverError: string | null;

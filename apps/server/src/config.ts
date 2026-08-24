@@ -1,6 +1,6 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
-import { findWorkspaceRoot, resolveFromWorkspace } from "./paths.js";
+import { findWorkspaceRoot, resolveDataDir, resolveDataFile } from "./paths.js";
 import { formatIssues, type Settings } from "./settings.js";
 
 export {
@@ -88,7 +88,7 @@ const blankAsDefault = <T extends z.ZodType>(schema: T) =>
  * listens, and LOG_LEVEL applies from the first log line.
  */
 const bootstrapSchema = z.object({
-  NUDGE_DATA_DIR: blankAsDefault(z.string().default(".data")),
+  NUDGE_DATA_DIR: blankAsDefault(z.string().optional()),
   PORT: blankAsDefault(z.coerce.number().int().min(1).max(65_535).default(3_000)),
   LOG_LEVEL: blankAsDefault(z.enum(["debug", "info", "warn", "error"]).default("info")),
 });
@@ -108,7 +108,7 @@ export function loadBootstrap(
   if (!parsed.success) {
     throw new Error(`Invalid .env: ${formatIssues(parsed.error)}`);
   }
-  const dataDir = resolve(root, parsed.data.NUDGE_DATA_DIR);
+  const dataDir = resolveDataDir(root, parsed.data.NUDGE_DATA_DIR, environment);
   return {
     dataDir,
     dbPath: join(dataDir, "nudge.db"),
@@ -143,9 +143,9 @@ export function loadConfig(
     provider: {
       selected: settings.provider.selected,
       chatGptModel: settings.provider.chatgpt.model,
-      chatGptAuthFile: resolveFromWorkspace(settings.provider.chatgpt.auth_file),
+      chatGptAuthFile: resolveDataFile(boot.dataDir, settings.provider.chatgpt.auth_file),
       grokModel: settings.provider.grok.model,
-      grokAuthFile: resolveFromWorkspace(settings.provider.grok.auth_file),
+      grokAuthFile: resolveDataFile(boot.dataDir, settings.provider.grok.auth_file),
       ...(settings.provider.grok.client_version
         ? { grokClientVersion: settings.provider.grok.client_version }
         : {}),

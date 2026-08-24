@@ -1,3 +1,4 @@
+import { distributionCommands } from "@nudge/server/distribution";
 import { ConsoleAuth, rotateConsoleCapability } from "./auth.js";
 import { ConsoleContext } from "./context.js";
 
@@ -16,7 +17,7 @@ try {
     console.log(capability);
     console.log("\nRestart the console if it is currently running, then paste this code into the login page.");
   } else {
-    console.error("Usage: pnpm console:auth [show|rotate]");
+    console.error(`Usage: ${distributionCommands().auth} [show|rotate]`);
     process.exitCode = 1;
   }
 } finally {

@@ -1,8 +1,12 @@
 node_modules/
 dist/
+.next/
+out/
 .env
 .env.local
 .data/
 coverage/
+/release/
 *.log
 .DS_Store
+*.tsbuildinfo

@@ -1,4 +1,5 @@
 import type { Settings } from "./config.js";
+import { distributionCommands } from "./distribution.js";
 
 export interface StartupIssue {
   message: string;
@@ -49,12 +50,13 @@ export function formatStartupIssues(
   issues: StartupIssue[],
   consoleUrl = process.env.NUDGE_CONSOLE_URL || "http://localhost:5174",
 ): string {
+  const consoleCommand = distributionCommands().console;
   const list = issues
     .map((issue, index) => `${index + 1}. ${issue.message}\n   ${issue.action}`)
     .join("\n");
   return (
     `Nudge needs ${issues.length} setup ${issues.length === 1 ? "item" : "items"} before it can start:\n\n` +
     `${list}\n\nConsole: ${consoleUrl}\n` +
-    "Start it with `pnpm console`, make the changes, then run Nudge again."
+    `Start it with \`${consoleCommand}\`, make the changes, then run Nudge again.`
   );
 }

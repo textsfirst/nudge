@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { Server } from "node:http";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { node } from "@elysiajs/node";
+import { distributionCommands, isReleaseDistribution } from "@nudge/server/distribution";
 import { Elysia } from "elysia";
 import { createConsoleApp } from "./app.js";
 import { ConsoleAuth } from "./auth.js";
@@ -10,6 +10,17 @@ import { ConsoleContext } from "./context.js";
 import { resolveConsoleRuntime } from "./startup.js";
 
 const publicDir = resolve(fileURLToPath(new URL("../public", import.meta.url)));
+
+/**
+ * The handle @elysiajs/node passes to the listen callback: `stop()` closes
+ * the listener, and `raw` is the srvx server whose ready() rejects with the
+ * listen errors srvx otherwise swallows (`app.server` stays null under the
+ * node adapter, so this callback argument is the only handle we get).
+ */
+interface NodeServerHandle {
+  stop(): Promise<void>;
+  raw: { ready(): Promise<unknown> };
+}
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -34,7 +45,9 @@ const STATIC_SECURITY_HEADERS = {
 function serveStatic(pathname: string): Response {
   if (!existsSync(join(publicDir, "index.html"))) {
     return new Response(
-      "Console UI is not built. Run `pnpm console:start` to build and start it, or `pnpm console` for development.",
+      isReleaseDistribution()
+        ? "Console UI is missing from this release. Download the edge archive again."
+        : `Console UI is not built. Run \`pnpm console:start\` to build and start it, or \`${distributionCommands().console}\` for development.`,
       {
         status: 503,
         headers: { "Content-Type": "text/plain; charset=utf-8", ...STATIC_SECURITY_HEADERS },
@@ -63,8 +76,8 @@ function serveStatic(pathname: string): Response {
 }
 
 async function main(): Promise<void> {
-  const runtime = resolveConsoleRuntime();
   const context = new ConsoleContext();
+  const runtime = resolveConsoleRuntime(context.environment());
   const auth = new ConsoleAuth(context.dataDir(), { secureCookies: runtime.secureCookies });
 
   const app = new Elysia({ adapter: node() })
@@ -78,64 +91,75 @@ async function main(): Promise<void> {
     )
     .get("/*", ({ request }) => serveStatic(new URL(request.url).pathname));
 
-  app.listen({ port: runtime.port, hostname: runtime.host }, () => {
-    console.log("\nNudge Console is ready");
-    if (runtime.remote) {
-      console.log(`  Listening: ${runtime.host}:${runtime.port}`);
-    } else {
-      console.log(`  Open: http://localhost:${runtime.port}`);
-    }
-    console.log(`  Data: ${context.dataDir()}`);
-    if (runtime.remote) console.log("  Mode: remote (HTTPS proxy required)");
-    if (auth.created) {
-      console.log("\nFirst-run console access code:");
-      console.log(`  ${auth.revealCapability()}`);
-      console.log("\nPaste this code into the login page. It is not part of the URL.");
-    } else {
-      console.log("  Access code: stored (run `pnpm console:auth` to show it)");
-    }
-    console.log("  Stop: Ctrl+C\n");
+  let server: NodeServerHandle | undefined;
+  app.listen({ port: runtime.port, hostname: runtime.host }, (instance) => {
+    server = instance as unknown as NodeServerHandle;
   });
 
-  const server = app.server as Server | null;
-  let shuttingDown = false;
-  const shutdown = async (signal: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`\nStopping Nudge Console (${signal})…`);
-    if (server?.listening) {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-    }
-    context.close();
-  };
-  const handleSignal = (signal: string) => {
-    void shutdown(signal).catch((error: unknown) => {
-      console.error(`Nudge Console shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
-      process.exitCode = 1;
-    });
-  };
-  process.once("SIGINT", () => handleSignal("Ctrl+C"));
-  process.once("SIGTERM", () => handleSignal("SIGTERM"));
-
-  server?.once("error", (error: NodeJS.ErrnoException) => {
-    if (error.code === "EADDRINUSE") {
+  try {
+    await server?.raw.ready();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
       console.error(
         `Nudge Console could not start: port ${runtime.port} is already in use.\n` +
           "Stop the other process or choose another port with CONSOLE_PORT=<port>.",
       );
     } else {
-      console.error(`Nudge Console server error: ${error.message}`);
+      console.error(
+        `Nudge Console server error: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+    context.close();
     process.exitCode = 1;
-  });
+    return;
+  }
+
+  console.log("\nNudge Console is ready");
+  if (runtime.remote) {
+    console.log(`  Listening: ${runtime.host}:${runtime.port}`);
+  } else {
+    console.log(`  Open: http://localhost:${runtime.port}`);
+  }
+  console.log(`  Data: ${context.dataDir()}`);
+  if (runtime.remote) console.log("  Mode: remote (HTTPS proxy required)");
+  if (auth.created) {
+    console.log("\nFirst-run console access code:");
+    console.log(`  ${auth.revealCapability()}`);
+    console.log("\nPaste this code into the login page. It is not part of the URL.");
+  } else {
+    console.log(`  Access code: stored (run \`${distributionCommands().auth}\` to show it)`);
+  }
+  console.log("  Stop: Ctrl+C\n");
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\nStopping Nudge Console (${signal})…`);
+    await server?.stop();
+    context.close();
+  };
+  const handleSignal = (signal: string) => {
+    // srvx's own graceful-shutdown plugin turns itself off when CI or TEST is
+    // set, so this handler must fully stop the process on its own; the unref'd
+    // timer backstops a close wedged on lingering keep-alive connections.
+    const backstop = setTimeout(() => process.exit(process.exitCode ?? 0), 5_000);
+    backstop.unref();
+    void shutdown(signal)
+      .catch((error: unknown) => {
+        console.error(`Nudge Console shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+      })
+      .finally(() => process.exit(process.exitCode ?? 0));
+  };
+  process.once("SIGINT", () => handleSignal("Ctrl+C"));
+  process.once("SIGTERM", () => handleSignal("SIGTERM"));
 }
 
 main().catch((error: unknown) => {
   console.error(
     `Nudge Console could not start.\n\n${error instanceof Error ? error.message : String(error)}\n\n` +
-      "Try `pnpm console` for development or check the CONSOLE_* settings in .env.example.",
+      `Try \`${distributionCommands().console}\` or check the CONSOLE_* settings in .env.`,
   );
   process.exitCode = 1;
 });

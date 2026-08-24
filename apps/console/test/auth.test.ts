@@ -1,25 +1,14 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { statSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createConsoleApp } from "../src/server/app.js";
 import { ConsoleAuth, rotateConsoleCapability } from "../src/server/auth.js";
 import { TEST_CAPABILITY, TEST_ORIGIN } from "./auth-helper.js";
-
-let root: string | undefined;
+import { makeWorkspace } from "./workspace.js";
 
 function workspace(): string {
-  root = mkdtempSync(join(tmpdir(), "console-auth-"));
-  writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
-  writeFileSync(join(root, ".env"), "PORT=59983\n");
-  mkdirSync(join(root, ".data"), { recursive: true });
-  return root;
+  return makeWorkspace({ prefix: "console-auth-", env: "PORT=59983\n" });
 }
-
-afterEach(() => {
-  if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined;
-});
 
 function request(path: string, init?: RequestInit, origin = TEST_ORIGIN): Request {
   return new Request(`${origin}${path}`, {

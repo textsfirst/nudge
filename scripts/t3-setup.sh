@@ -24,7 +24,37 @@ if [[ "$project_root" != "$worktree_root" ]]; then
     echo "Created .env from .env.example."
   fi
 
-  source_data="$project_root/.data"
+  # Pin the worktree to its own .data snapshot. Without this the default data
+  # dir resolves to the shared $XDG_CONFIG_HOME/nudge, and every worktree (and
+  # a copied absolute NUDGE_DATA_DIR) would open the main install's live state.
+  if [[ ! -e "$worktree_root/.env" ]]; then
+    touch "$worktree_root/.env"
+    chmod 600 "$worktree_root/.env"
+  fi
+  if grep -q '^NUDGE_DATA_DIR=' "$worktree_root/.env"; then
+    sed -i.t3bak 's|^NUDGE_DATA_DIR=.*|NUDGE_DATA_DIR=.data|' "$worktree_root/.env"
+    rm -f "$worktree_root/.env.t3bak"
+  else
+    printf '\nNUDGE_DATA_DIR=.data\n' >> "$worktree_root/.env"
+  fi
+
+  # Snapshot from wherever the main checkout actually keeps its data: an
+  # explicit NUDGE_DATA_DIR in its .env, else the XDG default.
+  main_data_dir=""
+  if [[ -f "$project_root/.env" ]]; then
+    main_data_dir="$(sed -n 's/^NUDGE_DATA_DIR=//p' "$project_root/.env" | tail -n 1)"
+    main_data_dir="${main_data_dir%%#*}"
+    main_data_dir="${main_data_dir%"${main_data_dir##*[![:space:]]}"}"
+    main_data_dir="${main_data_dir#\"}"
+    main_data_dir="${main_data_dir%\"}"
+  fi
+  if [[ -z "$main_data_dir" ]]; then
+    main_data_dir="${XDG_CONFIG_HOME:-$HOME/.config}/nudge"
+  elif [[ "$main_data_dir" != /* ]]; then
+    main_data_dir="$project_root/$main_data_dir"
+  fi
+
+  source_data="$main_data_dir"
   target_data="$worktree_root/.data"
 
   if [[ -d "$source_data" && ! -e "$target_data" ]]; then

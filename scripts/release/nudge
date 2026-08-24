@@ -1,0 +1,232 @@
+#!/bin/sh
+
+set -eu
+
+launcher_path="$0"
+symlink_hops=0
+while [ -L "$launcher_path" ]; do
+  symlink_hops=$((symlink_hops + 1))
+  if [ "$symlink_hops" -gt 40 ]; then
+    echo "Too many levels of symbolic links while resolving the nudge launcher: $0" >&2
+    exit 1
+  fi
+  link_target="$(readlink "$launcher_path")"
+  case "$link_target" in
+    /*) launcher_path="$link_target" ;;
+    *) launcher_path="$(dirname "$launcher_path")/$link_target" ;;
+  esac
+done
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$launcher_path")" && pwd -P)"
+release_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
+node="$release_root/runtime/bin/node"
+
+if [ ! -x "$node" ]; then
+  echo "Nudge's bundled Node runtime is missing or is not executable: $node" >&2
+  exit 1
+fi
+
+export PATH="$release_root/runtime/bin:$release_root/app/apps/server/bin:${PATH:-/usr/bin:/bin}"
+export NUDGE_DISTRIBUTION=release
+export NUDGE_CONSOLE_URL="${NUDGE_CONSOLE_URL:-http://localhost:3100}"
+
+command="${1:-help}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+case "$command" in
+  run|server)
+    exec "$node" "$release_root/app/apps/server/dist/index.js" "$@"
+    ;;
+  console)
+    exec "$node" "$release_root/app/apps/console/dist/server/index.js" "$@"
+    ;;
+  auth)
+    exec "$node" "$release_root/app/apps/console/dist/server/auth-cli.js" "$@"
+    ;;
+  exec)
+    if [ "$#" -eq 0 ]; then
+      echo "Usage: nudge exec <command> [args...]" >&2
+      exit 2
+    fi
+    exec "$@"
+    ;;
+  update)
+    check_only=0
+    if [ "${1:-}" = "--check" ]; then
+      check_only=1
+    fi
+
+    build_json="$release_root/BUILD.json"
+    if [ ! -f "$build_json" ]; then
+      echo "This install has no BUILD.json, so its release channel is unknown." >&2
+      echo "Download a fresh archive from GitHub releases instead." >&2
+      exit 1
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "Nudge update needs curl, which is not on PATH." >&2
+      exit 1
+    fi
+
+    current_version="$("$node" -p 'require(process.argv[1]).version' "$build_json")"
+    channel="$("$node" -p 'require(process.argv[1]).channel' "$build_json")"
+    build_platform="$("$node" -p 'require(process.argv[1]).platform' "$build_json")"
+    build_arch="$("$node" -p 'require(process.argv[1]).arch' "$build_json")"
+    repo="$("$node" -p 'require(process.argv[1]).repo || "textsfirst/nudge"' "$build_json")"
+
+    if [ "$channel" != "edge" ]; then
+      echo "Updates are published for the edge channel only; this is a $channel build." >&2
+      echo "Download a new archive from https://github.com/$repo/releases instead." >&2
+      exit 1
+    fi
+
+    asset="nudge-edge-$build_platform-$build_arch.tar.gz"
+    download_base="${NUDGE_UPDATE_BASE_URL:-https://github.com/$repo/releases/download/edge}"
+
+    # The publish job uploads the current version as a small VERSION asset, so
+    # a check never has to download the archive. Older releases lack it; an
+    # empty result falls through to the full download's own version compare.
+    latest_version=""
+    if latest_fetch="$(curl -fsSL --retry 2 "$download_base/VERSION" 2>/dev/null)"; then
+      latest_version="$(printf '%s\n' "$latest_fetch" | sed -n '1p')"
+    fi
+
+    if [ "$check_only" -eq 1 ]; then
+      if [ -z "$latest_version" ]; then
+        echo "Could not read the latest edge version from $download_base/VERSION." >&2
+        echo "Check your network access, or run 'nudge update' for a full comparison." >&2
+        exit 1
+      fi
+      echo "Installed:   $current_version"
+      echo "Latest edge: $latest_version"
+      if [ "$latest_version" = "$current_version" ]; then
+        echo "Up to date."
+      else
+        echo "Update available. Run 'nudge update' to install it."
+      fi
+      exit 0
+    fi
+
+    if [ -n "$latest_version" ] && [ "$latest_version" = "$current_version" ]; then
+      echo "Already up to date ($current_version)."
+      exit 0
+    fi
+
+    if ! command -v tar >/dev/null 2>&1; then
+      echo "Nudge update needs tar, which is not on PATH." >&2
+      exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+      checksum_cmd="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+      checksum_cmd="shasum -a 256"
+    else
+      echo "Nudge update needs sha256sum or shasum to verify downloads." >&2
+      exit 1
+    fi
+
+    # Stage next to the release root so the final mv stays on one filesystem.
+    if ! staging="$(mktemp -d "$(dirname "$release_root")/.nudge-update.XXXXXX")"; then
+      echo "Could not create a staging directory next to $release_root." >&2
+      exit 1
+    fi
+    trap 'rm -rf "$staging"' EXIT
+
+    echo "Downloading $download_base/$asset"
+    if ! curl -fL --progress-bar --retry 2 -o "$staging/$asset" "$download_base/$asset"; then
+      echo "Could not download $download_base/$asset." >&2
+      echo "Check your network access and that the edge release has a $build_platform-$build_arch archive." >&2
+      exit 1
+    fi
+    if ! curl -fsSL --retry 2 -o "$staging/SHA256SUMS" "$download_base/SHA256SUMS"; then
+      echo "Could not download $download_base/SHA256SUMS." >&2
+      exit 1
+    fi
+    if ! grep " $asset\$" "$staging/SHA256SUMS" > "$staging/checksum.txt"; then
+      echo "The edge release's SHA256SUMS does not list $asset." >&2
+      exit 1
+    fi
+    if ! (cd "$staging" && $checksum_cmd -c checksum.txt >/dev/null 2>&1); then
+      echo "Checksum verification failed for $asset." >&2
+      exit 1
+    fi
+
+    mkdir "$staging/extract"
+    tar -xzf "$staging/$asset" -C "$staging/extract"
+    new_bundle=""
+    for entry in "$staging/extract"/nudge-*; do
+      if [ -d "$entry" ]; then
+        new_bundle="$entry"
+        break
+      fi
+    done
+    if [ -z "$new_bundle" ]; then
+      echo "The downloaded archive does not contain a nudge-* release directory." >&2
+      exit 1
+    fi
+    new_version="$("$node" -p 'require(process.argv[1]).version' "$new_bundle/BUILD.json")"
+
+    if [ "$new_version" = "$current_version" ]; then
+      echo "Already up to date ($current_version)."
+      exit 0
+    fi
+
+    # The swap replaces the directory this script runs from, so hand off to a
+    # helper in the staging area. An exec'd shell keeps its script fd open, so
+    # the helper may delete its own directory at the end.
+    helper="$staging/swap.sh"
+    cat > "$helper" <<'EOF'
+#!/bin/sh
+set -eu
+release_root="$1"
+new_bundle="$2"
+staging="$3"
+old_version="$4"
+new_version="$5"
+backup="$release_root.old.$$"
+mv "$release_root" "$backup"
+if ! mv "$new_bundle" "$release_root"; then
+  mv "$backup" "$release_root"
+  rm -rf "$staging"
+  echo "The update failed while swapping release directories; the previous release was restored." >&2
+  exit 1
+fi
+rm -rf "$backup" "$staging"
+printf 'Updated %s → %s\n' "$old_version" "$new_version"
+echo "Restart the Nudge server and console to run the new build."
+echo "Runtime state lives outside the release directory and was not touched."
+EOF
+    chmod 755 "$helper"
+    exec /bin/sh "$helper" "$release_root" "$new_bundle" "$staging" "$current_version" "$new_version"
+    ;;
+  version|--version|-v)
+    version="$(sed -n '1p' "$release_root/VERSION")"
+    commit="$(sed -n '1p' "$release_root/COMMIT")"
+    node_version="$($node --version)"
+    printf 'Nudge %s (%s)\nNode %s\n' "$version" "$commit" "$node_version"
+    ;;
+  help|--help|-h)
+    cat <<'EOF'
+Nudge
+
+Usage:
+  nudge run                  start the iMessage agent server
+  nudge console              start the production console on port 3100
+  nudge auth [show|rotate]   manage the console access code
+  nudge exec <cmd> [args..]  run a command with the release PATH and env
+  nudge update [--check]     replace this install with the latest edge build
+                             (--check only reports whether one is available)
+  nudge version              show the build commit and Node version
+
+Run Nudge from the directory that holds .env. Runtime state defaults to
+$XDG_CONFIG_HOME/nudge or ~/.config/nudge. The release files can live elsewhere
+and can be replaced without touching that state.
+EOF
+    ;;
+  *)
+    echo "Unknown command: $command" >&2
+    echo "Run 'nudge help' for usage." >&2
+    exit 2
+    ;;
+esac
